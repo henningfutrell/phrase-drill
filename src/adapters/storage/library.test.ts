@@ -72,7 +72,8 @@ describe('parseLibraryFile', () => {
   })
 
   it('refuses a library missing a schemaVersion', () => {
-    const { schemaVersion: _schemaVersion, ...withoutVersion } = validLibrary
+    const withoutVersion: Record<string, unknown> = { ...validLibrary }
+    delete withoutVersion.schemaVersion
     const result = parseLibraryFile(JSON.stringify(withoutVersion))
     expect(result).toEqual({ ok: false, reason: 'invalid' })
   })
