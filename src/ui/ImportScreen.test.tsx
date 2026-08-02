@@ -302,3 +302,58 @@ describe('ImportScreen — review & assign', () => {
     expect(onSave).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('ImportScreen — backup nudge after a successful Scan', () => {
+  const drafts: DraftPhrase[] = [{ french: 'Bonjour', english: 'Hello' }]
+
+  it('shows the nudge once the Scan has produced Draft Phrases, when showBackupNudge is true', async () => {
+    const { reader, read } = fakeScanReader()
+    read.mockResolvedValue(drafts)
+    const onDismissBackupNudge = vi.fn()
+    render(
+      <ImportScreen
+        decks={[]}
+        scanReader={reader}
+        onSave={vi.fn()}
+        onCancel={vi.fn()}
+        showBackupNudge
+        onDismissBackupNudge={onDismissBackupNudge}
+      />,
+    )
+    chooseFile(container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement, file())
+    await flush()
+
+    const nudge = container.querySelector('[data-testid="backup-nudge"]')
+    expect(nudge).not.toBeNull()
+    expect(nudge?.textContent).toContain('back up your phrases in Settings')
+
+    click(container.querySelector('[data-testid="dismiss-backup-nudge"]'))
+    expect(onDismissBackupNudge).toHaveBeenCalledTimes(1)
+  })
+
+  it('omits the nudge once dismissed (showBackupNudge false)', async () => {
+    const { reader, read } = fakeScanReader()
+    read.mockResolvedValue(drafts)
+    render(
+      <ImportScreen
+        decks={[]}
+        scanReader={reader}
+        onSave={vi.fn()}
+        onCancel={vi.fn()}
+        showBackupNudge={false}
+      />,
+    )
+    chooseFile(container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement, file())
+    await flush()
+
+    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
+  })
+
+  it('never shows the nudge before a Scan has succeeded (capture step)', () => {
+    const { reader } = fakeScanReader()
+    render(
+      <ImportScreen decks={[]} scanReader={reader} onSave={vi.fn()} onCancel={vi.fn()} showBackupNudge />,
+    )
+    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
+  })
+})

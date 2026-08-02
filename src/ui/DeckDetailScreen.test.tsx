@@ -79,6 +79,12 @@ describe('DeckDetailScreen', () => {
     expect(container.textContent).toContain('Add phrases')
   })
 
+  it('does not offer Drill this Deck on an empty Deck — nothing to drill, not audio still generating', () => {
+    const { onDrillDeck } = renderScreen({ ...threePhraseDeck, phrases: [] })
+    expect(container.querySelector('[data-testid="drill-deck"]')).toBeNull()
+    expect(onDrillDeck).not.toHaveBeenCalled()
+  })
+
   it('adds a Phrase from the Add phrase sheet', () => {
     const { onAddPhrase } = renderScreen({ ...threePhraseDeck, phrases: [] })
     act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
