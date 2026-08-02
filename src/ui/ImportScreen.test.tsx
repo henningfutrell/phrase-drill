@@ -242,7 +242,7 @@ describe('ImportScreen — review & assign', () => {
     await renderInReview([home])
     click(container.querySelector('[data-testid="deck-option-home"]'))
     click(container.querySelector('[data-testid="delete-draft-0"]'))
-    click(container.querySelector('[data-testid="delete-draft-1"]'))
+    click(container.querySelector('[data-testid="delete-draft-0"]'))
     const save = container.querySelector('[data-testid="save-import"]') as HTMLButtonElement
     expect(save.disabled).toBe(true)
   })
