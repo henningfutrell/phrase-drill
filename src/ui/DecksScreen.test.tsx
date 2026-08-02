@@ -73,6 +73,61 @@ describe('DecksScreen', () => {
     expect(container.textContent).toContain('Nothing here yet')
   })
 
+  it('shows the backup nudge on the empty state when showBackupNudge is true', () => {
+    const onDismissBackupNudge = vi.fn()
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          showBackupNudge
+          onDismissBackupNudge={onDismissBackupNudge}
+        />,
+      )
+    })
+    const nudge = container.querySelector('[data-testid="backup-nudge"]')
+    expect(nudge).not.toBeNull()
+    expect(nudge?.textContent).toContain('back up your phrases in Settings')
+
+    click(container.querySelector('[data-testid="dismiss-backup-nudge"]')!)
+    expect(onDismissBackupNudge).toHaveBeenCalledTimes(1)
+  })
+
+  it('omits the backup nudge once dismissed (showBackupNudge false)', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          showBackupNudge={false}
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
+  })
+
+  it('omits the backup nudge once there are Decks, even if not yet dismissed', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 3)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          showBackupNudge
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
+  })
+
   it('renders a Mix decks link that calls onOpenMix when provided', () => {
     const onOpenMix = vi.fn()
     act(() => {

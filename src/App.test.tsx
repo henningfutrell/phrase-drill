@@ -16,7 +16,13 @@ const { shareBackupFile } = await import('./adapters/share/web-share')
 /** In-memory SettingsStore fake — the real one is exercised in
  * src/adapters/storage; App's wiring is what these tests care about. */
 function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore {
-  let settings: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null, ...initial }
+  let settings: Settings = {
+    anthropicApiKey: null,
+    elevenLabsApiKey: null,
+    voice: null,
+    backupNudgeDismissed: false,
+    ...initial,
+  }
   return {
     async load() {
       return settings
@@ -29,6 +35,9 @@ function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore
     },
     async setVoice(voice) {
       settings = { ...settings, voice }
+    },
+    async dismissBackupNudge() {
+      settings = { ...settings, backupNudgeDismissed: true }
     },
   }
 }
@@ -605,5 +614,56 @@ describe('App wired to Import', () => {
     expect(generationQueue.enqueued.map((p) => ({ french: p.french, english: p.english }))).toEqual(drafts)
     // Import is left behind — she lands somewhere that shows the result, not back on the capture screen.
     expect(container.querySelector('[data-testid="take-photo"]')).toBeNull()
+  })
+})
+
+describe('App wired to the backup nudge (T027)', () => {
+  it('shows the backup nudge on the Decks empty state when not yet dismissed', async () => {
+    const store = createFakeDeckStore([])
+    await renderApp(store, createFakeSettingsStore({ backupNudgeDismissed: false }))
+    expect(container.querySelector('[data-testid="backup-nudge"]')).not.toBeNull()
+  })
+
+  it('omits the backup nudge on the Decks empty state once dismissed', async () => {
+    const store = createFakeDeckStore([])
+    await renderApp(store, createFakeSettingsStore({ backupNudgeDismissed: true }))
+    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
+  })
+
+  it('persists dismissal through SettingsStore and hides the nudge immediately, without a reload', async () => {
+    const store = createFakeDeckStore([])
+    const settingsStore = createFakeSettingsStore({ backupNudgeDismissed: false })
+    const dismissSpy = vi.spyOn(settingsStore, 'dismissBackupNudge')
+    await renderApp(store, settingsStore)
+
+    await act(async () => click(container.querySelector('[data-testid="dismiss-backup-nudge"]')!))
+
+    expect(dismissSpy).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
+    expect((await settingsStore.load()).backupNudgeDismissed).toBe(true)
+  })
+
+  it('carries the nudge to Scan review too, dismissible from either place', async () => {
+    const store = createFakeDeckStore([])
+    const scanReader = createFakeScanReader()
+    scanReader.read.mockResolvedValue([{ french: 'Bonjour', english: 'Hello' }])
+    await renderApp(
+      store,
+      createFakeSettingsStore({ anthropicApiKey: 'sk-ant', backupNudgeDismissed: false }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      scanReader,
+    )
+
+    await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
+    const input = container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement
+    Object.defineProperty(input, 'files', {
+      value: { 0: new File(['x'], 'p.jpg', { type: 'image/jpeg' }), length: 1, item: () => null } as unknown as FileList,
+      configurable: true,
+    })
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+
+    expect(container.querySelector('[data-testid="backup-nudge"]')).not.toBeNull()
   })
 })

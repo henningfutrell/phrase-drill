@@ -75,14 +75,16 @@ export function DeckDetailScreen({
         )}
       </header>
 
-      <button
-        type="button"
-        data-testid="drill-deck"
-        className="btn-primary"
-        onClick={onDrillDeck}
-      >
-        Drill this Deck
-      </button>
+      {deck.phrases.length > 0 && (
+        <button
+          type="button"
+          data-testid="drill-deck"
+          className="btn-primary"
+          onClick={onDrillDeck}
+        >
+          Drill this Deck
+        </button>
+      )}
 
       {deck.phrases.length === 0 ? (
         <p className="empty-state">Add phrases to drill this Deck.</p>

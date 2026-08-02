@@ -292,6 +292,14 @@ first-class state, not an error:
   The sketched second action, `Scan a page into this Deck`, was not built. Scan
   is reachable only from the Decks list header (§3.2), and picks its target Deck
   inside the flow rather than inheriting it from the screen it was started on.
+  **`Drill this Deck` is not offered here either** (T027 fix) — it used to be
+  pinned under the header regardless of phrase count, and starting it on an
+  empty Deck landed on the `none-ready` blocked state, whose copy ("This
+  drill's audio isn't ready yet — it's still being made") was written for
+  phrases that exist but have no Clip yet, not for a Deck with nothing in it.
+  Rather than invent a second `DrillReadinessReason` for a case the button
+  should never reach, the button itself is withheld when `deck.phrases.length
+  === 0`; the empty-state line above is the only thing shown.
 - **Delete Deck:** reached from the header's `Delete Deck` control, which turns
   into a second-tap confirm button in place — `Delete "Climbing" and its 14
   phrases?` — not a sheet as sketched. States the phrase count being deleted
@@ -442,12 +450,15 @@ here: app name, nothing else. Not built — there is no About section in the
 shipped screen. A small, low-risk omission, named here rather than silently
 dropped.
 
-**Unbuilt intention — first-run backup nudge.** The sketch called for a
-one-line, dismiss-once nudge ("Tip: back up your phrases in Settings") on the
-Decks empty-state and after the first successful Scan, so backup would be
-discoverable without anyone opening Settings cold. Neither nudge is present in
-the shipped Decks empty state, and none after a Scan, though Scan itself is now
-reachable from the Decks header (§3.2, §3.5) and could carry one.
+**First-run backup nudge (T027).** A one-line, dismiss-once nudge — `Tip: back
+up your phrases in Settings.` plus a `Got it` dismiss — appears in two places:
+the Decks empty state (§3.2, below the `Nothing here yet…` line) and the Scan
+review step (§3.5 Step 3, above the Draft Phrase list), the moment a Scan has
+actually produced phrases to save. One flag backs both: `Settings.
+backupNudgeDismissed`, `false` until she dismisses the nudge from either
+place, `true` and permanent after — there is no way back to shown. It is not
+part of the exported backup itself, same treatment as the API keys and the
+pinned voice (§3.6, `DeckStore.exportAll()` cannot see it).
 
 ---
 
