@@ -1,7 +1,28 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SettingsScreen } from './SettingsScreen'
+import { SettingsScreen, type VoiceOption } from './SettingsScreen'
+
+const RACHEL: VoiceOption = {
+  provider: 'elevenlabs',
+  modelId: 'eleven_multilingual_v2',
+  voiceId: 'voice-rachel',
+  name: 'Rachel',
+  description: 'Female voice, American-accented English speaking French.',
+}
+const CHARLOTTE: VoiceOption = {
+  provider: 'elevenlabs',
+  modelId: 'eleven_multilingual_v2',
+  voiceId: 'voice-charlotte',
+  name: 'Charlotte',
+  description: 'Female voice, European-accented English speaking French.',
+}
+const VOICES: VoiceOption[] = [RACHEL, CHARLOTTE]
+
+/** Resolves after a microtask so a promise-returning handler's `.then` runs before assertions. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
 
 function typeInto(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
@@ -37,6 +58,10 @@ function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> =
     onClearAnthropicKey: vi.fn(),
     onSaveElevenLabsKey: vi.fn(),
     onClearElevenLabsKey: vi.fn(),
+    voices: VOICES,
+    previewText: 'Bonjour, comment ça va ?',
+    onPreviewVoice: vi.fn().mockResolvedValue({ ok: true }),
+    onChooseVoice: vi.fn(),
     onExportBackup: vi.fn().mockResolvedValue('shared'),
     onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: true }),
     onConfirmRestore: vi.fn().mockResolvedValue(undefined),
@@ -152,28 +177,138 @@ describe('SettingsScreen', () => {
     expect(container.textContent).toMatch(/backup|export/i)
   })
 
-  it('displays the pinned voice when one is set', () => {
-    renderScreen({
-      voice: { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' },
+  describe('voice picker', () => {
+    it('shows a calm explanation, not an error, when no voice is pinned yet', () => {
+      renderScreen({ voice: null })
+      const display = container.querySelector('[data-testid="voice-display"]')
+      expect(display?.textContent).not.toMatch(/error|failed/i)
+      expect(display?.textContent).toMatch(/no voice/i)
     })
-    const display = container.querySelector('[data-testid="voice-display"]')
-    expect(display?.textContent).toContain('elevenlabs')
-    expect(display?.textContent).toContain('eleven_multilingual_v2')
-    expect(display?.textContent).toContain('voice-1')
-  })
 
-  it('warns that changing the voice regenerates every clip, when a voice is set', () => {
-    renderScreen({
-      voice: { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' },
+    it('lists every voice in the catalogue with its plain-language description', () => {
+      renderScreen()
+      expect(container.querySelector('[data-testid="voice-option-voice-rachel"]')).not.toBeNull()
+      expect(container.querySelector('[data-testid="voice-option-voice-charlotte"]')).not.toBeNull()
+      expect(container.querySelector('[data-testid="voice-option-voice-rachel"]')?.textContent).toContain(
+        'American-accented',
+      )
     })
-    expect(container.textContent).toMatch(/regenerat/i)
-  })
 
-  it('shows a calm explanation, not an error, when no voice is pinned yet', () => {
-    renderScreen({ voice: null })
-    const display = container.querySelector('[data-testid="voice-display"]')
-    expect(display?.textContent).not.toMatch(/error|failed/i)
-    expect(display?.textContent).toMatch(/not|no voice/i)
+    it('marks the currently pinned voice distinctly from the others', () => {
+      renderScreen({
+        voice: { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-rachel' },
+      })
+      expect(container.querySelector('[data-testid="voice-current-voice-rachel"]')).not.toBeNull()
+      expect(container.querySelector('[data-testid="voice-current-voice-charlotte"]')).toBeNull()
+    })
+
+    it('previews a voice using the real phrase text handed to it, not a hardcoded one', async () => {
+      const props = renderScreen({ previewText: 'Où est la gare ?', elevenLabsKeyPresent: true })
+      await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
+
+      expect(props.onPreviewVoice).toHaveBeenCalledTimes(1)
+      const [voiceArg, textArg] = vi.mocked(props.onPreviewVoice).mock.calls[0]!
+      expect(voiceArg).toEqual({ modelId: 'eleven_multilingual_v2', voiceId: 'voice-rachel' })
+      expect(textArg).toBe('Où est la gare ?')
+    })
+
+    it('passes a fresh AbortSignal to each preview', async () => {
+      const props = renderScreen({ elevenLabsKeyPresent: true })
+      await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
+      const [, , signal] = vi.mocked(props.onPreviewVoice).mock.calls[0]!
+      expect(signal).toBeInstanceOf(AbortSignal)
+      expect(signal.aborted).toBe(false)
+    })
+
+    it('aborts an in-flight preview when a different voice is tapped', async () => {
+      let resolveFirst: (v: { ok: true }) => void
+      const firstPreview = new Promise<{ ok: true }>((resolve) => {
+        resolveFirst = resolve
+      })
+      const onPreviewVoice = vi.fn().mockReturnValueOnce(firstPreview).mockResolvedValue({ ok: true })
+      renderScreen({ onPreviewVoice, elevenLabsKeyPresent: true })
+
+      act(() => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
+      const [, , firstSignal] = onPreviewVoice.mock.calls[0]!
+      await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-charlotte"]')!))
+
+      expect(firstSignal.aborted).toBe(true)
+      resolveFirst!({ ok: true })
+    })
+
+    it('aborts an in-flight preview on unmount', () => {
+      let capturedSignal: AbortSignal | undefined
+      const onPreviewVoice = vi.fn(
+        (_voice: { modelId: string; voiceId: string }, _text: string, signal: AbortSignal) => {
+          capturedSignal = signal
+          return new Promise<{ ok: true }>(() => {
+            // never resolves — simulates an in-flight request
+          })
+        },
+      )
+      renderScreen({ onPreviewVoice, elevenLabsKeyPresent: true })
+      act(() => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
+
+      act(() => root.unmount())
+
+      expect(capturedSignal?.aborted).toBe(true)
+    })
+
+    it('shows a plain-language error inline when a preview fails, without blocking the screen', async () => {
+      renderScreen({ onPreviewVoice: vi.fn().mockResolvedValue({ ok: false, reason: 'network' }), elevenLabsKeyPresent: true })
+      await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
+      await flush()
+
+      const error = container.querySelector('[data-testid="voice-preview-error"]')
+      expect(error).not.toBeNull()
+      expect(error!.textContent).not.toMatch(/error|failed/i)
+    })
+
+    it('disables preview when no speech key is saved yet, and says why', () => {
+      renderScreen({ elevenLabsKeyPresent: false })
+      const preview = container.querySelector('[data-testid="voice-preview-voice-rachel"]') as HTMLButtonElement
+      expect(preview.disabled).toBe(true)
+      expect(container.querySelector('[data-testid="voice-preview-needs-key"]')).not.toBeNull()
+    })
+
+    it('warns, before committing, that switching voices regenerates every phrase and takes a while — not "cache invalidation"', async () => {
+      renderScreen()
+      await act(async () => click(container.querySelector('[data-testid="voice-choose-voice-rachel"]')!))
+
+      const sheet = container.querySelector('[data-testid="voice-confirm-sheet"]')
+      expect(sheet).not.toBeNull()
+      expect(sheet!.textContent).toMatch(/again|remade|made again/i)
+      expect(sheet!.textContent).toMatch(/while|time/i)
+      expect(sheet!.textContent).not.toMatch(/cache|invalidat/i)
+    })
+
+    it('does not choose the voice until the warning is confirmed', async () => {
+      const props = renderScreen()
+      await act(async () => click(container.querySelector('[data-testid="voice-choose-voice-rachel"]')!))
+      expect(props.onChooseVoice).not.toHaveBeenCalled()
+    })
+
+    it('chooses the voice through onChooseVoice once confirmed', async () => {
+      const props = renderScreen()
+      await act(async () => click(container.querySelector('[data-testid="voice-choose-voice-rachel"]')!))
+      await act(async () => click(container.querySelector('[data-testid="voice-confirm"]')!))
+
+      expect(props.onChooseVoice).toHaveBeenCalledWith({
+        provider: 'elevenlabs',
+        modelId: 'eleven_multilingual_v2',
+        voiceId: 'voice-rachel',
+      })
+      expect(container.querySelector('[data-testid="voice-confirm-sheet"]')).toBeNull()
+    })
+
+    it('dismisses the warning without choosing anything when cancelled', async () => {
+      const props = renderScreen()
+      await act(async () => click(container.querySelector('[data-testid="voice-choose-voice-rachel"]')!))
+      await act(async () => click(container.querySelector('[data-testid="voice-cancel"]')!))
+
+      expect(props.onChooseVoice).not.toHaveBeenCalled()
+      expect(container.querySelector('[data-testid="voice-confirm-sheet"]')).toBeNull()
+    })
   })
 
   it('calls onBack when the back control is tapped', () => {

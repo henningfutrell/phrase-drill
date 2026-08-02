@@ -5,6 +5,7 @@ import App from './App'
 import type { Deck, DeckStore, Library } from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { Settings, SettingsStore } from './adapters/storage'
+import type { SynthClient, SynthResult } from './adapters/audio/eleven-labs-synth-client'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
@@ -13,8 +14,8 @@ const { shareBackupFile } = await import('./adapters/share/web-share')
 
 /** In-memory SettingsStore fake — the real one is exercised in
  * src/adapters/storage; App's wiring is what these tests care about. */
-function createFakeSettingsStore(): SettingsStore {
-  let settings: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null }
+function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore {
+  let settings: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null, ...initial }
   return {
     async load() {
       return settings
@@ -57,6 +58,16 @@ function createFakeDeckStore(initial: readonly Deck[] = []): DeckStore & { decks
   }
 }
 
+/** In-memory SynthClient fake — the real ElevenLabs adapter is exercised in
+ * src/adapters/audio; App's wiring (which text/voice it hands over, whether
+ * it aborts) is what these tests care about. */
+function createFakeSynthClient(): SynthClient & { synthesize: ReturnType<typeof vi.fn> } {
+  const synthesize = vi.fn(
+    async (): Promise<SynthResult> => ({ bytes: new ArrayBuffer(0), durationMs: 0 }),
+  )
+  return { synthesize }
+}
+
 function typeInto(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
   setter.call(input, value)
@@ -81,9 +92,13 @@ afterEach(() => {
   container.remove()
 })
 
-async function renderApp(store: DeckStore) {
+async function renderApp(
+  store: DeckStore,
+  settingsStore: SettingsStore = createFakeSettingsStore(),
+  synthClient: SynthClient = createFakeSynthClient(),
+) {
   await act(async () => {
-    root.render(<App deckStore={store} settingsStore={createFakeSettingsStore()} />)
+    root.render(<App deckStore={store} settingsStore={settingsStore} synthClient={synthClient} />)
   })
 }
 
@@ -261,5 +276,68 @@ describe('App wired to backup and restore', () => {
 
     expect(container.querySelector('[data-testid="restore-confirm-sheet"]')).toBeNull()
     expect(importCalled).toBe(false)
+  })
+})
+
+describe('App wired to voice preview and selection', () => {
+  it('previews the first phrase in the library, in the tapped voice, through SynthClient', async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Où est la gare ?', english: 'Where is the station?' }] },
+    ])
+    const synthClient = createFakeSynthClient()
+    await renderApp(store, createFakeSettingsStore({ elevenLabsApiKey: 'el-key' }), synthClient)
+    await openSettings()
+
+    const firstVoice = container.querySelector('[data-testid^="voice-preview-"]') as HTMLButtonElement
+    await act(async () => click(firstVoice))
+
+    expect(synthClient.synthesize).toHaveBeenCalledTimes(1)
+    const [text, lang] = synthClient.synthesize.mock.calls[0]!
+    expect(text).toBe('Où est la gare ?')
+    expect(lang).toBe('fr-FR')
+  })
+
+  it('falls back to a built-in French phrase to preview when the library has no phrases', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const synthClient = createFakeSynthClient()
+    await renderApp(store, createFakeSettingsStore({ elevenLabsApiKey: 'el-key' }), synthClient)
+    await openSettings()
+
+    const firstVoice = container.querySelector('[data-testid^="voice-preview-"]') as HTMLButtonElement
+    await act(async () => click(firstVoice))
+
+    const [text] = synthClient.synthesize.mock.calls[0]!
+    expect(typeof text).toBe('string')
+    expect((text as string).length).toBeGreaterThan(0)
+  })
+
+  it('persists the picked voice through SettingsStore.setVoice once the regeneration warning is confirmed', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const settingsStore = createFakeSettingsStore()
+    const setVoiceSpy = vi.spyOn(settingsStore, 'setVoice')
+    await renderApp(store, settingsStore)
+    await openSettings()
+
+    const chooseButton = container.querySelector('[data-testid^="voice-choose-"]') as HTMLButtonElement
+    const voiceTestId = chooseButton.getAttribute('data-testid')!
+    const voiceId = voiceTestId.replace('voice-choose-', '')
+    await act(async () => click(chooseButton))
+    await act(async () => click(container.querySelector('[data-testid="voice-confirm"]')!))
+
+    expect(setVoiceSpy).toHaveBeenCalledWith(expect.objectContaining({ provider: 'elevenlabs', voiceId }))
+  })
+
+  it('shows the newly picked voice as current after it is chosen', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store)
+    await openSettings()
+
+    const chooseButton = container.querySelector('[data-testid^="voice-choose-"]') as HTMLButtonElement
+    const voiceTestId = chooseButton.getAttribute('data-testid')!
+    const voiceId = voiceTestId.replace('voice-choose-', '')
+    await act(async () => click(chooseButton))
+    await act(async () => click(container.querySelector('[data-testid="voice-confirm"]')!))
+
+    expect(container.querySelector(`[data-testid="voice-current-${voiceId}"]`)).not.toBeNull()
   })
 })
