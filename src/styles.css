@@ -4,22 +4,7 @@
  * Mix, Scan, and Settings land with their own tasks.
  */
 
-:root {
-  --bg: #101114;
-  --surface: #1a1c20;
-  --ink: #f4f3ef;
-  --ink-dim: #8b8d94;
-  --accent: #ff8a3d;
-  --accent-dim: #7a4726;
-  --danger: #e5484d;
-  --ok: #3ecf8e;
-
-  --text-xs: 13px;
-  --text-sm: 15px;
-  --text-base: 17px;
-  --text-lg: 20px;
-  --text-xl: 28px;
-}
+@import './styles/tokens.css';
 
 * {
   box-sizing: border-box;
