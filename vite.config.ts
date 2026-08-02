@@ -4,7 +4,14 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
+// GitHub Pages serves this app from https://henningfutrell.github.io/phrase-drill/
+// (gh-pages branch, shared with an unrelated spike/ diagnostic — see
+// scripts/deploy.sh), not from a domain root, so every built asset path and
+// the PWA manifest's identity have to carry this sub-path.
+const base = '/phrase-drill/'
+
 export default defineConfig({
+  base,
   plugins: [
     react(),
     VitePWA({
@@ -21,13 +28,13 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
       },
       manifest: {
-        id: '/',
+        id: base,
         name: 'phrase-drill',
         short_name: 'phrase-drill',
         description:
           'Drill saved French phrases on your phone, including offline.',
-        start_url: '/',
-        scope: '/',
+        start_url: base,
+        scope: base,
         display: 'standalone',
         orientation: 'portrait',
         // Design palette (docs/design.md): both fields use `--bg`, not
