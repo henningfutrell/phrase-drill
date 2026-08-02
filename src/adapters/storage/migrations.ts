@@ -12,8 +12,13 @@ export type PhraseRecordV1 = PhraseRecord
  * exact number as the target of every migration. Bump it, and add the
  * matching step to `DECK_MIGRATIONS`, in the same change as any record shape
  * change — this is the versioning rule the user's saved phrases depend on.
+ *
+ * v1 -> v2 (T021): the `clips` store was added. Deck records are untouched —
+ * see `DECK_MIGRATIONS[1]` below — but the database version, and therefore
+ * `Library.schemaVersion`, still advances, because the two are one number
+ * by design (T002 §4).
  */
-export const CURRENT_SCHEMA_VERSION = 1
+export const CURRENT_SCHEMA_VERSION = 2
 
 /** One step of a migration chain: a pure transform from a version-n record to version-(n+1). */
 export type RecordMigration = (record: never) => unknown
@@ -48,11 +53,22 @@ export function applyMigrations(
 }
 
 /**
- * No migrations yet — schema version 1 is the only shape a deck record has
- * ever had. The next record shape change adds a step here, indexed by the
- * version it migrates *from* (`DECK_MIGRATIONS[1]` migrates v1 -> v2).
+ * Indexed by the version each step migrates *from*
+ * (`DECK_MIGRATIONS[1]` migrates v1 -> v2). Index 0 (v0 -> v1) never
+ * existed — v1 was the first shape a deck record ever had — so it is a
+ * throwing placeholder rather than a silent gap.
  */
-const DECK_MIGRATIONS: readonly RecordMigration[] = []
+const neverExisted: RecordMigration = (() => {
+  throw new Error('schema version 0 never existed; there is nothing to migrate from')
+}) as RecordMigration
+
+/**
+ * v1 -> v2: the `clips` store landed beside `decks`, not inside it — the
+ * deck record shape itself does not change, so this step is identity.
+ */
+const v1ToV2: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
+
+const DECK_MIGRATIONS: readonly RecordMigration[] = [neverExisted, v1ToV2]
 
 /**
  * Bring a deck record from `fromVersion` up to the current schema. The same
