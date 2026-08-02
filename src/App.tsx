@@ -29,7 +29,12 @@ import { ImportScreen, type ImportTarget } from './ui/ImportScreen'
 import { DrillScreen, type DrillReadinessResult } from './ui/DrillScreen'
 import { SettingsScreen, type ExportOutcome, type PreviewOutcome, type RestoreFileResult } from './ui/SettingsScreen'
 
-const EMPTY_SETTINGS: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null }
+const EMPTY_SETTINGS: Settings = {
+  anthropicApiKey: null,
+  elevenLabsApiKey: null,
+  voice: null,
+  backupNudgeDismissed: false,
+}
 
 /**
  * Stands in for the DrillScreen's required `speech` prop while no voice is
@@ -234,6 +239,16 @@ function App({
     void settingsStore.setVoice(voice)
   }
 
+  /**
+   * The first-run backup nudge (docs/design.md §3.6, T027) — one flag,
+   * dismissed once from wherever it's shown (Decks empty state or after a
+   * successful Scan), never shown again.
+   */
+  function handleDismissBackupNudge(): void {
+    setSettings((current) => ({ ...current, backupNudgeDismissed: true }))
+    void settingsStore.dismissBackupNudge()
+  }
+
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
 
   function withSelectedDeck(fn: (deck: Deck) => Deck): Deck | undefined {
@@ -359,6 +374,8 @@ function App({
         onOpenSettings={() => setSettingsOpen(true)}
         onSave={handleImportSave}
         onCancel={() => setImportOpen(false)}
+        showBackupNudge={!settings.backupNudgeDismissed}
+        onDismissBackupNudge={handleDismissBackupNudge}
       />
     )
   }
@@ -409,6 +426,8 @@ function App({
       onOpenSettings={() => setSettingsOpen(true)}
       onOpenMix={() => setMixOpen(true)}
       onOpenImport={() => setImportOpen(true)}
+      showBackupNudge={!settings.backupNudgeDismissed}
+      onDismissBackupNudge={handleDismissBackupNudge}
     />
   )
 }
