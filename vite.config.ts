@@ -30,8 +30,16 @@ export default defineConfig({
         scope: '/',
         display: 'standalone',
         orientation: 'portrait',
-        theme_color: '#7e14ff',
-        background_color: '#ffffff',
+        // Design palette (docs/design.md): both fields use `--bg`, not
+        // `--accent`. `background_color` is the splash-screen ground, so it
+        // is literally the app's background token. `theme_color` tints the
+        // OS/browser chrome (status bar, task switcher) — the design reserves
+        // `--accent` for exactly three UI states (live beat, primary action,
+        // current selection) and is explicit that it "never decorates";
+        // tinting chrome with it would be a fourth, undesigned use, so chrome
+        // gets `--bg` too and stays dark and neutral like the rest of the app.
+        theme_color: '#101114',
+        background_color: '#101114',
         icons: [
           {
             src: 'icons/icon-192.png',

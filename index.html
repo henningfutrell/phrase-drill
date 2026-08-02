@@ -13,7 +13,13 @@
     -->
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <!--
+      `default` renders a light status bar with dark text — wrong against
+      the design's dark-by-default background (docs/design.md).
+      `black-translucent` lets the app's own dark background show through,
+      with light status-bar text/icons, matching the rest of the app.
+    -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="phrase-drill" />
   </head>
   <body>
