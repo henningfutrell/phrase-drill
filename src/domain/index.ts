@@ -1,5 +1,13 @@
 export type { Phrase, PhraseId } from './phrase'
 export type { Deck, DeckId } from './deck'
+export {
+  createDeck,
+  renameDeck,
+  addPhrase,
+  updatePhrase,
+  removePhrase,
+  reorderPhrase,
+} from './deck'
 export type {
   Language,
   SpeechPort,
