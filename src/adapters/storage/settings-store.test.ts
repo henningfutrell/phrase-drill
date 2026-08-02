@@ -23,7 +23,31 @@ describe('createIndexedDbSettingsStore', () => {
       anthropicApiKey: null,
       elevenLabsApiKey: null,
       voice: null,
+      backupNudgeDismissed: false,
     })
+  })
+
+  it('reports the backup nudge as not dismissed until dismissed', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    expect((await store.load()).backupNudgeDismissed).toBe(false)
+  })
+
+  it('dismisses the backup nudge permanently', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    await store.dismissBackupNudge()
+
+    expect((await store.load()).backupNudgeDismissed).toBe(true)
+  })
+
+  it('keeps the backup nudge dismissed across reloads, independent of keys and voice', async () => {
+    const store = createIndexedDbSettingsStore()
+    await store.dismissBackupNudge()
+
+    await store.setAnthropicApiKey('sk-ant-abc123')
+
+    expect((await store.load()).backupNudgeDismissed).toBe(true)
   })
 
   it('saves and reloads the Anthropic key', async () => {
