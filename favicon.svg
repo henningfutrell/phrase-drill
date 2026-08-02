@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="46" viewBox="0 0 48 46">
+  <!--
+    Browser-tab favicon, matching public/icons/icon-source.svg: the same
+    accent-token "beat row" bars from the design palette (docs/design.md),
+    on a transparent ground so it sits on the browser's own tab chrome.
+  -->
+  <rect x="6" y="15" width="6" height="16" rx="3" fill="#ff8a3d" />
+  <rect x="16" y="10" width="6" height="26" rx="3" fill="#ff8a3d" />
+  <rect x="26" y="13" width="6" height="20" rx="3" fill="#ff8a3d" />
+  <rect x="36" y="8" width="6" height="30" rx="3" fill="#ff8a3d" />
+</svg>

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/phrase-drill/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>phrase-drill</title>
+
+    <!--
+      iOS Safari does not read the web app manifest for these — each has to
+      be a head tag of its own, or "Add to Home Screen" silently falls back
+      to a Safari-chrome tab instead of a standalone app. See docs/pwa.md.
+    -->
+    <link rel="apple-touch-icon" href="/phrase-drill/icons/apple-touch-icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!--
+      `default` renders a light status bar with dark text — wrong against
+      the design's dark-by-default background (docs/design.md).
+      `black-translucent` lets the app's own dark background show through,
+      with light status-bar text/icons, matching the rest of the app.
+    -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="phrase-drill" />
+    <script type="module" crossorigin src="/phrase-drill/assets/index-CEZHANyx.js"></script>
+    <link rel="stylesheet" crossorigin href="/phrase-drill/assets/index-CsRhGjbW.css">
+  <link rel="manifest" href="/phrase-drill/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/phrase-drill/registerSW.js"></script></head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

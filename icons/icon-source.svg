@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!--
+    Plain geometric icon in the settled design palette (docs/design.md):
+    bg token ground with four accent-token bars of varying height, echoing
+    the app's "beat row" — the four-mark metronome indicator that is the
+    one visual idea the design commits to (a spoken phrase moving through
+    a fixed four-beat cadence, not a flashcard). All content sits inside
+    the centered 80% "safe zone" so this single design works unmodified
+    as both a regular and a maskable icon.
+  -->
+  <rect width="512" height="512" fill="#101114" />
+  <rect x="76" y="176" width="60" height="160" rx="30" fill="#ff8a3d" />
+  <rect x="176" y="126" width="60" height="260" rx="30" fill="#ff8a3d" />
+  <rect x="276" y="156" width="60" height="200" rx="30" fill="#ff8a3d" />
+  <rect x="376" y="106" width="60" height="300" rx="30" fill="#ff8a3d" />
+</svg>
