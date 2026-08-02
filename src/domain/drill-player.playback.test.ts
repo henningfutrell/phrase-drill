@@ -43,7 +43,9 @@ describe('DrillPlayer playback', () => {
       { text: 'Hello', lang: 'en-US' },
       { text: 'Bonjour', lang: 'fr-FR' },
     ])
-    expect(clock.waitCalls).toEqual(Array(4).fill(estimatePauseDuration('Bonjour')))
+    expect(clock.waitCalls).toEqual(
+      Array(4).fill(estimatePauseDuration('Bonjour')),
+    )
     expect(player.status).toBe('stopped')
   })
 
@@ -71,7 +73,11 @@ describe('DrillPlayer playback', () => {
     const speech = instantSpeech()
     const clock = fakeClock()
     // n=2 Fisher-Yates: i=1, j=floor(r*2); r=0 forces the single swap.
-    const player = createDrillPlayer([bonjour, merci], { speech, clock }, { random: sequenceRandom([0]) })
+    const player = createDrillPlayer(
+      [bonjour, merci],
+      { speech, clock },
+      { random: sequenceRandom([0]) },
+    )
 
     const done = player.start()
     await vi.runAllTimersAsync()
