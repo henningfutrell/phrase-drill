@@ -1,0 +1,63 @@
+/*
+ * Scan / correction screen (docs/design.md §3.5). Reuses the shared
+ * `.screen`, `.phrase-list`/`.phrase-row`, `.deck-list`/`.deck-chip`,
+ * `.btn-*` and `.sheet` vocabulary from styles.css — only the states that
+ * vocabulary doesn't already cover live here.
+ */
+
+.import-capture {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.import-reading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  margin-top: 60px;
+  text-align: center;
+}
+
+.import-reading__status {
+  font-size: var(--text-base);
+  color: var(--ink-dim);
+}
+
+.import-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  margin-top: 60px;
+  text-align: center;
+  font-size: var(--text-base);
+}
+
+.import-status--failed {
+  color: var(--ink);
+}
+
+.import-deck-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.draft-row {
+  border-left: 3px solid var(--accent);
+}
