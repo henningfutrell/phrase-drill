@@ -250,16 +250,17 @@ first-class state, not an error:
   inline-edit-on-list.
 - **Empty state (0 Decks, first run):** replaces the list with a single line,
   `Nothing here yet — start a Deck for one of your contexts.` — the header's
-  `+ New Deck` control is still there to act on it. The sketched second action,
-  `Scan a page`, equally weighted with `New Deck`, was not built — see the Scan
-  note below.
-- **Unbuilt — Scan has no entry point in the shipped app.** §3.5 describes the
-  Scan/correction screen, and `src/ui/ImportScreen.tsx` matches that
-  description; it is built and tested. But nothing in `App.tsx` renders it —
-  there is no `Mix decks…`-style link to it from here, from Deck detail, or
-  anywhere else, and no `Scan a page` action in the empty state above. A person
-  using the shipped app today has no way to reach Scan at all. Needs a decision:
-  wire it in, or say explicitly it's deferred.
+  `+ New Deck` control is still there to act on it, as is the header's `Scan a
+  page` link. The sketch put `Scan a page` *inside* the empty state, equally
+  weighted with `New Deck`; what shipped puts it in the header instead, so it is
+  reachable from the list whether or not there are Decks.
+- **Scan's entry point is a header link, not an empty-state action.**
+  `DecksScreen` renders `Scan a page` (`data-testid="open-import"`) beside
+  `Mix decks…` and `Settings`, as a `link-action` rather than a primary button
+  (`src/ui/DecksScreen.tsx`). `App.tsx` sets `importOpen` from it and renders
+  `ImportScreen` with the real `createClaudeScanReader`. Deck detail has no Scan
+  entry — a Scan is always started from the Decks list, and the target Deck is
+  chosen inside the flow (§3.5).
 
 ### 3.3 Deck detail — the phrases in one Deck
 
@@ -288,8 +289,9 @@ first-class state, not an error:
 - Tap a row to edit the same two fields in the same sheet shape (add and edit
   share one component).
 - **Empty (0 phrases):** list is replaced by `Add phrases to drill this Deck.`
-  The sketched second action, `Scan a page into this Deck`, was not built —
-  Scan has no entry point anywhere in the shipped app (§3.2).
+  The sketched second action, `Scan a page into this Deck`, was not built. Scan
+  is reachable only from the Decks list header (§3.2), and picks its target Deck
+  inside the flow rather than inheriting it from the screen it was started on.
 - **Delete Deck:** reached from the header's `Delete Deck` control, which turns
   into a second-tap confirm button in place — `Delete "Climbing" and its 14
   phrases?` — not a sheet as sketched. States the phrase count being deleted
@@ -325,10 +327,10 @@ first-class state, not an error:
 
 ### 3.5 Scan / correction — photograph, review, assign
 
-**Unbuilt — Scan has no entry point.** `src/ui/ImportScreen.tsx` implements
-this flow and is not itself wired into `App.tsx` from anywhere (§3.2). Every
-description below is of the standalone component as it exists, reachable today
-only in isolation (its own tests), not from the running app.
+Reached from `Scan a page` in the Decks list header (§3.2).
+`src/ui/ImportScreen.tsx` implements this flow; `App.tsx` renders it with the
+real `createClaudeScanReader` and passes `apiKeyPresent`, so a missing Anthropic
+key is handled by the screen itself rather than by a failed call.
 
 Three-step flow, one screen each. **Unbuilt intention:** the sketch called for a
 top progress trail (`--text-xs`, three dots, not a percentage bar) marking
@@ -444,8 +446,8 @@ dropped.
 one-line, dismiss-once nudge ("Tip: back up your phrases in Settings") on the
 Decks empty-state and after the first successful Scan, so backup would be
 discoverable without anyone opening Settings cold. Neither nudge is present in
-the shipped Decks empty state, and Scan itself has no entry point yet (§3.2,
-§3.5) to carry one from.
+the shipped Decks empty state, and none after a Scan, though Scan itself is now
+reachable from the Decks header (§3.2, §3.5) and could carry one.
 
 ---
 
