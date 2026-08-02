@@ -232,9 +232,10 @@ describe('App wired to backup and restore', () => {
       type: 'application/json',
     })
     const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
-    const dataTransfer = new DataTransfer()
-    dataTransfer.items.add(file)
-    Object.defineProperty(input, 'files', { value: dataTransfer.files, configurable: true })
+    Object.defineProperty(input, 'files', {
+      value: { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList,
+      configurable: true,
+    })
     await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
     await act(async () => click(container.querySelector('[data-testid="restore-confirm"]')!))
 
@@ -252,9 +253,10 @@ describe('App wired to backup and restore', () => {
 
     const file = new File(['not json'], 'notes.txt', { type: 'text/plain' })
     const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
-    const dataTransfer = new DataTransfer()
-    dataTransfer.items.add(file)
-    Object.defineProperty(input, 'files', { value: dataTransfer.files, configurable: true })
+    Object.defineProperty(input, 'files', {
+      value: { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList,
+      configurable: true,
+    })
     await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
 
     expect(container.querySelector('[data-testid="restore-confirm-sheet"]')).toBeNull()

@@ -49,11 +49,13 @@ function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> =
   return props
 }
 
+function fakeFileList(file: File): FileList {
+  return { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList
+}
+
 function chooseRestoreFile(file: File): void {
   const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
-  const dataTransfer = new DataTransfer()
-  dataTransfer.items.add(file)
-  Object.defineProperty(input, 'files', { value: dataTransfer.files, configurable: true })
+  Object.defineProperty(input, 'files', { value: fakeFileList(file), configurable: true })
   input.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
