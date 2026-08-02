@@ -1,6 +1,13 @@
 export type { Phrase, PhraseId } from './phrase'
 export type { Deck, DeckId } from './deck'
-export type { Language, SpeechPort, ClockPort } from './ports'
+export type {
+  Language,
+  SpeechPort,
+  ClockPort,
+  DraftPhrase,
+  ScanError,
+  ScanReader,
+} from './ports'
 export type { Mix } from './mix'
 export { createMix } from './mix'
 export type { RandomSource } from './shuffle'
