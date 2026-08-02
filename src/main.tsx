@@ -1,7 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
-import { createIndexedDbDeckStore } from './adapters/storage'
+import { createIndexedDbDeckStore, createIndexedDbSettingsStore } from './adapters/storage'
 import './styles.css'
 
 const rootElement = document.getElementById('root')
@@ -10,9 +10,10 @@ if (!rootElement) {
 }
 
 const deckStore = createIndexedDbDeckStore()
+const settingsStore = createIndexedDbSettingsStore()
 
 createRoot(rootElement).render(
   <StrictMode>
-    <App deckStore={deckStore} />
+    <App deckStore={deckStore} settingsStore={settingsStore} />
   </StrictMode>,
 )
