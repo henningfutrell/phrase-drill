@@ -5,6 +5,7 @@ import type { Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, parseLibraryFile } from './adapters/storage'
 import { shareBackupFile } from './adapters/share/web-share'
 import type { SynthClient } from './adapters/audio/eleven-labs-synth-client'
+import type { GenerationQueue } from './adapters/audio/generation-queue'
 import { FALLBACK_PREVIEW_PHRASE, VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
@@ -59,10 +60,12 @@ function App({
   deckStore,
   settingsStore,
   synthClient,
+  generationQueue,
 }: {
   deckStore: DeckStore
   settingsStore: SettingsStore
   synthClient: SynthClient
+  generationQueue: GenerationQueue
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
@@ -174,9 +177,22 @@ function App({
 
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
 
-  function withSelectedDeck(fn: (deck: Deck) => Deck) {
-    if (!selectedDeck) return
-    persist(fn(selectedDeck))
+  function withSelectedDeck(fn: (deck: Deck) => Deck): Deck | undefined {
+    if (!selectedDeck) return undefined
+    const updated = fn(selectedDeck)
+    persist(updated)
+    return updated
+  }
+
+  /**
+   * Eager generation (T019 §3): queue both Clips as soon as a Phrase's text
+   * is saved (add or edit). The text has already been persisted by
+   * `withSelectedDeck` above by the time this runs — generation is never on
+   * the critical path for the save.
+   */
+  function queuePhraseGeneration(updated: Deck | undefined, phraseId: PhraseId): void {
+    const phrase = updated?.phrases.find((p) => p.id === phraseId)
+    if (phrase) generationQueue.enqueue(phrase)
   }
 
   if (decks === undefined) {
@@ -229,12 +245,15 @@ function App({
         onBack={() => setSelectedDeckId(undefined)}
         onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
         onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
-        onAddPhrase={(french, english) =>
-          withSelectedDeck((deck) => addPhrase(deck, { id: crypto.randomUUID(), french, english }))
-        }
-        onUpdatePhrase={(id: PhraseId, fields) =>
-          withSelectedDeck((deck) => updatePhrase(deck, id, fields))
-        }
+        onAddPhrase={(french, english) => {
+          const id = crypto.randomUUID()
+          const updated = withSelectedDeck((deck) => addPhrase(deck, { id, french, english }))
+          queuePhraseGeneration(updated, id)
+        }}
+        onUpdatePhrase={(id: PhraseId, fields) => {
+          const updated = withSelectedDeck((deck) => updatePhrase(deck, id, fields))
+          queuePhraseGeneration(updated, id)
+        }}
         onDeletePhrase={(id: PhraseId) => withSelectedDeck((deck) => removePhrase(deck, id))}
         onMovePhraseUp={(id: PhraseId) =>
           withSelectedDeck((deck) => {
