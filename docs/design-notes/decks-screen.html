@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>phrase-drill — Decks screen reference</title>
+<style>
+  :root{
+    --bg:#101114; --surface:#1a1c20; --ink:#f4f3ef; --ink-dim:#8b8d94;
+    --accent:#ff8a3d; --accent-dim:#7a4726; --danger:#e5484d; --ok:#3ecf8e;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;background:#0b0c0e;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;color:var(--ink);}
+  body{display:flex;flex-wrap:wrap;gap:32px;padding:32px;align-items:flex-start;justify-content:center;}
+  .caption{width:390px;text-align:center;font-size:13px;color:#8b8d94;margin-top:8px;}
+  .col{display:flex;flex-direction:column;align-items:center;}
+
+  .phone{
+    width:390px;height:844px;background:var(--bg);border-radius:44px;
+    border:10px solid #050506;position:relative;overflow:hidden;
+    box-shadow:0 20px 60px rgba(0,0,0,.5);
+    display:flex;flex-direction:column;
+  }
+  .notch{position:absolute;top:10px;left:50%;transform:translateX(-50%);width:120px;height:28px;background:#050506;border-radius:16px;z-index:5;}
+  .safe-top{height:54px;flex:0 0 auto;}
+  .safe-bottom{height:34px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;}
+  .home-indicator{width:134px;height:5px;background:var(--ink-dim);border-radius:3px;opacity:.5;}
+
+  .header{display:flex;align-items:center;justify-content:space-between;padding:0 20px 16px;}
+  .header h1{font-size:20px;font-weight:600;margin:0;}
+  .new-deck{font-size:15px;font-weight:600;color:var(--accent);}
+
+  .list{flex:1;overflow:hidden;padding:0 20px;display:flex;flex-direction:column;gap:10px;}
+  .chip{
+    background:var(--surface);border-radius:16px;padding:16px 16px;
+    display:flex;align-items:center;justify-content:space-between;
+  }
+  .chip .meta .name{font-size:17px;font-weight:600;}
+  .chip .meta .count{font-size:14px;color:var(--ink-dim);margin-top:2px;}
+  .chip .drill-btn{
+    background:var(--accent-dim);color:var(--accent);border-radius:12px;
+    font-size:14px;font-weight:700;padding:10px 16px;
+  }
+  .chip.empty .drill-btn{background:transparent;color:var(--ink-dim);border:1px solid #35373d;}
+
+  .links{padding:16px 20px 0;display:flex;flex-direction:column;gap:10px;}
+  .link{font-size:15px;color:var(--ink-dim);}
+  .link b{color:var(--ink);}
+
+  .tip{
+    margin:16px 20px 0;background:var(--surface);border-radius:14px;padding:12px 14px;
+    font-size:13px;color:var(--ink-dim);display:flex;align-items:center;gap:8px;
+  }
+  .tip b{color:var(--ink);}
+</style>
+</head>
+<body>
+
+<div class="col">
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="safe-top"></div>
+    <div class="header"><h1>Decks</h1><div class="new-deck">+ New Deck</div></div>
+    <div class="list">
+      <div class="chip"><div class="meta"><div class="name">Home</div><div class="count">9 phrases</div></div><div class="drill-btn">Drill</div></div>
+      <div class="chip"><div class="meta"><div class="name">Friends</div><div class="count">21 phrases</div></div><div class="drill-btn">Drill</div></div>
+      <div class="chip"><div class="meta"><div class="name">Work</div><div class="count">6 phrases</div></div><div class="drill-btn">Drill</div></div>
+      <div class="chip"><div class="meta"><div class="name">Formal</div><div class="count">4 phrases</div></div><div class="drill-btn">Drill</div></div>
+      <div class="chip"><div class="meta"><div class="name">Climbing</div><div class="count">14 phrases</div></div><div class="drill-btn">Drill</div></div>
+      <div class="chip empty"><div class="meta"><div class="name">Cooking</div><div class="count">Add phrases to drill this Deck</div></div><div class="drill-btn">Drill</div></div>
+    </div>
+    <div class="tip">💡 <span><b>Tip:</b> back up your phrases in Settings</span></div>
+    <div class="links">
+      <div class="link">Mix decks…</div>
+      <div class="link">Scan a page</div>
+    </div>
+    <div class="safe-bottom"><div class="home-indicator"></div></div>
+  </div>
+  <div class="caption">Decks. One chip per context, author-created order. Phrase count only — never a due-count or a score. An empty Deck's Drill affordance is visibly disabled with an inline reason rather than a silently dead tap.</div>
+</div>
+
+</body>
+</html>
