@@ -51,4 +51,8 @@ describe('migrateDeckRecord', () => {
   it('rejects a record claiming a newer schema version than this build supports', () => {
     expect(() => migrateDeckRecord({}, CURRENT_SCHEMA_VERSION + 1)).toThrow(/newer/)
   })
+
+  it('carries a v1 deck record through to the current schema untouched — the clips store landed beside it, not inside it', () => {
+    expect(migrateDeckRecord(currentRecord, 1)).toEqual(currentRecord)
+  })
 })
