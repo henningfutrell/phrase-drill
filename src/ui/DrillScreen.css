@@ -1,0 +1,123 @@
+/*
+ * The Drill screen (docs/design.md §3.1) — hands-free, arm's length, spoken
+ * aloud. Largest text on the whole app; controls sized for a thumb, not a
+ * fingertip.
+ */
+
+.drill-screen {
+  min-height: 100vh;
+  box-sizing: border-box;
+  padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+  background: var(--bg);
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.drill-header {
+  display: flex;
+  justify-content: center;
+}
+
+.drill-header-title {
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+  margin: 0;
+}
+
+.drill-blocked,
+.drill-warning {
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+  text-align: center;
+}
+
+.drill-unlock-error {
+  font-size: var(--text-sm);
+  color: var(--danger);
+  text-align: center;
+}
+
+.drill-skipped {
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+  text-align: center;
+}
+
+.drill-banner {
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--text-sm);
+  text-align: center;
+  padding: 10px 16px;
+  border-radius: 12px;
+}
+
+.drill-beat-row {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.drill-beat {
+  width: 8px;
+  height: 48px;
+  border-radius: 4px;
+  background: transparent;
+  border: 2px solid var(--ink-dim);
+  transition: background-color 200ms ease, border-color 200ms ease;
+}
+
+.drill-beat--live {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.drill-beat--done {
+  background: var(--ink-dim);
+  border-color: var(--ink-dim);
+}
+
+.drill-current-line {
+  font-size: var(--text-drill);
+  font-weight: 700;
+  text-align: center;
+  margin: 0;
+  min-height: 1em;
+  transition: opacity 150ms ease;
+}
+
+.drill-rep-counter {
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+  text-align: center;
+  margin: 0 0 auto;
+}
+
+.drill-controls {
+  display: grid;
+  grid-template-columns: 56px 1fr 56px;
+  align-items: center;
+  gap: 16px;
+}
+
+.drill-control {
+  min-height: 56px;
+  border-radius: 16px;
+  font-weight: 700;
+}
+
+.drill-control--secondary {
+  min-width: 56px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--text-sm);
+}
+
+.drill-control--primary {
+  background: var(--accent);
+  color: var(--bg);
+  font-size: var(--text-lg);
+}
