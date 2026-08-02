@@ -44,8 +44,11 @@ describe('PWA build output', () => {
     expect(manifest.display).toBe('standalone')
     expect(manifest.orientation).toBe('portrait')
     expect(manifest.start_url).toBeTruthy()
-    expect(manifest.theme_color).toBeTruthy()
-    expect(manifest.background_color).toBeTruthy()
+    // Both fields must be the design's `--bg` token (docs/design.md), not an
+    // invented colour — this is the assertion that keeps the manifest from
+    // silently drifting from the settled palette again.
+    expect(manifest.theme_color).toBe('#101114')
+    expect(manifest.background_color).toBe('#101114')
 
     const sizes = (manifest.icons ?? []).map((icon) => icon.sizes)
     expect(sizes).toContain('192x192')
