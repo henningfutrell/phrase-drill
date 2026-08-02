@@ -37,12 +37,26 @@ function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> =
     onClearAnthropicKey: vi.fn(),
     onSaveElevenLabsKey: vi.fn(),
     onClearElevenLabsKey: vi.fn(),
+    onExportBackup: vi.fn().mockResolvedValue('shared'),
+    onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: true }),
+    onConfirmRestore: vi.fn().mockResolvedValue(undefined),
+    onCancelRestore: vi.fn(),
     ...overrides,
   }
   act(() => {
     root.render(<SettingsScreen {...props} />)
   })
   return props
+}
+
+function fakeFileList(file: File): FileList {
+  return { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList
+}
+
+function chooseRestoreFile(file: File): void {
+  const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
+  Object.defineProperty(input, 'files', { value: fakeFileList(file), configurable: true })
+  input.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
 describe('SettingsScreen', () => {
@@ -166,5 +180,118 @@ describe('SettingsScreen', () => {
     const props = renderScreen()
     act(() => click(container.querySelector('[data-testid="settings-back"]')!))
     expect(props.onBack).toHaveBeenCalled()
+  })
+
+  describe('backup', () => {
+    it('explains, for someone who has never heard of a backup, why one matters', () => {
+      renderScreen()
+      const section = container.querySelector('[data-testid="backup-section"]')
+      expect(section?.textContent).toMatch(/phone/i)
+      expect(section?.textContent).toMatch(/gone|lost|clear/i)
+    })
+
+    it('states that saved audio is not part of the backup and regenerates on its own', () => {
+      renderScreen()
+      const section = container.querySelector('[data-testid="backup-section"]')
+      expect(section?.textContent).toMatch(/audio/i)
+      expect(section?.textContent).toMatch(/regenerat|again|automatically/i)
+    })
+
+    it('exports through onExportBackup when the export button is tapped', async () => {
+      const props = renderScreen()
+      await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+      expect(props.onExportBackup).toHaveBeenCalled()
+    })
+
+    it('confirms once the export has gone through the share sheet', async () => {
+      renderScreen({ onExportBackup: vi.fn().mockResolvedValue('shared') })
+      await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+      expect(container.querySelector('[data-testid="export-status"]')?.textContent).toMatch(/shar/i)
+    })
+
+    it('tells her where to look when the share sheet is not available and it fell back to a download', async () => {
+      renderScreen({ onExportBackup: vi.fn().mockResolvedValue('downloaded') })
+      await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+      expect(container.querySelector('[data-testid="export-status"]')?.textContent).toMatch(
+        /download|files/i,
+      )
+    })
+
+    it('says nothing alarming when she cancels out of the share sheet', async () => {
+      renderScreen({ onExportBackup: vi.fn().mockResolvedValue('cancelled') })
+      await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+      expect(container.textContent).not.toMatch(/error|failed/i)
+    })
+
+    it('opens the file picker when "Restore from backup" is tapped', () => {
+      renderScreen()
+      const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
+      const clickSpy = vi.spyOn(input, 'click')
+      act(() => click(container.querySelector('[data-testid="restore-backup"]')!))
+      expect(clickSpy).toHaveBeenCalled()
+    })
+
+    it('shows a plain "this replaces everything" warning, never "merge", before restoring a valid file', async () => {
+      const props = renderScreen({ onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: true }) })
+      const file = new File(['{}'], 'phrase-drill-backup-2026-08-02.json', { type: 'application/json' })
+      await act(async () => chooseRestoreFile(file))
+
+      expect(props.onRestoreFileChosen).toHaveBeenCalledWith(file)
+      const sheet = container.querySelector('[data-testid="restore-confirm-sheet"]')
+      expect(sheet).not.toBeNull()
+      expect(sheet!.textContent).toMatch(/replaces/i)
+      expect(sheet!.textContent).not.toMatch(/merge/i)
+    })
+
+    it('does not restore anything until the warning is confirmed', async () => {
+      const props = renderScreen({ onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: true }) })
+      const file = new File(['{}'], 'backup.json', { type: 'application/json' })
+      await act(async () => chooseRestoreFile(file))
+      expect(props.onConfirmRestore).not.toHaveBeenCalled()
+    })
+
+    it('restores through onConfirmRestore when the warning is confirmed', async () => {
+      const props = renderScreen({ onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: true }) })
+      const file = new File(['{}'], 'backup.json', { type: 'application/json' })
+      await act(async () => chooseRestoreFile(file))
+      await act(async () => click(container.querySelector('[data-testid="restore-confirm"]')!))
+      expect(props.onConfirmRestore).toHaveBeenCalled()
+    })
+
+    it('dismisses the warning without restoring when cancelled', async () => {
+      const props = renderScreen({ onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: true }) })
+      const file = new File(['{}'], 'backup.json', { type: 'application/json' })
+      await act(async () => chooseRestoreFile(file))
+      await act(async () => click(container.querySelector('[data-testid="restore-cancel"]')!))
+
+      expect(props.onConfirmRestore).not.toHaveBeenCalled()
+      expect(props.onCancelRestore).toHaveBeenCalled()
+      expect(container.querySelector('[data-testid="restore-confirm-sheet"]')).toBeNull()
+    })
+
+    it('refuses a malformed or wrong-format file with a plain explanation, and never shows the replace warning for it', async () => {
+      const props = renderScreen({
+        onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: false, reason: 'wrong-format' }),
+      })
+      const file = new File(['not a backup'], 'notes.txt', { type: 'text/plain' })
+      await act(async () => chooseRestoreFile(file))
+
+      expect(container.querySelector('[data-testid="restore-confirm-sheet"]')).toBeNull()
+      expect(props.onConfirmRestore).not.toHaveBeenCalled()
+      const error = container.querySelector('[data-testid="restore-error"]')
+      expect(error).not.toBeNull()
+      expect(error!.textContent).toMatch(/couldn't|doesn't look|not a backup|wasn't able/i)
+    })
+
+    it('refuses unreadable JSON with a plain explanation too', async () => {
+      renderScreen({
+        onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: false, reason: 'not-json' }),
+      })
+      const file = new File(['{{{'], 'broken.json', { type: 'application/json' })
+      await act(async () => chooseRestoreFile(file))
+
+      const error = container.querySelector('[data-testid="restore-error"]')
+      expect(error).not.toBeNull()
+    })
   })
 })

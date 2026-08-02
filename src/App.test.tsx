@@ -1,10 +1,15 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import type { Deck, DeckStore, Library } from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { Settings, SettingsStore } from './adapters/storage'
+
+vi.mock('./adapters/share/web-share', () => ({
+  shareBackupFile: vi.fn().mockResolvedValue('shared'),
+}))
+const { shareBackupFile } = await import('./adapters/share/web-share')
 
 /** In-memory SettingsStore fake — the real one is exercised in
  * src/adapters/storage; App's wiring is what these tests care about. */
@@ -149,5 +154,112 @@ describe('App wired to DeckStore', () => {
 
     expect(store.decks.has('d1')).toBe(false)
     expect(container.querySelector('[data-testid="deck-row-d1"]')).toBeNull()
+  })
+})
+
+async function openSettings(): Promise<void> {
+  await act(async () => click(container.querySelector('[data-testid="open-settings"]')!))
+}
+
+describe('App wired to backup and restore', () => {
+  beforeEach(() => {
+    vi.mocked(shareBackupFile).mockClear()
+    vi.mocked(shareBackupFile).mockResolvedValue('shared')
+  })
+
+  it('exports the whole library through DeckStore.exportAll and hands it to the share adapter', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store)
+    await openSettings()
+
+    await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+
+    expect(shareBackupFile).toHaveBeenCalledTimes(1)
+    const [file] = vi.mocked(shareBackupFile).mock.calls[0]!
+    expect(file.type).toBe('application/json')
+    expect(file.name).toMatch(/^phrase-drill-backup-\d{4}-\d{2}-\d{2}\.json$/)
+    const text = await file.text()
+    expect(JSON.parse(text)).toMatchObject({ format: LIBRARY_FORMAT })
+  })
+
+  it('never puts an API key in the exported file', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store)
+    await openSettings()
+    act(() => click(container.querySelector('[data-testid="anthropic-key-input"]')!))
+    await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+
+    const [file] = vi.mocked(shareBackupFile).mock.calls[0]!
+    const text = await file.text()
+    expect(text).not.toMatch(/apiKey|anthropic|elevenlabs/i)
+  })
+
+  it('falls back to a plain download when the share adapter reports the platform cannot share files', async () => {
+    vi.mocked(shareBackupFile).mockResolvedValue('unsupported')
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const createObjectURL = vi.fn().mockReturnValue('blob:fake')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+
+    await renderApp(store)
+    await openSettings()
+    await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+
+    expect(createObjectURL).toHaveBeenCalled()
+    expect(container.querySelector('[data-testid="export-status"]')?.textContent).toMatch(/download|files/i)
+    vi.unstubAllGlobals()
+  })
+
+  it('replaces the whole library through DeckStore.importAll once a valid backup is confirmed', async () => {
+    const store = createFakeDeckStore([{ id: 'stale', name: 'Stale', phrases: [] }])
+    const replacement: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: 1,
+      exportedAt: 1,
+      decks: [{ id: 'fresh', name: 'Fresh', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+    let imported: Library | undefined
+    store.importAll = async (library) => {
+      imported = library
+      store.decks = new Map(library.decks.map((d) => [d.id, { id: d.id, name: d.name, phrases: d.phrases }]))
+    }
+    store.loadAll = async () => [...store.decks.values()]
+
+    await renderApp(store)
+    await openSettings()
+
+    const file = new File([JSON.stringify(replacement)], 'phrase-drill-backup-2026-08-02.json', {
+      type: 'application/json',
+    })
+    const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
+    Object.defineProperty(input, 'files', {
+      value: { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList,
+      configurable: true,
+    })
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+    await act(async () => click(container.querySelector('[data-testid="restore-confirm"]')!))
+
+    expect(imported).toEqual(replacement)
+  })
+
+  it('does not touch DeckStore at all when the chosen file is not a valid backup', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    let importCalled = false
+    store.importAll = async () => {
+      importCalled = true
+    }
+    await renderApp(store)
+    await openSettings()
+
+    const file = new File(['not json'], 'notes.txt', { type: 'text/plain' })
+    const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
+    Object.defineProperty(input, 'files', {
+      value: { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList,
+      configurable: true,
+    })
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+
+    expect(container.querySelector('[data-testid="restore-confirm-sheet"]')).toBeNull()
+    expect(importCalled).toBe(false)
   })
 })
