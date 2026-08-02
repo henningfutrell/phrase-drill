@@ -48,6 +48,7 @@ function renderScreen(deck: Deck, overrides: Partial<Parameters<typeof DeckDetai
     onDeletePhrase: vi.fn(),
     onMovePhraseUp: vi.fn(),
     onMovePhraseDown: vi.fn(),
+    onDrillDeck: vi.fn(),
     ...overrides,
   }
   act(() => {
@@ -57,6 +58,14 @@ function renderScreen(deck: Deck, overrides: Partial<Parameters<typeof DeckDetai
 }
 
 describe('DeckDetailScreen', () => {
+  it('renders a Drill this Deck button, pinned under the header, that calls onDrillDeck', () => {
+    const { onDrillDeck } = renderScreen(threePhraseDeck)
+    const button = container.querySelector('[data-testid="drill-deck"]')
+    expect(button).not.toBeNull()
+    act(() => click(button!))
+    expect(onDrillDeck).toHaveBeenCalledTimes(1)
+  })
+
   it('renders each Phrase, French over English, in author order', () => {
     renderScreen(threePhraseDeck)
     const rows = container.querySelectorAll('[data-testid^="phrase-row-"]')
