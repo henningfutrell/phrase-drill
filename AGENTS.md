@@ -18,19 +18,19 @@ user's phone, not for hypothetical others.
   (Web Speech API voice availability, IndexedDB quirks, PWA install/offline
   behavior), not Chrome's.
 - **No server.** This is a static PWA: HTML/CSS/JS built once and served as
-  files. All state lives in the browser (IndexedDB via `idb`). The only
-  outbound network call this app makes is to the Claude vision API for
-  handwriting import. Nothing here runs a backend, a database, or an API route
-  of its own. `npm run build` output must be static files, deployable to any
-  static host.
+  files. All state lives in the browser (IndexedDB via `idb`). Outbound
+  network calls: the Claude vision API for handwriting import, and the
+  ElevenLabs text-to-speech API for Clip generation. Nothing here runs a
+  backend, a database, or an API route of its own. `npm run build` output
+  must be static files, deployable to any static host.
 
 ## Architecture: ports and adapters
 
 ```
 src/
   domain/            pure domain core
-  adapters/speech/    Web Speech API (fr-FR)
-  adapters/storage/   IndexedDB (via idb)
+  adapters/audio/     ClipPlayer (SpeechPort over cached Clips) + ElevenLabs synth client
+  adapters/storage/   IndexedDB (via idb) — decks, settings, the clip cache
   adapters/vision/     Claude vision API (handwriting import)
   App.tsx, main.tsx    composition root: wires adapters into domain, renders screens
 ```
