@@ -75,4 +75,42 @@ describe('PWA build output', () => {
     expect(html).toContain('name="apple-mobile-web-app-title"')
     expect(html).toContain('rel="manifest"')
   })
+
+  // GitHub Pages serves this app from https://henningfutrell.github.io/phrase-drill/,
+  // not from a domain root — the gh-pages branch also hosts an unrelated
+  // spike/ diagnostic that must keep working. Every absolute path emitted by
+  // the build (manifest identity, hashed asset hrefs, the favicon and
+  // apple-touch-icon links) has to carry the /phrase-drill/ sub-path, or the
+  // service worker registers against the wrong scope and the installed-app
+  // launch 404s.
+  it('scopes the manifest identity to the /phrase-drill/ sub-path', () => {
+    const manifestPath = path.join(distDir, 'manifest.webmanifest')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
+      id?: string
+      start_url?: string
+      scope?: string
+    }
+
+    expect(manifest.id).toBe('/phrase-drill/')
+    expect(manifest.start_url).toBe('/phrase-drill/')
+    expect(manifest.scope).toBe('/phrase-drill/')
+  })
+
+  it('emits every asset and icon href under the /phrase-drill/ sub-path', () => {
+    const html = readFileSync(path.join(distDir, 'index.html'), 'utf-8')
+
+    const scriptSrc = html.match(/<script type="module"[^>]*src="([^"]+)"/)?.[1]
+    const stylesheetHref = html.match(/<link rel="stylesheet"[^>]*href="([^"]+)"/)?.[1]
+    const manifestHref = html.match(/<link rel="manifest" href="([^"]+)"/)?.[1]
+    const faviconHref = html.match(/<link rel="icon"[^>]*href="([^"]+)"/)?.[1]
+    const appleTouchIconHref = html.match(
+      /<link rel="apple-touch-icon"[^>]*href="([^"]+)"/,
+    )?.[1]
+
+    expect(scriptSrc).toMatch(/^\/phrase-drill\/assets\//)
+    expect(stylesheetHref).toMatch(/^\/phrase-drill\/assets\//)
+    expect(manifestHref).toBe('/phrase-drill/manifest.webmanifest')
+    expect(faviconHref).toBe('/phrase-drill/favicon.svg')
+    expect(appleTouchIconHref).toBe('/phrase-drill/icons/apple-touch-icon-180.png')
+  })
 })
