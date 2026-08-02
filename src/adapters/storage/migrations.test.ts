@@ -7,17 +7,17 @@ describe('applyMigrations', () => {
     expect(applyMigrations(record, 2, 2, [])).toBe(record)
   })
 
-  it('chains migrations oldest-to-newest', () => {
-    const v1ToV2: RecordMigration = ((r: { value: number }) => ({
+  it('chains migrations oldest-to-newest, indexed by the version each one migrates from', () => {
+    const v0ToV1: RecordMigration = ((r: { value: number }) => ({
       ...r,
-      addedInV2: true,
+      addedInV1: true,
     })) as RecordMigration
-    const v2ToV3: RecordMigration = ((r: { value: number; addedInV2: boolean }) => ({
+    const v1ToV2: RecordMigration = ((r: { value: number; addedInV1: boolean }) => ({
       value: r.value,
-      renamed: r.addedInV2,
+      renamed: r.addedInV1,
     })) as RecordMigration
 
-    const result = applyMigrations({ value: 1 }, 1, 3, [v1ToV2, v2ToV3]) as {
+    const result = applyMigrations({ value: 1 }, 0, 2, [v0ToV1, v1ToV2]) as {
       value: number
       renamed: boolean
     }
