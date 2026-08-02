@@ -8,6 +8,9 @@ export type {
   DeckRecord,
   Library,
   DeckStore,
+  DraftPhrase,
+  ScanError,
+  ScanReader,
 } from './ports'
 export { LIBRARY_FORMAT } from './ports'
 export type { Mix } from './mix'
