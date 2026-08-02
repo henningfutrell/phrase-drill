@@ -4,6 +4,7 @@ import App from './App.tsx'
 import { createIndexedDbClipCache, createIndexedDbDeckStore, createIndexedDbSettingsStore } from './adapters/storage'
 import { createElevenLabsSynthClient } from './adapters/audio/eleven-labs-synth-client'
 import { createGenerationQueue } from './adapters/audio/generation-queue'
+import { createClaudeScanReader } from './adapters/vision/claude-scan-reader'
 import './styles.css'
 
 const rootElement = document.getElementById('root')
@@ -22,6 +23,9 @@ const generationQueue = createGenerationQueue({
   clipCache,
   getVoice: () => settingsStore.load().then((settings) => settings.voice),
 })
+const scanReader = createClaudeScanReader({
+  getApiKey: () => settingsStore.load().then((settings) => settings.anthropicApiKey),
+})
 
 createRoot(rootElement).render(
   <StrictMode>
@@ -31,6 +35,7 @@ createRoot(rootElement).render(
       synthClient={synthClient}
       generationQueue={generationQueue}
       clipCache={clipCache}
+      scanReader={scanReader}
     />
   </StrictMode>,
 )
