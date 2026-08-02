@@ -2,7 +2,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import type { Deck, DeckStore, Library } from './domain'
+import type { Deck, DeckStore, DraftPhrase, Library, ScanReader } from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
 import type { SynthClient, SynthResult } from './adapters/audio/eleven-labs-synth-client'
@@ -105,6 +105,14 @@ function createFakeClipCache(readyIds: ReadonlySet<string> = new Set()): ClipCac
   }
 }
 
+/** In-memory ScanReader fake — the real Claude vision adapter is exercised in
+ * src/adapters/vision; App's wiring (apiKeyPresent gating, save handling) is
+ * what these tests care about. */
+function createFakeScanReader(): ScanReader & { read: ReturnType<typeof vi.fn> } {
+  const read = vi.fn<ScanReader['read']>()
+  return { read }
+}
+
 const FAKE_VOICE: Voice = { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }
 
 function typeInto(input: HTMLInputElement, value: string): void {
@@ -137,6 +145,7 @@ async function renderApp(
   synthClient: SynthClient = createFakeSynthClient(),
   generationQueue: GenerationQueue = createFakeGenerationQueue(),
   clipCache: ClipCache = createFakeClipCache(),
+  scanReader: ScanReader = createFakeScanReader(),
 ) {
   await act(async () => {
     root.render(
@@ -146,6 +155,7 @@ async function renderApp(
         synthClient={synthClient}
         generationQueue={generationQueue}
         clipCache={clipCache}
+        scanReader={scanReader}
       />,
     )
   })
@@ -509,5 +519,91 @@ describe('App wired to the Drill screen', () => {
     await act(async () => click(container.querySelector('[data-testid="start-mix"]')!))
 
     expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('2 phrases')
+  })
+})
+
+describe('App wired to Import', () => {
+  it('opens Import from Decks and returns to Decks when cancelled', async () => {
+    const store = createFakeDeckStore([])
+    await renderApp(store, createFakeSettingsStore({ anthropicApiKey: 'sk-ant' }))
+
+    await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
+    expect(container.querySelector('[data-testid="take-photo"]')).not.toBeNull()
+
+    await act(async () => click(container.querySelector('[data-testid="cancel-import"]')!))
+    expect(container.querySelector('[data-testid="open-import"]')).not.toBeNull()
+  })
+
+  it('resolves the missing-key state before any photo is taken, and Settings routes back to Import', async () => {
+    const store = createFakeDeckStore([])
+    const scanReader = createFakeScanReader()
+    await renderApp(
+      store,
+      createFakeSettingsStore({ anthropicApiKey: null }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      scanReader,
+    )
+
+    await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
+    expect(container.querySelector('[data-testid="scan-no-key"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="take-photo"]')).toBeNull()
+    expect(scanReader.read).not.toHaveBeenCalled()
+
+    await act(async () => click(container.querySelector('[data-testid="scan-open-settings"]')!))
+    expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
+
+    await act(async () => click(container.querySelector('[data-testid="settings-back"]')!))
+    expect(container.querySelector('[data-testid="scan-no-key"]')).not.toBeNull()
+  })
+
+  it('offers capture immediately when an Anthropic key is already present', async () => {
+    const store = createFakeDeckStore([])
+    await renderApp(store, createFakeSettingsStore({ anthropicApiKey: 'sk-ant' }))
+
+    await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
+    expect(container.querySelector('[data-testid="take-photo"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="scan-no-key"]')).toBeNull()
+  })
+
+  it('confirming a Scan creates the target Deck, persists the Phrases through DeckStore, and queues generation for each', async () => {
+    const store = createFakeDeckStore([])
+    const scanReader = createFakeScanReader()
+    const drafts: DraftPhrase[] = [
+      { french: 'Bonjour', english: 'Hello' },
+      { french: 'Merci', english: 'Thanks' },
+    ]
+    scanReader.read.mockResolvedValue(drafts)
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(
+      store,
+      createFakeSettingsStore({ anthropicApiKey: 'sk-ant' }),
+      createFakeSynthClient(),
+      generationQueue,
+      createFakeClipCache(),
+      scanReader,
+    )
+
+    await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
+    const input = container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement
+    Object.defineProperty(input, 'files', {
+      value: { 0: new File(['x'], 'p.jpg', { type: 'image/jpeg' }), length: 1, item: () => null } as unknown as FileList,
+      configurable: true,
+    })
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+
+    await act(async () => click(container.querySelector('[data-testid="new-deck-option"]')!))
+    const nameInput = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+    act(() => typeInto(nameInput, 'Scanned'))
+    act(() => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await act(async () => click(container.querySelector('[data-testid="save-import"]')!))
+
+    const saved = [...store.decks.values()].find((d) => d.name === 'Scanned')
+    expect(saved).toBeDefined()
+    expect(saved!.phrases.map((p) => ({ french: p.french, english: p.english }))).toEqual(drafts)
+    expect(generationQueue.enqueued.map((p) => ({ french: p.french, english: p.english }))).toEqual(drafts)
+    // Import is left behind — she lands somewhere that shows the result, not back on the capture screen.
+    expect(container.querySelector('[data-testid="take-photo"]')).toBeNull()
   })
 })
