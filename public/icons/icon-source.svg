@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!--
+    Plain geometric placeholder icon: a purple field (matching the existing
+    favicon's brand purple) with a white speech bubble and two text bars,
+    standing in for a spoken phrase. All content sits inside the centered
+    80% "safe zone" so this single design works unmodified as both a
+    regular and a maskable icon. Replace this once a real design (T015)
+    lands.
+  -->
+  <rect width="512" height="512" fill="#7e14ff" />
+  <path
+    d="M96 180a40 40 0 0 1 40-40h240a40 40 0 0 1 40 40v120a40 40 0 0 1-40 40H210l-56 56v-56h-18a40 40 0 0 1-40-40z"
+    fill="#ffffff"
+  />
+  <rect x="136" y="196" width="200" height="24" rx="12" fill="#7e14ff" />
+  <rect x="136" y="240" width="130" height="24" rx="12" fill="#7e14ff" />
+</svg>
