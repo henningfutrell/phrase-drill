@@ -13,8 +13,8 @@ time:
 
 - `manifest.webmanifest` — `name`/`short_name` "phrase-drill", `display:
   standalone`, `orientation: portrait`, `start_url`/`scope: /`, theme colour
-  `#7e14ff` (the existing brand purple), background `#ffffff`, and an icon
-  set (`192`, `512`, `512` maskable).
+  and background colour both `#101114` (the design's `--bg` token, see
+  `docs/design.md`), and an icon set (`192`, `512`, `512` maskable).
 - `sw.js` + `workbox-*.js` — a generated service worker that precaches the
   app shell (JS/CSS/HTML/icons/manifest) so the app opens with no network.
 - `registerSW.js`, auto-injected into `index.html` — registers the service
