@@ -106,6 +106,39 @@ describe('DecksScreen', () => {
     expect(container.querySelector('[data-testid="open-mix"]')).toBeNull()
   })
 
+  it('renders a Scan a page link that calls onOpenImport when provided', () => {
+    const onOpenImport = vi.fn()
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 3)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          onOpenImport={onOpenImport}
+        />,
+      )
+    })
+    click(container.querySelector('[data-testid="open-import"]')!)
+    expect(onOpenImport).toHaveBeenCalledTimes(1)
+  })
+
+  it('omits the Scan a page link when onOpenImport is not provided', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 3)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="open-import"]')).toBeNull()
+  })
+
   it('calls onOpenDeck when a Deck row is tapped', () => {
     const onOpenDeck = vi.fn()
     act(() => {
