@@ -4,7 +4,16 @@ import { createMix, type Mix } from '../domain/mix'
 import '../styles/tokens.css'
 import './MixSelectScreen.css'
 
-/** Mix (glossary): several Decks combined into one pool, meaningless below 2. */
+/**
+ * Mix (glossary): several Decks combined into one pool, meaningless below 2
+ * — that governs whether this *screen* is reachable at all (`decks.length`,
+ * checked below). It does not gate the primary button: docs/design.md §3.4
+ * also says a 1-Deck *selection* routes to a plain Drill rather than being a
+ * dead button (T008's carried contradiction, resolved in T006) — a Mix of
+ * one Deck is, structurally, exactly that Deck's Phrases, so the same
+ * `onStartMix` handoff already produces a plain Drill on the far side with
+ * no separate code path needed.
+ */
 const MIN_DECKS_TO_MIX = 2
 
 export interface MixSelectScreenProps {
@@ -17,9 +26,11 @@ export interface MixSelectScreenProps {
    * DrillPlayer from `mix.phrases` — not here.
    */
   readonly onStartMix: (mix: Mix) => void
+  /** Back to Decks (T006) — optional only for tests that don't exercise it. */
+  readonly onBack?: () => void
 }
 
-export function MixSelectScreen({ decks, onStartMix }: MixSelectScreenProps) {
+export function MixSelectScreen({ decks, onStartMix, onBack }: MixSelectScreenProps) {
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<DeckId>>(
     new Set(),
   )
@@ -33,7 +44,7 @@ export function MixSelectScreen({ decks, onStartMix }: MixSelectScreenProps) {
       selectedDecks.reduce((total, deck) => total + deck.phrases.length, 0),
     [selectedDecks],
   )
-  const canStart = selectedDecks.length >= MIN_DECKS_TO_MIX
+  const canStart = selectedDecks.length >= 1
 
   function toggle(id: DeckId) {
     setSelectedIds((prev) => {
@@ -52,6 +63,11 @@ export function MixSelectScreen({ decks, onStartMix }: MixSelectScreenProps) {
   if (decks.length < MIN_DECKS_TO_MIX) {
     return (
       <main className="mix-select mix-select--empty">
+        {onBack && (
+          <button type="button" data-testid="back" className="link-action" onClick={onBack}>
+            Back
+          </button>
+        )}
         <h1 className="mix-select__title">Mix</h1>
         <p className="mix-select__empty-caption">Add another Deck to mix</p>
       </main>
@@ -60,6 +76,11 @@ export function MixSelectScreen({ decks, onStartMix }: MixSelectScreenProps) {
 
   return (
     <main className="mix-select">
+      {onBack && (
+        <button type="button" data-testid="back" className="link-action" onClick={onBack}>
+          Back
+        </button>
+      )}
       <h1 className="mix-select__title">Mix</h1>
       <ul className="mix-select__list">
         {decks.map((deck) => {
@@ -85,7 +106,8 @@ export function MixSelectScreen({ decks, onStartMix }: MixSelectScreenProps) {
         })}
       </ul>
       <p className="mix-select__total" data-testid="mix-select-total">
-        {selectedDecks.length} decks selected · {phraseCount} phrases
+        {selectedDecks.length} deck{selectedDecks.length === 1 ? '' : 's'} selected ·{' '}
+        {phraseCount} phrases
       </p>
       <button
         type="button"
@@ -94,7 +116,7 @@ export function MixSelectScreen({ decks, onStartMix }: MixSelectScreenProps) {
         data-testid="start-mix"
         onClick={handleStart}
       >
-        Start Mix
+        {selectedDecks.length === 1 ? 'Start Drill' : 'Start Mix'}
       </button>
       <p className="mix-select__hint">Phrases play in random order</p>
     </main>

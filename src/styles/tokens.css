@@ -17,4 +17,7 @@
   --text-base: 17px;
   --text-lg: 20px;
   --text-xl: 28px;
+  /* The Drill screen's current-line only (docs/design.md §1) — the one
+     deliberately fluid size in an otherwise fixed rem scale. */
+  --text-drill: clamp(48px, 15vw, 88px);
 }

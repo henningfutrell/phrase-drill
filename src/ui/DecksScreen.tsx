@@ -16,6 +16,7 @@ export function DecksScreen({
   onDeleteDeck,
   onOpenDeck,
   onOpenSettings,
+  onOpenMix,
 }: {
   decks: readonly Deck[]
   onCreateDeck: (name: string) => void
@@ -24,6 +25,8 @@ export function DecksScreen({
   onOpenDeck: (id: DeckId) => void
   /** Entry point to Settings (docs/design.md §3.6) — omitted only in tests that don't exercise it. */
   onOpenSettings?: () => void
+  /** Entry point to the Mix screen (docs/design.md §3.2, T006) — omitted only in tests that don't exercise it. */
+  onOpenMix?: () => void
 }) {
   const [sheet, setSheet] = useState<SheetState>(undefined)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<DeckId | undefined>(undefined)
@@ -33,6 +36,16 @@ export function DecksScreen({
       <header className="screen-header">
         <h1>Decks</h1>
         <div className="screen-header-actions">
+          {onOpenMix && (
+            <button
+              type="button"
+              data-testid="open-mix"
+              className="link-action"
+              onClick={onOpenMix}
+            >
+              Mix decks…
+            </button>
+          )}
           {onOpenSettings && (
             <button
               type="button"
