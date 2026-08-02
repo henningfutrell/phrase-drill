@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phrase audio test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { background: #0f1014; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    margin: 0;
+    padding: 14px;
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+    padding-bottom: max(48px, env(safe-area-inset-bottom));
+    color: #e8e9ed;
+    line-height: 1.45;
+  }
+  h1 { font-size: 1.15rem; margin: 0 0 4px; text-wrap: balance; }
+  p.sub { color: #9aa0ac; margin: 0 0 16px; font-size: 0.85rem; }
+  section {
+    background: #191b21;
+    border: 1px solid #2b2e37;
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+  h2 {
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #9aa0ac; margin: 0 0 10px;
+  }
+  .stepnum { color: #4a8df8; margin-right: 6px; }
+  .hint { font-size: 0.82rem; color: #9aa0ac; margin: 8px 0 0; }
+  .instructions { font-size: 0.88rem; color: #cfd2d9; padding-left: 20px; margin: 0; }
+  .instructions li { margin-bottom: 8px; }
+  input[type=password], input[type=text] {
+    width: 100%; font-size: 1rem; padding: 12px;
+    border-radius: 10px; border: 1px solid #2b2e37;
+    background: #0f1014; color: #e8e9ed;
+  }
+  button {
+    font-family: inherit;
+    display: block; width: 100%;
+    font-size: 1rem; font-weight: 600;
+    padding: 14px 10px; margin-top: 10px;
+    border-radius: 12px; border: 1px solid #2b2e37;
+    background: #22242c; color: #e8e9ed;
+  }
+  button:active { background: #2b2e37; }
+  button:disabled { opacity: 0.4; }
+  button:focus-visible { outline: 2px solid #4a8df8; outline-offset: 2px; }
+  button.primary {
+    background: #2d6fe0; border-color: #2d6fe0; color: #fff;
+    font-size: 1.25rem; font-weight: 700; padding: 18px 10px;
+  }
+  button.primary:active { background: #1f56b8; }
+  button.danger { background: #2a1517; border-color: #6e2a30; color: #f2949c; }
+  .voice-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid #23252d;
+  }
+  .voice-row:last-of-type { border-bottom: none; }
+  .voice-row input[type=radio] { width: 22px; height: 22px; flex: none; accent-color: #4a8df8; }
+  .voice-row .voice-name { font-weight: 600; }
+  .voice-row .voice-desc { font-size: 0.8rem; color: #9aa0ac; }
+  .voice-row label { flex: 1; }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 0.72rem; font-weight: 700; margin-right: 6px; vertical-align: 1px;
+  }
+  .pill-yes { background: #12301f; color: #63d68e; }
+  .pill-no { background: #331519; color: #f2949c; }
+  .pill-unk { background: #2f2a16; color: #e3c05f; }
+  #status { font-size: 0.95rem; min-height: 1.4em; }
+  #genProgress { font-size: 0.85rem; color: #9aa0ac; margin-top: 6px; }
+  #log {
+    background: #0a0b0d; border: 1px solid #23252d; border-radius: 10px;
+    padding: 8px; height: 38vh; overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem; white-space: pre-wrap; word-break: break-word;
+  }
+  #log div { padding: 1px 0; border-bottom: 1px solid #15161a; }
+  .tag { display: inline-block; min-width: 52px; font-weight: 700; }
+  .tag-audio { color: #6cf; }
+  .tag-net { color: #9f7aea; }
+  .tag-timer { color: #fc6; }
+  .tag-error { color: #f66; }
+  .tag-vis { color: #c9f; }
+  .tag-wake { color: #6f9; }
+  .tag-key { color: #ff9; }
+  .tag-system { color: #999; }
+  @media (prefers-reduced-motion: no-preference) {
+    button { transition: background 120ms ease; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Phrase audio test</h1>
+<p class="sub">A test page for the French practice app. It plays real French audio on this phone and writes down everything that happens. Not the app itself.</p>
+
+<section>
+  <h2>What this is</h2>
+  <ol class="instructions">
+    <li>Paste the key Henning gave you (step 1) and pick a voice you like (step 2).</li>
+    <li>Prepare the audio (step 3), then run the full test (step 4) four times, following the checklist.</li>
+    <li>When done, tap <b>Copy log</b> at the bottom and send it back.</li>
+  </ol>
+</section>
+
+<section>
+  <h2><span class="stepnum">1</span>The key</h2>
+  <input id="keyInput" type="password" autocomplete="off" placeholder="Paste the key here">
+  <button id="saveKeyBtn">Save key</button>
+  <p class="hint" id="keyStatus">No key yet. The key stays on this phone only, and is forgotten when you close this tab. It never appears in the log.</p>
+</section>
+
+<section>
+  <h2><span class="stepnum">2</span>Pick a voice</h2>
+  <p class="hint" style="margin:0 0 6px">Tap “Hear the phrases” for each voice and pick the one that sounds best speaking French. Hold the phone at arm’s length, like you would while practising.</p>
+  <div id="voiceRows"></div>
+  <button id="earBtn">Hear the phrases in this voice</button>
+  <p class="hint">First listen per voice takes a little while — the audio is being made. After that it is instant.</p>
+</section>
+
+<section>
+  <h2><span class="stepnum">3</span>Prepare the full test</h2>
+  <button id="genBtn">Prepare audio for the full test</button>
+  <div id="genProgress"></div>
+</section>
+
+<section>
+  <h2><span class="stepnum">4</span>The full test — four runs</h2>
+  <ol class="instructions">
+    <li><b>Run 1 — leave it alone.</b> Tap Start and let it play all the way to the end (about 3 minutes). Keep the screen on. Listen for any phrase that never plays or any silence that goes on too long.</li>
+    <li><b>Run 2 — lock the screen.</b> Start again. While a phrase is playing, press the side button to lock the phone. Wait about 15 seconds, then unlock. Note whether the sound stopped, and whether it came back.</li>
+    <li><b>Run 3 — the ringer switch.</b> Start again. While a phrase is playing, flip the orange ringer/silent switch on the side of the phone. Does the sound stop? Flip it back — does it return?</li>
+    <li><b>Run 4 — switch apps.</b> Start again. While it plays, swipe to another app for a few seconds, then come back.</li>
+  </ol>
+  <button id="startBtn" class="primary" disabled>▶ Start the full run</button>
+  <button id="stopBtn" class="danger">■ Stop</button>
+</section>
+
+<section>
+  <h2>Status</h2>
+  <div id="status">Waiting for a key.</div>
+  <div style="margin-top:6px"><span class="pill pill-unk" id="wakePill">?</span><span id="wakeText">Keep-screen-on lock</span></div>
+</section>
+
+<section>
+  <h2>Event log</h2>
+  <div id="log"></div>
+  <button id="copyBtn">Copy log</button>
+</section>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------- basics
+  var $ = function (id) { return document.getElementById(id); };
+  var logEl = $("log"), statusEl = $("status");
+  var logLines = [];
+
+  function ts() {
+    var d = new Date();
+    function p(n, w) { n = String(n); while (n.length < (w || 2)) n = "0" + n; return n; }
+    return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()) + "." + p(d.getMilliseconds(), 3);
+  }
+  function log(tag, msg) {
+    var text = "[" + tag + "] " + ts() + " — " + msg;
+    logLines.push(text);
+    var line = document.createElement("div");
+    var span = document.createElement("span");
+    span.className = "tag tag-" + tag;
+    span.textContent = "[" + tag + "]";
+    line.appendChild(span);
+    line.appendChild(document.createTextNode(" " + ts() + " — " + msg));
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setStatus(s) { statusEl.textContent = s; }
+
+  log("system", "Page loaded. standalone=" + (window.navigator.standalone === true) +
+    " display-mode-standalone=" + (window.matchMedia && matchMedia("(display-mode: standalone)").matches));
+  log("system", "UA=" + navigator.userAgent);
+
+  // ---------------------------------------------------------------- data
+  var MODEL_ID = "eleven_multilingual_v2";
+  var VOICES = [
+    { id: "21m00Tcm4TlvDq8ikWAM", name: "Rachel", desc: "Female — clear, American-accented" },
+    { id: "XB0fDUnXU5powFXDhCwa", name: "Charlotte", desc: "Female — softer, European-accented" },
+    { id: "JBFqnCBsd6RMkjVDRZzb", name: "George", desc: "Male — warm, British-accented" }
+  ];
+  var PHRASES = [
+    { fr: "Bonjour, comment ça va ?", en: "Hello, how are you?" },
+    { fr: "Je voudrais un café, s'il vous plaît.", en: "I would like a coffee, please." },
+    { fr: "Où sont les toilettes ?", en: "Where is the bathroom?" },
+    { fr: "Ça coûte combien ?", en: "How much does it cost?" },
+    { fr: "Je ne comprends pas, pouvez-vous répéter plus lentement ?", en: "I don't understand, can you repeat more slowly?" },
+    { fr: "On se retrouve devant la gare à six heures.", en: "Let's meet in front of the station at six o'clock." }
+  ];
+  // Pause = time to repeat aloud what was just heard: chars x 65ms, clamped 1.5-5s.
+  function pauseMs(text) { return Math.min(5000, Math.max(1500, Math.round(text.length * 65))); }
+
+  // ---------------------------------------------------------------- key
+  var KEY_STORE = "t020_el_key";
+  function getKey() { try { return sessionStorage.getItem(KEY_STORE) || ""; } catch (e) { return ""; } }
+  function keyLabel(k) { return k ? "key saved (" + k.length + " chars, ends …" + k.slice(-4) + ")" : "no key"; }
+
+  function refreshKeyUI() {
+    var k = getKey();
+    $("keyStatus").textContent = k
+      ? "Key saved for this tab (ends …" + k.slice(-4) + "). It is forgotten when the tab closes."
+      : "No key yet. The key stays on this phone only, and is forgotten when you close this tab. It never appears in the log.";
+    if (k && !fullRunReady) setStatus("Key saved. Pick a voice, then prepare the full test.");
+  }
+  $("saveKeyBtn").addEventListener("click", function () {
+    var v = $("keyInput").value.trim();
+    if (!v) { log("key", "Save tapped with empty field."); return; }
+    try { sessionStorage.setItem(KEY_STORE, v); } catch (e) { log("error", "sessionStorage write failed: " + e.message); }
+    $("keyInput").value = "";
+    log("key", "Key saved to sessionStorage: " + keyLabel(v));
+    refreshKeyUI();
+  });
+
+  // ---------------------------------------------------------------- voices UI
+  var voiceRows = $("voiceRows");
+  VOICES.forEach(function (v, i) {
+    var row = document.createElement("div");
+    row.className = "voice-row";
+    row.innerHTML =
+      '<input type="radio" name="voice" id="voice_' + i + '" value="' + v.id + '"' + (i === 0 ? " checked" : "") + '>' +
+      '<label for="voice_' + i + '"><div class="voice-name">' + v.name + '</div>' +
+      '<div class="voice-desc">' + v.desc + '</div></label>';
+    voiceRows.appendChild(row);
+  });
+  function selectedVoice() {
+    var el = document.querySelector('input[name="voice"]:checked');
+    for (var i = 0; i < VOICES.length; i++) if (VOICES[i].id === el.value) return VOICES[i];
+    return VOICES[0];
+  }
+  document.querySelectorAll('input[name="voice"]').forEach(function (r) {
+    r.addEventListener("change", function () {
+      log("system", "Voice selected: " + selectedVoice().name);
+      fullRunReady = false;
+      $("startBtn").disabled = true;
+      $("genProgress").textContent = "";
+    });
+  });
+
+  // ---------------------------------------------------------------- clip cache + synthesis
+  // cacheKey = voiceId|lang|text -> { url, durationMs, bytes }
+  var clips = {};
+  function cacheKey(voiceId, lang, text) { return voiceId + "|" + lang + "|" + text; }
+
+  function probeDuration(url, bytes) {
+    return new Promise(function (resolve) {
+      var a = new Audio();
+      a.preload = "metadata";
+      var done = false;
+      function finish(ms, how) {
+        if (done) return; done = true;
+        a.src = "";
+        resolve({ ms: ms, how: how });
+      }
+      a.addEventListener("loadedmetadata", function () {
+        var d = a.duration;
+        if (isFinite(d) && d > 0) finish(Math.round(d * 1000), "metadata");
+        else finish(Math.round(bytes / 16), "estimate(bytes/16)"); // ~128kbps mp3
+      });
+      a.addEventListener("error", function () { finish(Math.round(bytes / 16), "estimate(bytes/16)"); });
+      setTimeout(function () { finish(Math.round(bytes / 16), "estimate(bytes/16)"); }, 4000);
+      a.src = url;
+    });
+  }
+
+  function synthesize(voice, lang, text) {
+    var k = cacheKey(voice.id, lang, text);
+    if (clips[k]) return Promise.resolve(clips[k]);
+    var key = getKey();
+    if (!key) return Promise.reject(new Error("no key saved"));
+    var label = voice.name + "/" + lang + " \"" + text.slice(0, 30) + (text.length > 30 ? "…" : "") + "\"";
+    var t0 = performance.now();
+    log("net", "REQUEST " + label);
+    return fetch("https://api.elevenlabs.io/v1/text-to-speech/" + voice.id, {
+      method: "POST",
+      headers: { "xi-api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text, model_id: MODEL_ID })
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (body) {
+          var snippet = (body || "").slice(0, 200);
+          var kind = res.status === 401 ? "key not accepted" :
+                     res.status === 429 ? "quota or rate limit" : "HTTP " + res.status;
+          throw new Error(kind + " — " + snippet);
+        });
+      }
+      return res.arrayBuffer();
+    }).then(function (buf) {
+      var ms = Math.round(performance.now() - t0);
+      var url = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+      log("net", "RECEIVED " + label + ": " + buf.byteLength + " bytes in " + ms + "ms");
+      return probeDuration(url, buf.byteLength).then(function (d) {
+        log("net", "duration " + label + ": " + d.ms + "ms (" + d.how + ")");
+        var clip = { url: url, durationMs: d.ms, bytes: buf.byteLength };
+        clips[k] = clip;
+        return clip;
+      });
+    }).catch(function (err) {
+      log("error", "SYNTH FAILED " + label + ": " + err.message);
+      throw err;
+    });
+  }
+
+  // ---------------------------------------------------------------- the ONE audio element
+  // The whole design under test: a single <audio>, unlocked inside the start tap,
+  // then reused for every clip by swapping src to blob URLs.
+  var player = new Audio();
+  player.preload = "auto";
+  var SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+
+  ["playing", "pause", "error", "stalled", "waiting"].forEach(function (ev) {
+    player.addEventListener(ev, function () {
+      if (ev === "error") {
+        var e = player.error;
+        log("error", "element error event: code=" + (e ? e.code : "?") + " msg=" + (e && e.message ? e.message : ""));
+      } else if (ev === "pause") {
+        // fires at natural end too; only interesting mid-clip
+        if (!player.ended) log("audio", "element paused (not at end) at t=" + player.currentTime.toFixed(2) + "s");
+      } else {
+        log("audio", "element event: " + ev + " (t=" + player.currentTime.toFixed(2) + "s)");
+      }
+    });
+  });
+
+  // Called synchronously inside a tap gesture. Unlocks the element for later
+  // programmatic plays. Logged so the log shows whether the unlock resolved.
+  function unlockInGesture(context) {
+    try {
+      player.src = SILENT_WAV;
+      var p = player.play();
+      log("audio", "UNLOCK play() called in gesture (" + context + ")");
+      if (p && p.then) {
+        p.then(function () { log("audio", "UNLOCK play() resolved (" + context + ")"); },
+               function (err) { log("error", "UNLOCK play() rejected (" + context + "): " + err.name + " — " + err.message); });
+      }
+    } catch (e) {
+      log("error", "UNLOCK threw (" + context + "): " + e.message);
+    }
+  }
+
+  var runToken = 0; // bump to invalidate stale callbacks after Stop
+
+  // Play one cached clip through the shared element.
+  // Resolves on `ended`, OR on timeout at durationMs + slack — logs which won.
+  function playClip(clip, label, myToken) {
+    return new Promise(function (resolve) {
+      if (myToken !== runToken) { resolve("stale"); return; }
+      var settled = false;
+      var t0 = performance.now();
+      var slack = 2500;
+      var timeoutId;
+
+      function finish(how) {
+        if (settled) return; settled = true;
+        clearTimeout(timeoutId);
+        player.removeEventListener("ended", onEnded);
+        resolve(how);
+      }
+      function onEnded() {
+        if (player.src !== clip.url) { log("audio", label + " stray ended from previous source ignored"); return; }
+        var ms = Math.round(performance.now() - t0);
+        log("audio", label + " ENDED fired after " + ms + "ms (clip duration " + clip.durationMs + "ms) — ended won the race");
+        finish("ended");
+      }
+      player.addEventListener("ended", onEnded);
+
+      timeoutId = setTimeout(function () {
+        if (myToken !== runToken) { finish("stale"); return; }
+        log("error", label + " TIMEOUT won the race: ended never fired within duration+" + slack + "ms. paused=" + player.paused +
+          " currentTime=" + player.currentTime.toFixed(2) + "s readyState=" + player.readyState);
+        finish("timeout");
+      }, clip.durationMs + slack);
+
+      log("audio", label + " play() called: src swapped to blob URL, duration " + clip.durationMs + "ms");
+      player.src = clip.url;
+      var p = player.play();
+      if (p && p.then) {
+        p.then(function () { log("audio", label + " play() promise resolved (playback started)"); },
+               function (err) {
+                 log("error", label + " play() REJECTED: " + err.name + " — " + err.message);
+                 finish("rejected");
+               });
+      }
+    });
+  }
+
+  function timedPause(ms, label, myToken) {
+    return new Promise(function (resolve) {
+      if (myToken !== runToken) { resolve(); return; }
+      log("timer", "pause " + ms + "ms (" + label + ") start");
+      var t0 = performance.now();
+      setTimeout(function () {
+        if (myToken !== runToken) { log("timer", "pause (" + label + ") fired after Stop, ignored"); resolve(); return; }
+        var actual = Math.round(performance.now() - t0);
+        log("timer", "pause (" + label + ") done — asked " + ms + "ms, took " + actual + "ms" +
+          (actual > ms + 1000 ? "  << LATE, timer was throttled" : ""));
+        resolve();
+      }, ms);
+    });
+  }
+
+  // ---------------------------------------------------------------- ear test
+  var earBusy = false;
+  $("earBtn").addEventListener("click", function () {
+    if (earBusy) { log("system", "Ear test already running, tap ignored."); return; }
+    if (!getKey()) { setStatus("Paste and save the key first (step 1)."); log("error", "Ear test tapped with no key."); return; }
+    var voice = selectedVoice();
+    runToken++;
+    var myToken = runToken;
+    earBusy = true;
+    unlockInGesture("ear test");
+    log("system", "=== Ear test: " + voice.name + " — all " + PHRASES.length + " phrases in French ===");
+    setStatus("Making the audio for " + voice.name + "…");
+
+    var seq = Promise.resolve();
+    PHRASES.forEach(function (ph, i) {
+      seq = seq.then(function () {
+        if (myToken !== runToken) return;
+        return synthesize(voice, "fr", ph.fr).then(function (clip) {
+          if (myToken !== runToken) return;
+          setStatus(voice.name + " — phrase " + (i + 1) + " of " + PHRASES.length);
+          return playClip(clip, voice.name + ".fr" + (i + 1), myToken);
+        }).then(function () {
+          if (myToken !== runToken) return;
+          return timedPause(700, "between ear-test phrases", myToken);
+        });
+      });
+    });
+    seq.then(function () {
+      if (myToken === runToken) { setStatus("Ear test done: " + voice.name + ". Try another voice, or prepare the full test."); log("system", "Ear test complete: " + voice.name); }
+      earBusy = false;
+    }).catch(function () {
+      setStatus("Something failed making audio — see the log.");
+      earBusy = false;
+    });
+  });
+
+  // ---------------------------------------------------------------- generation for full run
+  var fullRunReady = false;
+  $("genBtn").addEventListener("click", function () {
+    if (!getKey()) { setStatus("Paste and save the key first (step 1)."); log("error", "Prepare tapped with no key."); return; }
+    var voice = selectedVoice();
+    var jobs = [];
+    PHRASES.forEach(function (ph) {
+      jobs.push({ lang: "fr", text: ph.fr });
+      jobs.push({ lang: "en", text: ph.en });
+    });
+    log("system", "=== Preparing " + jobs.length + " clips for full run, voice " + voice.name + " ===");
+    $("genBtn").disabled = true;
+    var doneCount = 0;
+    function tick() { $("genProgress").textContent = doneCount + " of " + jobs.length + " clips ready."; }
+    tick();
+    var seq = Promise.resolve();
+    jobs.forEach(function (job) {
+      seq = seq.then(function () {
+        return synthesize(voice, job.lang, job.text).then(function () { doneCount++; tick(); });
+      });
+    });
+    seq.then(function () {
+      fullRunReady = true;
+      $("startBtn").disabled = false;
+      $("genBtn").disabled = false;
+      $("genProgress").textContent = "All " + jobs.length + " clips ready for " + voice.name + ". Start the full run below.";
+      setStatus("Ready. Tap Start the full run.");
+      log("system", "All clips ready for full run (" + voice.name + ").");
+    }).catch(function () {
+      $("genBtn").disabled = false;
+      $("genProgress").textContent = "Preparation failed — see the log. Tap again to retry.";
+      setStatus("Preparation failed — see the log.");
+    });
+  });
+
+  // ---------------------------------------------------------------- wake lock
+  var wakeSentinel = null;
+  function setWakePill(state, text) {
+    var pill = $("wakePill");
+    pill.className = "pill " + (state === "yes" ? "pill-yes" : state === "no" ? "pill-no" : "pill-unk");
+    pill.textContent = state === "yes" ? "ON" : state === "no" ? "OFF" : "?";
+    $("wakeText").textContent = text;
+  }
+  function requestWakeLock() {
+    if (!("wakeLock" in navigator)) {
+      setWakePill("no", "Keep-screen-on not supported here.");
+      log("wake", "Wake Lock API not available.");
+      return;
+    }
+    navigator.wakeLock.request("screen").then(function (s) {
+      wakeSentinel = s;
+      setWakePill("yes", "Screen will stay on during the run.");
+      log("wake", "Wake Lock acquired.");
+      s.addEventListener("release", function () {
+        log("wake", "Wake Lock released (by system or page).");
+        setWakePill("no", "Keep-screen-on lock released.");
+        wakeSentinel = null;
+      });
+    }).catch(function (err) {
+      setWakePill("no", "Keep-screen-on failed: " + err.name);
+      log("wake", "Wake Lock request failed: " + err.name + " — " + err.message);
+    });
+  }
+
+  // ---------------------------------------------------------------- visibility
+  var drillRunning = false;
+  document.addEventListener("visibilitychange", function () {
+    log("vis", "visibilitychange -> hidden=" + document.hidden + " state=" + document.visibilityState +
+      (drillRunning ? " (run in progress: player.paused=" + player.paused + " t=" + player.currentTime.toFixed(2) + "s)" : ""));
+    if (!document.hidden && drillRunning && wakeSentinel === null) requestWakeLock();
+  });
+  window.addEventListener("pagehide", function (e) { log("vis", "pagehide persisted=" + e.persisted); });
+  window.addEventListener("pageshow", function (e) { log("vis", "pageshow persisted=" + e.persisted); });
+  window.addEventListener("focus", function () { log("vis", "window focus"); });
+  window.addEventListener("blur", function () { log("vis", "window blur"); });
+
+  // ---------------------------------------------------------------- the full run
+  // Cadence per phrase: FR, pause, FR, pause, EN, pause, FR, pause.
+  $("startBtn").addEventListener("click", function () {
+    if (!fullRunReady) { log("error", "Start tapped before clips were ready."); return; }
+    var voice = selectedVoice();
+    runToken++;
+    var myToken = runToken;
+    drillRunning = true;
+    unlockInGesture("full run start"); // THE one unlock for the whole multi-minute run
+    requestWakeLock();
+    log("system", "=== FULL RUN started (token " + myToken + "), voice " + voice.name + ", " + PHRASES.length + " phrases ===");
+
+    function step(clipLang, text, label) {
+      var clip = clips[cacheKey(voice.id, clipLang, text)];
+      if (!clip) { log("error", label + ": clip missing from cache — skipping"); return Promise.resolve(); }
+      return playClip(clip, label, myToken).then(function () {
+        return timedPause(pauseMs(text), "after " + label, myToken);
+      });
+    }
+
+    var seq = Promise.resolve();
+    PHRASES.forEach(function (ph, i) {
+      var n = i + 1;
+      seq = seq
+        .then(function () { if (myToken !== runToken) return; setStatus("Phrase " + n + " of " + PHRASES.length + " — French (1st time)"); return step("fr", ph.fr, "p" + n + ".fr1"); })
+        .then(function () { if (myToken !== runToken) return; setStatus("Phrase " + n + " of " + PHRASES.length + " — French (2nd time)"); return step("fr", ph.fr, "p" + n + ".fr2"); })
+        .then(function () { if (myToken !== runToken) return; setStatus("Phrase " + n + " of " + PHRASES.length + " — English"); return step("en", ph.en, "p" + n + ".en"); })
+        .then(function () { if (myToken !== runToken) return; setStatus("Phrase " + n + " of " + PHRASES.length + " — French (3rd time)"); return step("fr", ph.fr, "p" + n + ".fr3"); });
+    });
+    seq.then(function () {
+      if (myToken !== runToken) return;
+      drillRunning = false;
+      log("system", "=== FULL RUN complete: all " + PHRASES.length + " phrases, one tap. ===");
+      setStatus("Run finished. Do the next run from the checklist, or copy the log.");
+      if (wakeSentinel) { wakeSentinel.release().catch(function () {}); }
+    });
+  });
+
+  $("stopBtn").addEventListener("click", function () {
+    log("system", "=== Stop tapped ===");
+    runToken++;
+    drillRunning = false;
+    earBusy = false;
+    try { player.pause(); player.removeAttribute("src"); player.load(); } catch (e) {}
+    setStatus("Stopped.");
+    if (wakeSentinel) { wakeSentinel.release().catch(function () {}); wakeSentinel = null; }
+  });
+
+  // ---------------------------------------------------------------- copy log
+  $("copyBtn").addEventListener("click", function () {
+    var text = logLines.join("\n");
+    function fallback() {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) {}
+      document.body.removeChild(ta);
+      setStatus(ok ? "Log copied. Paste it into a message to Henning." : "Copy failed — screenshot the log instead.");
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        setStatus("Log copied. Paste it into a message to Henning.");
+      }, fallback);
+    } else fallback();
+  });
+
+  refreshKeyUI();
+  log("system", "Ready. Paste the key to begin.");
+})();
+</script>
+
+</body>
+</html>
