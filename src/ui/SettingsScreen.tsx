@@ -1,10 +1,30 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 /** Plain presentation shape for the pinned voice — no adapter types cross into UI. */
 export interface VoiceInfo {
   readonly provider: string
   readonly modelId: string
   readonly voiceId: string
+}
+
+/** One entry in the curated voice catalogue, as this screen needs it — no
+ * adapter type crosses into UI (mirrors `VoiceCatalogueEntry`). */
+export interface VoiceOption {
+  readonly provider: string
+  readonly modelId: string
+  readonly voiceId: string
+  readonly name: string
+  readonly description: string
+}
+
+/** What a preview attempt resolved to — mirrors `SynthError`'s `kind`
+ * without importing the adapter type. */
+export type PreviewOutcome = { ok: true } | { ok: false; reason: 'unauthorized' | 'quota' | 'network' }
+
+const PREVIEW_ERROR_COPY: Record<Exclude<PreviewOutcome, { ok: true }>['reason'], string> = {
+  unauthorized: "That didn't play — check the speech key above.",
+  quota: "That didn't play — this month's speech credit may be used up.",
+  network: "That didn't play — check the connection and try again.",
 }
 
 /** What `onExportBackup` resolved to, for the one-line status shown after. */
@@ -22,24 +42,30 @@ const RESTORE_ERROR_COPY: Record<RestoreRefusal['reason'], string> = {
 }
 
 /**
- * Settings — the two API keys, the pinned voice, and backup/restore
- * (docs/design.md §3.6, amended by T019 §7 for the ElevenLabs key/voice
- * display, and by T016 for backup/restore). Purely presentational: every
- * persist decision, every file read, and the actual share/download call are
- * the composition root's (App.tsx) — this component only describes the
- * choice and shows what the callbacks resolved to. A key's actual value
- * never reaches this component — only whether one is present — so there is
- * nothing here that could render it.
+ * Settings — the two API keys, the voice picker, and backup/restore
+ * (docs/design.md §3.6, amended by T019 §7 for the ElevenLabs key, by T016
+ * for backup/restore, and by T026 for the previewable voice picker — the
+ * voice is no longer display-only, and "the user" who picks it is the
+ * friend who drills, not whoever set the app up). Purely presentational:
+ * every persist decision, every synth call, every file read, and the actual
+ * share/download call are the composition root's (App.tsx) — this component
+ * only describes the choice and shows what the callbacks resolved to. A
+ * key's actual value never reaches this component — only whether one is
+ * present — so there is nothing here that could render it.
  */
 export function SettingsScreen({
   onBack,
   anthropicKeyPresent,
   elevenLabsKeyPresent,
   voice,
+  voices,
+  previewText,
   onSaveAnthropicKey,
   onClearAnthropicKey,
   onSaveElevenLabsKey,
   onClearElevenLabsKey,
+  onPreviewVoice,
+  onChooseVoice,
   onExportBackup,
   onRestoreFileChosen,
   onConfirmRestore,
@@ -49,10 +75,18 @@ export function SettingsScreen({
   anthropicKeyPresent: boolean
   elevenLabsKeyPresent: boolean
   voice: VoiceInfo | null
+  voices: readonly VoiceOption[]
+  previewText: string
   onSaveAnthropicKey: (key: string) => void
   onClearAnthropicKey: () => void
   onSaveElevenLabsKey: (key: string) => void
   onClearElevenLabsKey: () => void
+  onPreviewVoice: (
+    voice: { modelId: string; voiceId: string },
+    text: string,
+    signal: AbortSignal,
+  ) => Promise<PreviewOutcome>
+  onChooseVoice: (voice: { provider: string; modelId: string; voiceId: string }) => void
   onExportBackup: () => Promise<ExportOutcome>
   onRestoreFileChosen: (file: File) => Promise<RestoreFileResult>
   onConfirmRestore: () => void
@@ -64,6 +98,55 @@ export function SettingsScreen({
   const [restoreError, setRestoreError] = useState<string | null>(null)
   const [confirmingRestore, setConfirmingRestore] = useState(false)
   const restoreFileInput = useRef<HTMLInputElement>(null)
+  const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const previewController = useRef<AbortController | null>(null)
+  const [confirmingVoice, setConfirmingVoice] = useState<VoiceOption | null>(null)
+
+  useEffect(() => {
+    return () => {
+      previewController.current?.abort()
+    }
+  }, [])
+
+  function handlePreviewVoice(entry: VoiceOption) {
+    previewController.current?.abort()
+    const controller = new AbortController()
+    previewController.current = controller
+    setPreviewError(null)
+    setPreviewingVoiceId(entry.voiceId)
+
+    onPreviewVoice({ modelId: entry.modelId, voiceId: entry.voiceId }, previewText, controller.signal)
+      .then((outcome) => {
+        if (previewController.current !== controller) return
+        previewController.current = null
+        setPreviewingVoiceId(null)
+        if (!outcome.ok) setPreviewError(PREVIEW_ERROR_COPY[outcome.reason])
+      })
+      .catch(() => {
+        if (previewController.current !== controller) return
+        previewController.current = null
+        setPreviewingVoiceId(null)
+      })
+  }
+
+  function handleChooseVoice(entry: VoiceOption) {
+    setConfirmingVoice(entry)
+  }
+
+  function handleConfirmVoice() {
+    if (!confirmingVoice) return
+    onChooseVoice({
+      provider: confirmingVoice.provider,
+      modelId: confirmingVoice.modelId,
+      voiceId: confirmingVoice.voiceId,
+    })
+    setConfirmingVoice(null)
+  }
+
+  function handleCancelVoice() {
+    setConfirmingVoice(null)
+  }
 
   async function handleExportBackup() {
     const outcome = await onExportBackup()
@@ -204,20 +287,63 @@ export function SettingsScreen({
 
       <section className="settings-section">
         <h2 className="settings-section-title">Voice</h2>
-        {voice ? (
-          <>
-            <p className="settings-status" data-testid="voice-display">
-              {voice.provider} · {voice.modelId} · {voice.voiceId}
-            </p>
-            <p className="settings-help">
-              Changing this later regenerates every phrase's audio from scratch — it
-              isn't a quick swap, so it's only done deliberately, by whoever set up
-              this app.
-            </p>
-          </>
-        ) : (
+        <p className="settings-help">
+          Pick who reads the French out loud. Tap Preview to hear a real phrase before
+          choosing.
+        </p>
+        {!voice && (
           <p className="settings-status settings-status--calm" data-testid="voice-display">
-            No voice chosen yet — that's set up once, ask Henning.
+            No voice chosen yet — pick one below.
+          </p>
+        )}
+        {!elevenLabsKeyPresent && (
+          <p className="settings-status settings-status--calm" data-testid="voice-preview-needs-key">
+            Add the speech key above first — previewing a voice needs it.
+          </p>
+        )}
+        <ul className="voice-list" data-testid="voice-list">
+          {voices.map((entry) => {
+            const isCurrent = voice?.voiceId === entry.voiceId && voice?.modelId === entry.modelId
+            const isPreviewing = previewingVoiceId === entry.voiceId
+            return (
+              <li key={entry.voiceId} className="voice-option" data-testid={`voice-option-${entry.voiceId}`}>
+                <p className="voice-option-name">
+                  {entry.name}
+                  {isCurrent && (
+                    <span data-testid={`voice-current-${entry.voiceId}`} className="voice-current-badge">
+                      {' '}
+                      · Currently in use
+                    </span>
+                  )}
+                </p>
+                <p className="settings-help">{entry.description}</p>
+                <div className="settings-actions">
+                  <button
+                    type="button"
+                    data-testid={`voice-preview-${entry.voiceId}`}
+                    className="btn-icon"
+                    disabled={!elevenLabsKeyPresent}
+                    onClick={() => handlePreviewVoice(entry)}
+                  >
+                    {isPreviewing ? 'Playing…' : 'Preview'}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid={`voice-choose-${entry.voiceId}`}
+                    className="btn-primary"
+                    disabled={isCurrent}
+                    onClick={() => handleChooseVoice(entry)}
+                  >
+                    {isCurrent ? 'Current voice' : 'Use this voice'}
+                  </button>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+        {previewError && (
+          <p className="settings-status" data-testid="voice-preview-error">
+            {previewError}
           </p>
         )}
       </section>
@@ -279,6 +405,24 @@ export function SettingsScreen({
         Keys stay on this phone. They're never put in a link, never written to a
         log, and never included in a backup you export.
       </p>
+
+      {confirmingVoice && (
+        <div className="sheet" data-testid="voice-confirm-sheet">
+          <p className="sheet-title">Switch to {confirmingVoice.name}?</p>
+          <p className="sheet-label">
+            The audio for every phrase will be made again in this voice — that takes a
+            little while, so phrases will be briefly silent while it catches up.
+          </p>
+          <div className="sheet-actions">
+            <button type="button" data-testid="voice-cancel" className="btn-secondary" onClick={handleCancelVoice}>
+              Cancel
+            </button>
+            <button type="button" data-testid="voice-confirm" className="btn-primary" onClick={handleConfirmVoice}>
+              Switch voice
+            </button>
+          </div>
+        </div>
+      )}
 
       {confirmingRestore && (
         <div className="sheet" data-testid="restore-confirm-sheet">
