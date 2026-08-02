@@ -5,6 +5,16 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>phrase-drill</title>
+
+    <!--
+      iOS Safari does not read the web app manifest for these — each has to
+      be a head tag of its own, or "Add to Home Screen" silently falls back
+      to a Safari-chrome tab instead of a standalone app. See docs/pwa.md.
+    -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="phrase-drill" />
   </head>
   <body>
     <div id="root"></div>

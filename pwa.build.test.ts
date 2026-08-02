@@ -15,7 +15,13 @@ const distDir = path.join(rootDir, 'dist')
 
 describe('PWA build output', () => {
   beforeAll(() => {
-    execFileSync('npm', ['run', 'build'], { cwd: rootDir, stdio: 'inherit' })
+    // Force a real production build regardless of the test runner's own
+    // NODE_ENV, so this doesn't silently ride on vitest's dev-mode React.
+    execFileSync('npm', ['run', 'build'], {
+      cwd: rootDir,
+      stdio: 'inherit',
+      env: { ...process.env, NODE_ENV: 'production' },
+    })
   }, 120_000)
 
   it('emits a web app manifest with the fields an iOS/Android home-screen install needs', () => {
