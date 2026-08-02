@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>phrase-drill — Drill screen reference</title>
+<style>
+  :root{
+    --bg:#101114; --surface:#1a1c20; --ink:#f4f3ef; --ink-dim:#8b8d94;
+    --accent:#ff8a3d; --accent-dim:#7a4726; --danger:#e5484d; --ok:#3ecf8e;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;background:#0b0c0e;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;color:var(--ink);}
+  body{display:flex;flex-wrap:wrap;gap:32px;padding:32px;align-items:flex-start;justify-content:center;}
+  .caption{width:390px;text-align:center;font-size:13px;color:#8b8d94;margin-top:8px;}
+  .col{display:flex;flex-direction:column;align-items:center;}
+
+  .phone{
+    width:390px;height:844px;background:var(--bg);border-radius:44px;
+    border:10px solid #050506;position:relative;overflow:hidden;
+    box-shadow:0 20px 60px rgba(0,0,0,.5);
+    display:flex;flex-direction:column;
+  }
+  .notch{
+    position:absolute;top:10px;left:50%;transform:translateX(-50%);
+    width:120px;height:28px;background:#050506;border-radius:16px;z-index:5;
+  }
+  .safe-top{height:54px;flex:0 0 auto;}
+  .safe-bottom{height:34px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;}
+  .home-indicator{width:134px;height:5px;background:var(--ink-dim);border-radius:3px;opacity:.5;}
+
+  /* ---- start card ---- */
+  .start-card{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 28px;gap:18px;}
+  .deck-label{font-size:15px;color:var(--ink-dim);}
+  .deck-name{font-size:28px;font-weight:700;}
+  .phrase-count{font-size:15px;color:var(--ink-dim);margin-bottom:8px;}
+  .btn-primary{
+    background:var(--accent);color:#1a1002;border:none;border-radius:18px;
+    font-size:20px;font-weight:700;padding:18px 40px;width:100%;
+    min-height:56px;
+  }
+  .expectations{font-size:14px;color:var(--ink-dim);text-align:center;line-height:1.5;margin-top:4px;}
+  .expectations strong{color:var(--ink);font-weight:600;}
+
+  /* ---- header ---- */
+  .drill-header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:0 20px;height:44px;flex:0 0 auto;
+  }
+  .drill-header .name{font-size:15px;color:var(--ink-dim);}
+  .stop-btn{
+    width:32px;height:32px;border-radius:8px;background:var(--surface);
+    display:flex;align-items:center;justify-content:center;color:var(--ink-dim);font-size:14px;
+  }
+
+  /* ---- beat row ---- */
+  .beat-row{display:flex;gap:10px;justify-content:center;margin:0 0 28px;}
+  .beat{width:14px;height:48px;border-radius:8px;background:transparent;border:2px solid var(--ink-dim);opacity:.5;}
+  .beat.done{background:var(--ink-dim);border-color:var(--ink-dim);opacity:.6;}
+  .beat.live{background:var(--accent);border-color:var(--accent);opacity:1;}
+  .beat.live.pause{background:linear-gradient(90deg,var(--accent) 55%, transparent 55%);}
+
+  .drill-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 24px;}
+  .current-line{font-size:56px;font-weight:700;text-align:center;line-height:1.05;}
+  .current-line.en{color:var(--ink-dim);font-size:40px;}
+  .rep-counter{font-size:15px;color:var(--ink-dim);margin-top:18px;}
+
+  .controls{
+    display:flex;align-items:center;justify-content:center;gap:22px;
+    padding:0 24px 8px;flex:0 0 auto;
+  }
+  .ctrl-round{
+    width:56px;height:56px;border-radius:50%;background:var(--surface);
+    display:flex;align-items:center;justify-content:center;color:var(--ink);font-size:20px;
+  }
+  .ctrl-primary{
+    width:84px;height:84px;border-radius:50%;background:var(--accent);
+    display:flex;align-items:center;justify-content:center;color:#1a1002;font-size:30px;
+  }
+
+  /* ---- interrupted banner ---- */
+  .banner{
+    position:absolute;top:54px;left:0;right:0;z-index:4;
+    background:#2a2c31;color:var(--ink);font-size:14px;font-weight:600;
+    text-align:center;padding:12px 20px;border-bottom:1px solid #35373d;
+  }
+  .banner.dead{background:#2c1414;color:#ffb3b3;border-bottom:1px solid #4a1f1f;}
+
+  .btn-resume{
+    background:var(--accent);color:#1a1002;border:none;border-radius:20px;
+    font-size:22px;font-weight:700;padding:20px 44px;
+  }
+
+  /* Scan no-key state (bonus reference, same frame) */
+  .scan-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 32px;text-align:center;gap:16px;}
+  .scan-empty .icon{width:56px;height:56px;border-radius:50%;background:var(--surface);display:flex;align-items:center;justify-content:center;font-size:24px;color:var(--ink-dim);}
+  .scan-empty p{font-size:16px;color:var(--ink-dim);line-height:1.5;margin:0;}
+  .btn-secondary{background:var(--surface);color:var(--ink);border:none;border-radius:14px;font-size:16px;font-weight:600;padding:14px 28px;}
+</style>
+</head>
+<body>
+
+<div class="col">
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="safe-top"></div>
+    <div class="start-card">
+      <div class="deck-label">Deck</div>
+      <div class="deck-name">Climbing</div>
+      <div class="phrase-count">14 phrases</div>
+      <button class="btn-primary">Start Drill</button>
+      <div class="expectations">
+        Keep this screen on and open — the drill stops if your phone locks or you switch apps. You'll get a clear "tap to resume."<br/><br/>
+        Plays through the speaker even on silent.
+      </div>
+    </div>
+    <div class="safe-bottom"><div class="home-indicator"></div></div>
+  </div>
+  <div class="caption">1 — Start card. Every drill begins from a real tap; the two iOS surprises (screen-on, plays on silent) are stated before she starts, not discovered mid-drill.</div>
+</div>
+
+<div class="col">
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="safe-top"></div>
+    <div class="drill-header">
+      <div class="name">Climbing</div>
+      <div class="stop-btn">■</div>
+    </div>
+    <div class="beat-row">
+      <div class="beat done"></div>
+      <div class="beat done"></div>
+      <div class="beat live pause"></div>
+      <div class="beat"></div>
+    </div>
+    <div class="drill-body">
+      <div class="current-line">Attrape la prise.</div>
+      <div class="rep-counter">Rep 7 of 23</div>
+    </div>
+    <div class="controls">
+      <div class="ctrl-round">⏮</div>
+      <div class="ctrl-primary">‖</div>
+      <div class="ctrl-round">⏭</div>
+    </div>
+    <div class="safe-bottom"><div class="home-indicator"></div></div>
+  </div>
+  <div class="caption">2 — Playing. Beat 3 of 4 (a pause step, mid-fill) is live: two done, one filling, one upcoming. Readable as shape alone, no reading required.</div>
+</div>
+
+<div class="col">
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="safe-top"></div>
+    <div class="banner">Drill paused when your screen locked.</div>
+    <div class="drill-header" style="margin-top:40px;">
+      <div class="name">Climbing</div>
+      <div class="stop-btn">■</div>
+    </div>
+    <div class="beat-row">
+      <div class="beat done"></div>
+      <div class="beat done"></div>
+      <div class="beat live"></div>
+      <div class="beat"></div>
+    </div>
+    <div class="drill-body">
+      <div class="current-line" style="opacity:.55;">Attrape la prise.</div>
+      <div class="rep-counter">Rep 7 of 23 · paused</div>
+    </div>
+    <div class="controls">
+      <div class="ctrl-round">⏮</div>
+      <button class="btn-resume">Tap to resume</button>
+    </div>
+    <div class="safe-bottom"><div class="home-indicator"></div></div>
+  </div>
+  <div class="caption">3 — Interrupted (screen lock). State freezes exactly where it left off — Rep 7, beat 3 — never resets. The primary control relabels in place to "Tap to resume." This is the state most likely to be got wrong; it is designed explicitly, not left as a dead screen.</div>
+</div>
+
+<div class="col">
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="safe-top"></div>
+    <div class="scan-empty">
+      <div class="icon">🔒</div>
+      <p><strong style="color:var(--ink);">Scanning needs a key</strong><br/>from whoever set this app up for you. Ask them to add it in Settings.</p>
+      <button class="btn-secondary">Open Settings</button>
+    </div>
+    <div class="safe-bottom"><div class="home-indicator"></div></div>
+  </div>
+  <div class="caption">4 — Scan, no API key present. Calm, non-alarming — no red, no error iconography. This is an expected state, not a fault.</div>
+</div>
+
+</body>
+</html>
