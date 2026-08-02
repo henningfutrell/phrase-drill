@@ -4,6 +4,7 @@ import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updateP
 import type { Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, parseLibraryFile } from './adapters/storage'
 import { shareBackupFile } from './adapters/share/web-share'
+import type { GenerationQueue } from './adapters/audio/generation-queue'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
 import { SettingsScreen, type ExportOutcome, type RestoreFileResult } from './ui/SettingsScreen'
@@ -32,7 +33,15 @@ function downloadFile(file: File): void {
  * every change through the injected `DeckStore` port; screens themselves
  * only see plain data and callbacks.
  */
-function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore: SettingsStore }) {
+function App({
+  deckStore,
+  settingsStore,
+  generationQueue,
+}: {
+  deckStore: DeckStore
+  settingsStore: SettingsStore
+  generationQueue: GenerationQueue
+}) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
@@ -120,9 +129,22 @@ function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore
 
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
 
-  function withSelectedDeck(fn: (deck: Deck) => Deck) {
-    if (!selectedDeck) return
-    persist(fn(selectedDeck))
+  function withSelectedDeck(fn: (deck: Deck) => Deck): Deck | undefined {
+    if (!selectedDeck) return undefined
+    const updated = fn(selectedDeck)
+    persist(updated)
+    return updated
+  }
+
+  /**
+   * Eager generation (T019 §3): queue both Clips as soon as a Phrase's text
+   * is saved (add or edit). The text has already been persisted by
+   * `withSelectedDeck` above by the time this runs — generation is never on
+   * the critical path for the save.
+   */
+  function queuePhraseGeneration(updated: Deck | undefined, phraseId: PhraseId): void {
+    const phrase = updated?.phrases.find((p) => p.id === phraseId)
+    if (phrase) generationQueue.enqueue(phrase)
   }
 
   if (decks === undefined) {
@@ -167,12 +189,15 @@ function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore
         onBack={() => setSelectedDeckId(undefined)}
         onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
         onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
-        onAddPhrase={(french, english) =>
-          withSelectedDeck((deck) => addPhrase(deck, { id: crypto.randomUUID(), french, english }))
-        }
-        onUpdatePhrase={(id: PhraseId, fields) =>
-          withSelectedDeck((deck) => updatePhrase(deck, id, fields))
-        }
+        onAddPhrase={(french, english) => {
+          const id = crypto.randomUUID()
+          const updated = withSelectedDeck((deck) => addPhrase(deck, { id, french, english }))
+          queuePhraseGeneration(updated, id)
+        }}
+        onUpdatePhrase={(id: PhraseId, fields) => {
+          const updated = withSelectedDeck((deck) => updatePhrase(deck, id, fields))
+          queuePhraseGeneration(updated, id)
+        }}
         onDeletePhrase={(id: PhraseId) => withSelectedDeck((deck) => removePhrase(deck, id))}
         onMovePhraseUp={(id: PhraseId) =>
           withSelectedDeck((deck) => {

@@ -22,8 +22,8 @@ function fakeClipCache(ready: readonly string[]): ClipCache {
   }
 }
 
-function fakeQueue(): GenerationQueue & { enqueue: ReturnType<typeof vi.fn> } {
-  return { enqueue: vi.fn(), statusFor: vi.fn() }
+function fakeQueue(): GenerationQueue & { enqueue: ReturnType<typeof vi.fn<GenerationQueue['enqueue']>> } {
+  return { enqueue: vi.fn<GenerationQueue['enqueue']>(), statusFor: vi.fn() }
 }
 
 describe('computeDrillReadiness', () => {
