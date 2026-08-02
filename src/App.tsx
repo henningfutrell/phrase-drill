@@ -1,12 +1,30 @@
 import { useEffect, useState } from 'react'
-import type { Deck, DeckId, DeckStore, PhraseId } from './domain'
+import type { Deck, DeckId, DeckStore, Library, PhraseId } from './domain'
 import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updatePhrase } from './domain'
 import type { Settings, SettingsStore } from './adapters/storage'
+import { backupFilename, parseLibraryFile } from './adapters/storage'
+import { shareBackupFile } from './adapters/share/web-share'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
-import { SettingsScreen } from './ui/SettingsScreen'
+import { SettingsScreen, type ExportOutcome, type RestoreFileResult } from './ui/SettingsScreen'
 
 const EMPTY_SETTINGS: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null }
+
+/**
+ * The fallback for a platform that cannot share files (Web Share Level 2
+ * file support is not universal — see adapters/share/web-share.ts). A
+ * plain anchor download is the desktop-style pattern docs/design.md §3.6
+ * explicitly wants to avoid as the *primary* path, but it is the only
+ * available recovery when the share sheet itself is unavailable.
+ */
+function downloadFile(file: File): void {
+  const url = URL.createObjectURL(file)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = file.name
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
 
 /**
  * Composition root — the only place allowed to import from both `domain/`
@@ -19,6 +37,7 @@ function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [pendingRestore, setPendingRestore] = useState<Library | undefined>(undefined)
 
   useEffect(() => {
     let cancelled = false
@@ -63,6 +82,42 @@ function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore
     if (selectedDeckId === id) setSelectedDeckId(undefined)
   }
 
+  async function handleExportBackup(): Promise<ExportOutcome> {
+    const library = await deckStore.exportAll()
+    const file = new File([JSON.stringify(library, null, 2)], backupFilename(new Date()), {
+      type: 'application/json',
+    })
+    const outcome = await shareBackupFile(file)
+    if (outcome === 'unsupported') {
+      downloadFile(file)
+      return 'downloaded'
+    }
+    return outcome
+  }
+
+  async function handleRestoreFileChosen(file: File): Promise<RestoreFileResult> {
+    const text = await file.text()
+    const result = parseLibraryFile(text)
+    if (!result.ok) return result
+    setPendingRestore(result.library)
+    return { ok: true }
+  }
+
+  function handleConfirmRestore() {
+    const library = pendingRestore
+    if (!library) return
+    setPendingRestore(undefined)
+    void deckStore.importAll(library).then(() => deckStore.loadAll()).then((loaded) => {
+      setDecks(loaded)
+      setSelectedDeckId(undefined)
+      setSettingsOpen(false)
+    })
+  }
+
+  function handleCancelRestore() {
+    setPendingRestore(undefined)
+  }
+
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
 
   function withSelectedDeck(fn: (deck: Deck) => Deck) {
@@ -97,6 +152,10 @@ function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore
           setSettings((current) => ({ ...current, elevenLabsApiKey: null }))
           void settingsStore.setElevenLabsApiKey(null)
         }}
+        onExportBackup={handleExportBackup}
+        onRestoreFileChosen={handleRestoreFileChosen}
+        onConfirmRestore={handleConfirmRestore}
+        onCancelRestore={handleCancelRestore}
       />
     )
   }
