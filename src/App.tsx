@@ -1,17 +1,33 @@
-import { useEffect, useState } from 'react'
-import type { Deck, DeckId, DeckStore, Library, PhraseId } from './domain'
+import { useEffect, useMemo, useState } from 'react'
+import type { Deck, DeckId, DeckStore, Library, Mix, Phrase, PhraseId, SpeechPort } from './domain'
 import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updatePhrase } from './domain'
-import type { Settings, SettingsStore } from './adapters/storage'
+import type { ClipCache, Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, parseLibraryFile } from './adapters/storage'
 import { shareBackupFile } from './adapters/share/web-share'
 import type { SynthClient } from './adapters/audio/eleven-labs-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import { FALLBACK_PREVIEW_PHRASE, VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
+import { createClipPlayer } from './adapters/audio/clip-player'
+import { computeDrillReadiness } from './adapters/audio/drill-readiness'
+import { createSystemClock } from './adapters/audio/system-clock'
+import { createWakeLockPort } from './adapters/device/wake-lock'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
+import { MixSelectScreen } from './ui/MixSelectScreen'
+import { DrillScreen, type DrillReadinessResult } from './ui/DrillScreen'
 import { SettingsScreen, type ExportOutcome, type PreviewOutcome, type RestoreFileResult } from './ui/SettingsScreen'
 
 const EMPTY_SETTINGS: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null }
+
+/**
+ * Stands in for the DrillScreen's required `speech` prop while no voice is
+ * pinned (the 'no-voice' blocked phase — DrillScreen never actually calls
+ * `speak()` there, since Start is unreachable, but the prop is required).
+ */
+const NOOP_SPEECH: SpeechPort = {
+  async speak() {},
+  cancel() {},
+}
 
 /**
  * Plays a previewed voice clip. Best-effort: a preview isn't guaranteed on
@@ -61,17 +77,41 @@ function App({
   settingsStore,
   synthClient,
   generationQueue,
+  clipCache,
 }: {
   deckStore: DeckStore
   settingsStore: SettingsStore
   synthClient: SynthClient
   generationQueue: GenerationQueue
+  clipCache: ClipCache
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [pendingRestore, setPendingRestore] = useState<Library | undefined>(undefined)
+  const [mixOpen, setMixOpen] = useState(false)
+  const [drillTarget, setDrillTarget] = useState<
+    { title: string; phrases: readonly Phrase[] } | undefined
+  >(undefined)
+
+  // One Wake Lock port for the app's lifetime (T006 carried obligation:
+  // hold the screen on for a Drill's duration). Stateless, so a single
+  // instance is fine to reuse across every Drill. `useMemo`, not `useRef`:
+  // its value is read during render (passed straight into DrillScreen
+  // props), and a ref must never be read there (react-hooks/refs).
+  const wakeLock = useMemo(() => createWakeLockPort(), [])
+  // One ClockPort for the app's lifetime — also stateless.
+  const systemClock = useMemo(() => createSystemClock(), [])
+  // Rebuilt only when the pinned voice actually changes (`settings.voice`
+  // is only ever replaced, never mutated), so the same `<audio>` element
+  // keeps serving unlock() and every real Clip across Drills run under the
+  // same voice (T023's unlock-persists assumption — unverified on real iOS
+  // Safari, confirmed only in T013).
+  const clipPlayer = useMemo(
+    () => (settings.voice ? createClipPlayer({ element: new Audio(), clipCache, voice: settings.voice }) : null),
+    [settings.voice, clipCache],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -238,6 +278,37 @@ function App({
     )
   }
 
+  if (drillTarget) {
+    return (
+      <DrillScreen
+        title={drillTarget.title}
+        checkReadiness={(): Promise<DrillReadinessResult> =>
+          computeDrillReadiness(drillTarget.phrases, { clipCache, generationQueue, voice: settings.voice })
+        }
+        speech={clipPlayer ?? NOOP_SPEECH}
+        clock={systemClock}
+        unlock={async () => (clipPlayer ? clipPlayer.unlock() : false)}
+        acquireWakeLock={() => wakeLock.acquire()}
+        releaseWakeLock={() => wakeLock.release()}
+        onExit={() => setDrillTarget(undefined)}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+    )
+  }
+
+  if (mixOpen) {
+    return (
+      <MixSelectScreen
+        decks={decks}
+        onBack={() => setMixOpen(false)}
+        onStartMix={(mix: Mix) => {
+          setMixOpen(false)
+          setDrillTarget({ title: 'Mix', phrases: mix.phrases })
+        }}
+      />
+    )
+  }
+
   if (selectedDeck) {
     return (
       <DeckDetailScreen
@@ -245,6 +316,7 @@ function App({
         onBack={() => setSelectedDeckId(undefined)}
         onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
         onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
+        onDrillDeck={() => setDrillTarget({ title: selectedDeck.name, phrases: selectedDeck.phrases })}
         onAddPhrase={(french, english) => {
           const id = crypto.randomUUID()
           const updated = withSelectedDeck((deck) => addPhrase(deck, { id, french, english }))
@@ -281,6 +353,7 @@ function App({
       onDeleteDeck={handleDeleteDeck}
       onOpenDeck={setSelectedDeckId}
       onOpenSettings={() => setSettingsOpen(true)}
+      onOpenMix={() => setMixOpen(true)}
     />
   )
 }

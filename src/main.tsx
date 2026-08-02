@@ -30,6 +30,7 @@ createRoot(rootElement).render(
       settingsStore={settingsStore}
       synthClient={synthClient}
       generationQueue={generationQueue}
+      clipCache={clipCache}
     />
   </StrictMode>,
 )

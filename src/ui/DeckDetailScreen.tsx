@@ -21,6 +21,7 @@ export function DeckDetailScreen({
   onDeletePhrase,
   onMovePhraseUp,
   onMovePhraseDown,
+  onDrillDeck,
 }: {
   deck: Deck
   onBack: () => void
@@ -31,6 +32,8 @@ export function DeckDetailScreen({
   onDeletePhrase: (id: PhraseId) => void
   onMovePhraseUp: (id: PhraseId) => void
   onMovePhraseDown: (id: PhraseId) => void
+  /** Launches a Drill over this whole Deck (docs/design.md §3.3, T006). */
+  onDrillDeck: () => void
 }) {
   const [renaming, setRenaming] = useState(false)
   const [phraseSheet, setPhraseSheet] = useState<PhraseSheetState>(undefined)
@@ -71,6 +74,15 @@ export function DeckDetailScreen({
           </button>
         )}
       </header>
+
+      <button
+        type="button"
+        data-testid="drill-deck"
+        className="btn-primary"
+        onClick={onDrillDeck}
+      >
+        Drill this Deck
+      </button>
 
       {deck.phrases.length === 0 ? (
         <p className="empty-state">Add phrases to drill this Deck.</p>
