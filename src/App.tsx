@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Deck, DeckId, DeckStore, Library, Mix, Phrase, PhraseId, SpeechPort } from './domain'
+import type {
+  Deck,
+  DeckId,
+  DeckStore,
+  DraftPhrase,
+  Library,
+  Mix,
+  Phrase,
+  PhraseId,
+  ScanReader,
+  SpeechPort,
+} from './domain'
 import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updatePhrase } from './domain'
 import type { ClipCache, Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, parseLibraryFile } from './adapters/storage'
@@ -14,6 +25,7 @@ import { createWakeLockPort } from './adapters/device/wake-lock'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
 import { MixSelectScreen } from './ui/MixSelectScreen'
+import { ImportScreen, type ImportTarget } from './ui/ImportScreen'
 import { DrillScreen, type DrillReadinessResult } from './ui/DrillScreen'
 import { SettingsScreen, type ExportOutcome, type PreviewOutcome, type RestoreFileResult } from './ui/SettingsScreen'
 
@@ -78,12 +90,14 @@ function App({
   synthClient,
   generationQueue,
   clipCache,
+  scanReader,
 }: {
   deckStore: DeckStore
   settingsStore: SettingsStore
   synthClient: SynthClient
   generationQueue: GenerationQueue
   clipCache: ClipCache
+  scanReader: ScanReader
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
@@ -91,6 +105,7 @@ function App({
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [pendingRestore, setPendingRestore] = useState<Library | undefined>(undefined)
   const [mixOpen, setMixOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [drillTarget, setDrillTarget] = useState<
     { title: string; phrases: readonly Phrase[] } | undefined
   >(undefined)
@@ -133,15 +148,19 @@ function App({
     }
   }, [settingsStore])
 
+  /** Whole-Deck upsert into local state and the store — an unknown id is a
+   * newly-created Deck (Import's "New Deck…" path shares this with
+   * `handleCreateDeck`), a known id replaces in place. */
   function persist(deck: Deck) {
-    setDecks((current) => (current ?? []).map((d) => (d.id === deck.id ? deck : d)))
+    setDecks((current) => {
+      const list = current ?? []
+      return list.some((d) => d.id === deck.id) ? list.map((d) => (d.id === deck.id ? deck : d)) : [...list, deck]
+    })
     void deckStore.save(deck)
   }
 
   function handleCreateDeck(name: string) {
-    const deck = createDeck(crypto.randomUUID(), name)
-    setDecks((current) => [...(current ?? []), deck])
-    void deckStore.save(deck)
+    persist(createDeck(crypto.randomUUID(), name))
   }
 
   function handleRenameDeck(id: DeckId, name: string) {
@@ -235,6 +254,28 @@ function App({
     if (phrase) generationQueue.enqueue(phrase)
   }
 
+  /**
+   * A confirmed Scan (docs/design.md §3.5 Step 3, carried from T024): append
+   * every reviewed Draft Phrase to the chosen Deck — an existing one, or one
+   * created inline — persist it once, and queue generation for each new
+   * Phrase, same as a manually-added one. Leaves Import for the Deck she
+   * just filled, so she can see what landed.
+   */
+  function handleImportSave(target: ImportTarget, drafts: readonly DraftPhrase[]): void {
+    const base = target.kind === 'existing' ? (decks ?? []).find((d) => d.id === target.deckId) : createDeck(crypto.randomUUID(), target.name)
+    if (!base) return
+    const newIds: PhraseId[] = []
+    const updated = drafts.reduce((deck, draft) => {
+      const id = crypto.randomUUID()
+      newIds.push(id)
+      return addPhrase(deck, { id, french: draft.french, english: draft.english })
+    }, base)
+    persist(updated)
+    for (const id of newIds) queuePhraseGeneration(updated, id)
+    setImportOpen(false)
+    setSelectedDeckId(updated.id)
+  }
+
   if (decks === undefined) {
     return <main className="screen" />
   }
@@ -309,6 +350,19 @@ function App({
     )
   }
 
+  if (importOpen) {
+    return (
+      <ImportScreen
+        decks={decks}
+        scanReader={scanReader}
+        apiKeyPresent={settings.anthropicApiKey !== null}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onSave={handleImportSave}
+        onCancel={() => setImportOpen(false)}
+      />
+    )
+  }
+
   if (selectedDeck) {
     return (
       <DeckDetailScreen
@@ -354,6 +408,7 @@ function App({
       onOpenDeck={setSelectedDeckId}
       onOpenSettings={() => setSettingsOpen(true)}
       onOpenMix={() => setMixOpen(true)}
+      onOpenImport={() => setImportOpen(true)}
     />
   )
 }
