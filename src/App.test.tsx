@@ -5,6 +5,7 @@ import App from './App'
 import type { Deck, DeckStore, Library } from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { Settings, SettingsStore } from './adapters/storage'
+import type { GenerationQueue } from './adapters/audio/generation-queue'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
@@ -57,6 +58,23 @@ function createFakeDeckStore(initial: readonly Deck[] = []): DeckStore & { decks
   }
 }
 
+/** A GenerationQueue fake that only records what it was asked to enqueue —
+ * the real queue is exercised in src/adapters/audio; App's wiring is what
+ * these tests care about. `enqueue` never resolves, by design: it proves the
+ * Phrase save itself is never gated on generation completing. */
+function createFakeGenerationQueue(): GenerationQueue & { enqueued: Array<{ id: string; french: string; english: string }> } {
+  const enqueued: Array<{ id: string; french: string; english: string }> = []
+  return {
+    enqueued,
+    enqueue(phrase) {
+      enqueued.push({ id: phrase.id, french: phrase.french, english: phrase.english })
+    },
+    statusFor() {
+      return undefined
+    },
+  }
+}
+
 function typeInto(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
   setter.call(input, value)
@@ -81,9 +99,9 @@ afterEach(() => {
   container.remove()
 })
 
-async function renderApp(store: DeckStore) {
+async function renderApp(store: DeckStore, generationQueue: GenerationQueue = createFakeGenerationQueue()) {
   await act(async () => {
-    root.render(<App deckStore={store} settingsStore={createFakeSettingsStore()} />)
+    root.render(<App deckStore={store} settingsStore={createFakeSettingsStore()} generationQueue={generationQueue} />)
   })
 }
 
@@ -154,6 +172,45 @@ describe('App wired to DeckStore', () => {
 
     expect(store.decks.has('d1')).toBe(false)
     expect(container.querySelector('[data-testid="deck-row-d1"]')).toBeNull()
+  })
+})
+
+describe('App wired to the audio generation queue', () => {
+  it('queues generation for both Clips when a Phrase is saved, without gating the persisted text on it', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(store, generationQueue)
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+    const french = container.querySelector('[data-testid="phrase-french-input"]') as HTMLInputElement
+    const english = container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement
+    act(() => typeInto(french, 'Bonjour'))
+    act(() => typeInto(english, 'Hello'))
+    await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
+
+    // The text is persisted even though the fake queue's enqueue() never
+    // resolves — proves the save is not gated on generation.
+    const saved = store.decks.get('d1')!
+    expect(saved.phrases).toHaveLength(1)
+    expect(generationQueue.enqueued).toEqual([
+      { id: saved.phrases[0]!.id, french: 'Bonjour', english: 'Hello' },
+    ])
+  })
+
+  it('re-queues generation for both Clips when a Phrase is edited', async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(store, generationQueue)
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="edit-phrase-p1"]')!))
+    const french = container.querySelector('[data-testid="phrase-french-input"]') as HTMLInputElement
+    act(() => typeInto(french, 'Bonsoir'))
+    await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
+
+    expect(store.decks.get('d1')!.phrases[0]).toMatchObject({ french: 'Bonsoir', english: 'Hello' })
+    expect(generationQueue.enqueued).toEqual([{ id: 'p1', french: 'Bonsoir', english: 'Hello' }])
   })
 })
 
