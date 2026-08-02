@@ -15,12 +15,15 @@ export function DecksScreen({
   onRenameDeck,
   onDeleteDeck,
   onOpenDeck,
+  onOpenSettings,
 }: {
   decks: readonly Deck[]
   onCreateDeck: (name: string) => void
   onRenameDeck: (id: DeckId, name: string) => void
   onDeleteDeck: (id: DeckId) => void
   onOpenDeck: (id: DeckId) => void
+  /** Entry point to Settings (docs/design.md §3.6) — omitted only in tests that don't exercise it. */
+  onOpenSettings?: () => void
 }) {
   const [sheet, setSheet] = useState<SheetState>(undefined)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<DeckId | undefined>(undefined)
@@ -29,14 +32,26 @@ export function DecksScreen({
     <main className="screen">
       <header className="screen-header">
         <h1>Decks</h1>
-        <button
-          type="button"
-          data-testid="new-deck"
-          className="link-action"
-          onClick={() => setSheet({ kind: 'create' })}
-        >
-          + New Deck
-        </button>
+        <div className="screen-header-actions">
+          {onOpenSettings && (
+            <button
+              type="button"
+              data-testid="open-settings"
+              className="link-action"
+              onClick={onOpenSettings}
+            >
+              Settings
+            </button>
+          )}
+          <button
+            type="button"
+            data-testid="new-deck"
+            className="link-action"
+            onClick={() => setSheet({ kind: 'create' })}
+          >
+            + New Deck
+          </button>
+        </div>
       </header>
 
       {decks.length === 0 ? (

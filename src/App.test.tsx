@@ -4,6 +4,27 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import App from './App'
 import type { Deck, DeckStore, Library } from './domain'
 import { LIBRARY_FORMAT } from './domain'
+import type { Settings, SettingsStore } from './adapters/storage'
+
+/** In-memory SettingsStore fake — the real one is exercised in
+ * src/adapters/storage; App's wiring is what these tests care about. */
+function createFakeSettingsStore(): SettingsStore {
+  let settings: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null }
+  return {
+    async load() {
+      return settings
+    },
+    async setAnthropicApiKey(key) {
+      settings = { ...settings, anthropicApiKey: key }
+    },
+    async setElevenLabsApiKey(key) {
+      settings = { ...settings, elevenLabsApiKey: key }
+    },
+    async setVoice(voice) {
+      settings = { ...settings, voice }
+    },
+  }
+}
 
 /** In-memory DeckStore fake — the real DeckStore is exercised in
  * src/adapters/storage; this fake only lets App's wiring to the port be
@@ -57,7 +78,7 @@ afterEach(() => {
 
 async function renderApp(store: DeckStore) {
   await act(async () => {
-    root.render(<App deckStore={store} />)
+    root.render(<App deckStore={store} settingsStore={createFakeSettingsStore()} />)
   })
 }
 

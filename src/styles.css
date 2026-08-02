@@ -1,7 +1,7 @@
 /*
  * Design tokens and screen styles for List/Deck management (docs/design.md
- * §1-§3.3). Only the Decks and Deck-detail screens are styled here — Drill,
- * Mix, Scan, and Settings land with their own tasks.
+ * §1-§3.3, §3.6). Decks, Deck-detail, and Settings are styled here — Drill,
+ * Mix, and Scan land with their own tasks.
  */
 
 @import './styles/tokens.css';
@@ -51,6 +51,12 @@ button:disabled {
   font-size: var(--text-lg);
   font-weight: 600;
   margin: 0;
+}
+
+.screen-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .link-action {
@@ -219,4 +225,44 @@ button:disabled {
   justify-content: flex-end;
   gap: 12px;
   margin-top: 8px;
+}
+
+.settings-section {
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-section-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  margin: 0;
+}
+
+.settings-help {
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+  margin: 0;
+}
+
+.settings-status {
+  font-size: var(--text-sm);
+  margin: 0;
+}
+
+.settings-status--calm {
+  color: var(--ink-dim);
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.settings-privacy-note {
+  text-align: center;
 }
