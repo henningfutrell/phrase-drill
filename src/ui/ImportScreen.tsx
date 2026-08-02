@@ -46,6 +46,8 @@ export function ImportScreen({
   onOpenSettings,
   onSave,
   onCancel,
+  showBackupNudge = false,
+  onDismissBackupNudge,
 }: {
   readonly decks: readonly Deck[]
   readonly scanReader: ScanReader
@@ -62,6 +64,15 @@ export function ImportScreen({
   onOpenSettings?(): void
   onSave(target: ImportTarget, phrases: readonly DraftPhrase[]): void
   onCancel(): void
+  /**
+   * The first-run backup nudge (docs/design.md §3.6, T027) — shown once the
+   * Scan has succeeded and produced Draft Phrases to review, and only until
+   * she's dismissed it once (anywhere it appears; shared with the Decks
+   * empty-state nudge).
+   */
+  showBackupNudge?: boolean
+  /** Required whenever `showBackupNudge` can be true. */
+  onDismissBackupNudge?(): void
 }) {
   const [step, setStep] = useState<Step>({ kind: 'capture' })
   const [target, setTarget] = useState<ImportTarget | undefined>(undefined)
@@ -215,6 +226,19 @@ export function ImportScreen({
 
       {step.kind === 'review' && (
         <>
+          {showBackupNudge && (
+            <p className="backup-nudge" data-testid="backup-nudge">
+              Tip: back up your phrases in Settings.{' '}
+              <button
+                type="button"
+                data-testid="dismiss-backup-nudge"
+                className="link-action"
+                onClick={onDismissBackupNudge}
+              >
+                Got it
+              </button>
+            </p>
+          )}
           {drafts.length === 0 ? (
             <p className="empty-state">Every Draft Phrase was removed — nothing left to save.</p>
           ) : (

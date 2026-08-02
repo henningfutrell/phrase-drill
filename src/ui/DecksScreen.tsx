@@ -18,6 +18,8 @@ export function DecksScreen({
   onOpenSettings,
   onOpenMix,
   onOpenImport,
+  showBackupNudge = false,
+  onDismissBackupNudge,
 }: {
   decks: readonly Deck[]
   onCreateDeck: (name: string) => void
@@ -30,6 +32,14 @@ export function DecksScreen({
   onOpenMix?: () => void
   /** Entry point to Scan / correction (docs/design.md §3.5) — omitted only in tests that don't exercise it. */
   onOpenImport?: () => void
+  /**
+   * The first-run backup nudge (docs/design.md §3.6, T027) — shown only
+   * alongside the empty state, and only until she's dismissed it once
+   * (anywhere it appears; the flag is shared with the after-Scan nudge).
+   */
+  showBackupNudge?: boolean
+  /** Required whenever `showBackupNudge` can be true. */
+  onDismissBackupNudge?: () => void
 }) {
   const [sheet, setSheet] = useState<SheetState>(undefined)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<DeckId | undefined>(undefined)
@@ -81,9 +91,24 @@ export function DecksScreen({
       </header>
 
       {decks.length === 0 ? (
-        <p className="empty-state">
-          Nothing here yet — start a Deck for one of your contexts.
-        </p>
+        <>
+          <p className="empty-state">
+            Nothing here yet — start a Deck for one of your contexts.
+          </p>
+          {showBackupNudge && (
+            <p className="backup-nudge" data-testid="backup-nudge">
+              Tip: back up your phrases in Settings.{' '}
+              <button
+                type="button"
+                data-testid="dismiss-backup-nudge"
+                className="link-action"
+                onClick={onDismissBackupNudge}
+              >
+                Got it
+              </button>
+            </p>
+          )}
+        </>
       ) : (
         <ul className="deck-list">
           {decks.map((deck) => (

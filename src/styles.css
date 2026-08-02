@@ -74,6 +74,16 @@ button:disabled {
   margin-top: 40px;
 }
 
+/* First-run backup nudge (docs/design.md §3.6, T027) — one line, low-key,
+   dismiss-once. Never competes visually with the primary content it sits
+   next to. */
+.backup-nudge {
+  color: var(--ink-dim);
+  font-size: var(--text-sm);
+  text-align: center;
+  margin-top: 12px;
+}
+
 .deck-list,
 .phrase-list {
   list-style: none;

@@ -17,6 +17,14 @@ export interface Settings {
   readonly anthropicApiKey: string | null
   readonly elevenLabsApiKey: string | null
   readonly voice: Voice | null
+  /**
+   * The first-run backup nudge (docs/design.md §3.6, T027), dismissed once
+   * and for good — shown on the Decks empty state and after the first
+   * successful Scan until she dismisses it from either place. Additive field:
+   * missing in previously-stored settings reads as `false` (never dismissed),
+   * so existing data needs no migration.
+   */
+  readonly backupNudgeDismissed: boolean
 }
 
 export interface SettingsStore {
@@ -27,11 +35,14 @@ export interface SettingsStore {
   setElevenLabsApiKey(key: string | null): Promise<void>
   /** `null` clears the pinned voice. */
   setVoice(voice: Voice | null): Promise<void>
+  /** One-way: there is no way back to `false` once dismissed. */
+  dismissBackupNudge(): Promise<void>
 }
 
 const ANTHROPIC_API_KEY = 'anthropicApiKey'
 const ELEVENLABS_API_KEY = 'elevenLabsApiKey'
 const VOICE = 'voice'
+const BACKUP_NUDGE_DISMISSED = 'backupNudgeDismissed'
 
 /**
  * The IndexedDB implementation of `SettingsStore`, via `idb`. Shares the one
@@ -59,15 +70,17 @@ export function createIndexedDbSettingsStore(): SettingsStore {
   return {
     async load(): Promise<Settings> {
       const db = await getDatabase()
-      const [anthropicApiKey, elevenLabsApiKey, voice] = await Promise.all([
+      const [anthropicApiKey, elevenLabsApiKey, voice, backupNudgeDismissed] = await Promise.all([
         db.get(SETTINGS_STORE, ANTHROPIC_API_KEY) as Promise<string | undefined>,
         db.get(SETTINGS_STORE, ELEVENLABS_API_KEY) as Promise<string | undefined>,
         db.get(SETTINGS_STORE, VOICE) as Promise<Voice | undefined>,
+        db.get(SETTINGS_STORE, BACKUP_NUDGE_DISMISSED) as Promise<boolean | undefined>,
       ])
       return {
         anthropicApiKey: anthropicApiKey ?? null,
         elevenLabsApiKey: elevenLabsApiKey ?? null,
         voice: voice ?? null,
+        backupNudgeDismissed: backupNudgeDismissed ?? false,
       }
     },
 
@@ -81,6 +94,10 @@ export function createIndexedDbSettingsStore(): SettingsStore {
 
     setVoice(voice: Voice | null): Promise<void> {
       return put(VOICE, voice)
+    },
+
+    dismissBackupNudge(): Promise<void> {
+      return put(BACKUP_NUDGE_DISMISSED, true)
     },
   }
 }
