@@ -1,0 +1,103 @@
+.mix-select {
+  min-height: 100vh;
+  box-sizing: border-box;
+  padding: max(20px, env(safe-area-inset-top)) 20px
+    max(20px, env(safe-area-inset-bottom));
+  background: var(--bg);
+  color: var(--ink);
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    'SF Pro Text',
+    system-ui,
+    sans-serif;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mix-select__title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin: 0;
+}
+
+.mix-select__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.deck-chip {
+  width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+  background: var(--surface);
+  border: 2px solid transparent;
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+}
+
+.deck-chip--selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.deck-chip__name {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.deck-chip__count {
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+}
+
+.deck-chip--selected .deck-chip__count {
+  color: var(--ink);
+}
+
+.mix-select__total {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  margin: 0;
+}
+
+.primary-button {
+  min-height: 56px;
+  border: none;
+  border-radius: 16px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: var(--text-lg);
+  font-weight: 700;
+}
+
+.primary-button:disabled {
+  background: var(--accent-dim);
+  color: var(--ink-dim);
+}
+
+.mix-select__hint {
+  font-size: var(--text-xs);
+  color: var(--ink-dim);
+  text-align: center;
+  margin: 0;
+}
+
+.mix-select__empty-caption {
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+}
