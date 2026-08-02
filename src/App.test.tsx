@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import type { Deck, DeckStore, Library } from './domain'
 import { LIBRARY_FORMAT } from './domain'
-import type { Settings, SettingsStore } from './adapters/storage'
+import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
 import type { SynthClient, SynthResult } from './adapters/audio/eleven-labs-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 
@@ -86,6 +86,27 @@ function createFakeGenerationQueue(): GenerationQueue & { enqueued: Array<{ id: 
   }
 }
 
+/** In-memory ClipCache fake — the real IndexedDB cache is exercised in
+ * src/adapters/storage; App's wiring of the readiness gate is what these
+ * tests care about. `readyIds`/`readyPhraseIds` default to "nothing ready",
+ * which is the honest default for a fresh app. */
+function createFakeClipCache(readyIds: ReadonlySet<string> = new Set()): ClipCache {
+  return {
+    async get() {
+      return undefined
+    },
+    async put() {},
+    async has() {
+      return false
+    },
+    async readyPhraseIds(phrases) {
+      return new Set(phrases.map((p) => p.id).filter((id) => readyIds.has(id)))
+    },
+  }
+}
+
+const FAKE_VOICE: Voice = { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }
+
 function typeInto(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
   setter.call(input, value)
@@ -115,6 +136,7 @@ async function renderApp(
   settingsStore: SettingsStore = createFakeSettingsStore(),
   synthClient: SynthClient = createFakeSynthClient(),
   generationQueue: GenerationQueue = createFakeGenerationQueue(),
+  clipCache: ClipCache = createFakeClipCache(),
 ) {
   await act(async () => {
     root.render(
@@ -123,6 +145,7 @@ async function renderApp(
         settingsStore={settingsStore}
         synthClient={synthClient}
         generationQueue={generationQueue}
+        clipCache={clipCache}
       />,
     )
   })
@@ -404,5 +427,87 @@ describe('App wired to voice preview and selection', () => {
     await act(async () => click(container.querySelector('[data-testid="voice-confirm"]')!))
 
     expect(container.querySelector(`[data-testid="voice-current-${voiceId}"]`)).not.toBeNull()
+  })
+})
+
+describe('App wired to the Drill screen', () => {
+  it('launches a Drill over a whole Deck from Deck detail, gated on readiness', async () => {
+    const store = createFakeDeckStore([
+      {
+        id: 'd1',
+        name: 'Home',
+        phrases: [
+          { id: 'p1', french: 'Bonjour', english: 'Hello' },
+          { id: 'p2', french: 'Merci', english: 'Thanks' },
+        ],
+      },
+    ])
+    const clipCache = createFakeClipCache(new Set(['p1']))
+    await renderApp(
+      store,
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      clipCache,
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+
+    expect(container.querySelector('[data-testid="drill-title"]')?.textContent).toBe('Home')
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrases')
+    expect(container.querySelector('[data-testid="drill-skipped-count"]')?.textContent).toContain(
+      'no audio yet',
+    )
+  })
+
+  it('blocks the Drill with a no-voice message, and Open Settings routes to Settings and back', async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    await renderApp(store, createFakeSettingsStore({ voice: null }))
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+
+    expect(container.querySelector('[data-testid="drill-blocked"]')?.textContent).toContain(
+      'No voice has been chosen yet',
+    )
+    await act(async () => click(container.querySelector('[data-testid="drill-open-settings"]')!))
+    expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
+
+    await act(async () => click(container.querySelector('[data-testid="settings-back"]')!))
+    expect(container.querySelector('[data-testid="drill-blocked"]')?.textContent).toContain(
+      'No voice has been chosen yet',
+    )
+  })
+
+  it('leaves Deck detail in place behind the Drill, so Back from the Drill returns to it', async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    const clipCache = createFakeClipCache(new Set(['p1']))
+    await renderApp(store, createFakeSettingsStore({ voice: FAKE_VOICE }), createFakeSynthClient(), createFakeGenerationQueue(), clipCache)
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+    expect(container.querySelector('[data-testid="drill-start-card"]')).not.toBeNull()
+
+    await act(async () => click(container.querySelector('[data-testid="drill-back"]')!))
+    expect(container.querySelector('[data-testid="drill-start-card"]')).toBeNull()
+    expect(container.querySelector('[data-testid="rename-deck"]')?.textContent).toBe('Home')
+  })
+
+  it('opens the Mix screen from Decks, and hands a multi-Deck selection to the Drill as a combined pool', async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+      { id: 'd2', name: 'Work', phrases: [{ id: 'p2', french: 'Réunion', english: 'Meeting' }] },
+    ])
+    const clipCache = createFakeClipCache(new Set(['p1', 'p2']))
+    await renderApp(store, createFakeSettingsStore({ voice: FAKE_VOICE }), createFakeSynthClient(), createFakeGenerationQueue(), clipCache)
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d2"]')!))
+    await act(async () => click(container.querySelector('[data-testid="start-mix"]')!))
+
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('2 phrases')
   })
 })

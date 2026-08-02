@@ -73,6 +73,39 @@ describe('DecksScreen', () => {
     expect(container.textContent).toContain('Nothing here yet')
   })
 
+  it('renders a Mix decks link that calls onOpenMix when provided', () => {
+    const onOpenMix = vi.fn()
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 3), deck('d2', 'Climbing', 2)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          onOpenMix={onOpenMix}
+        />,
+      )
+    })
+    click(container.querySelector('[data-testid="open-mix"]')!)
+    expect(onOpenMix).toHaveBeenCalledTimes(1)
+  })
+
+  it('omits the Mix decks link when onOpenMix is not provided', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 3)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="open-mix"]')).toBeNull()
+  })
+
   it('calls onOpenDeck when a Deck row is tapped', () => {
     const onOpenDeck = vi.fn()
     act(() => {
