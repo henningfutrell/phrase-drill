@@ -14,8 +14,8 @@ const { shareBackupFile } = await import('./adapters/share/web-share')
 
 /** In-memory SettingsStore fake — the real one is exercised in
  * src/adapters/storage; App's wiring is what these tests care about. */
-function createFakeSettingsStore(): SettingsStore {
-  let settings: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null }
+function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore {
+  let settings: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null, ...initial }
   return {
     async load() {
       return settings
@@ -285,7 +285,7 @@ describe('App wired to voice preview and selection', () => {
       { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Où est la gare ?', english: 'Where is the station?' }] },
     ])
     const synthClient = createFakeSynthClient()
-    await renderApp(store, createFakeSettingsStore(), synthClient)
+    await renderApp(store, createFakeSettingsStore({ elevenLabsApiKey: 'el-key' }), synthClient)
     await openSettings()
 
     const firstVoice = container.querySelector('[data-testid^="voice-preview-"]') as HTMLButtonElement
@@ -300,7 +300,7 @@ describe('App wired to voice preview and selection', () => {
   it('falls back to a built-in French phrase to preview when the library has no phrases', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
     const synthClient = createFakeSynthClient()
-    await renderApp(store, createFakeSettingsStore(), synthClient)
+    await renderApp(store, createFakeSettingsStore({ elevenLabsApiKey: 'el-key' }), synthClient)
     await openSettings()
 
     const firstVoice = container.querySelector('[data-testid^="voice-preview-"]') as HTMLButtonElement

@@ -4,11 +4,34 @@ import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updateP
 import type { Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, parseLibraryFile } from './adapters/storage'
 import { shareBackupFile } from './adapters/share/web-share'
+import type { SynthClient } from './adapters/audio/eleven-labs-synth-client'
+import { FALLBACK_PREVIEW_PHRASE, VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
-import { SettingsScreen, type ExportOutcome, type RestoreFileResult } from './ui/SettingsScreen'
+import { SettingsScreen, type ExportOutcome, type PreviewOutcome, type RestoreFileResult } from './ui/SettingsScreen'
 
 const EMPTY_SETTINGS: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null }
+
+/**
+ * Plays a previewed voice clip. Best-effort: a preview isn't guaranteed on
+ * every platform/state (autoplay policy, an unimplemented `Audio` in a
+ * headless test environment), and a failed preview is a silent no-op here,
+ * not a crash — the outcome the Settings screen actually reports comes from
+ * the synth call, not from playback.
+ */
+function playPreviewClip(bytes: ArrayBuffer, mime: string): void {
+  try {
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime }))
+    const audio = new Audio(url)
+    const cleanup = () => URL.revokeObjectURL(url)
+    audio.addEventListener('ended', cleanup)
+    audio.addEventListener('error', cleanup)
+    const playing = audio.play()
+    if (playing && typeof playing.catch === 'function') playing.catch(cleanup)
+  } catch {
+    // See doc comment — playback failure is not this function's problem to raise.
+  }
+}
 
 /**
  * The fallback for a platform that cannot share files (Web Share Level 2
@@ -32,7 +55,15 @@ function downloadFile(file: File): void {
  * every change through the injected `DeckStore` port; screens themselves
  * only see plain data and callbacks.
  */
-function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore: SettingsStore }) {
+function App({
+  deckStore,
+  settingsStore,
+  synthClient,
+}: {
+  deckStore: DeckStore
+  settingsStore: SettingsStore
+  synthClient: SynthClient
+}) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
@@ -118,6 +149,29 @@ function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore
     setPendingRestore(undefined)
   }
 
+  async function handlePreviewVoice(
+    voice: { modelId: string; voiceId: string },
+    text: string,
+    signal: AbortSignal,
+  ): Promise<PreviewOutcome> {
+    try {
+      const result = await synthClient.synthesize(text, 'fr-FR', voice, signal)
+      playPreviewClip(result.bytes, 'audio/mpeg')
+      return { ok: true }
+    } catch (err) {
+      if (signal.aborted) return { ok: true }
+      const kind = (err as { kind?: string } | undefined)?.kind
+      if (kind === 'unauthorized') return { ok: false, reason: 'unauthorized' }
+      if (kind === 'quota') return { ok: false, reason: 'quota' }
+      return { ok: false, reason: 'network' }
+    }
+  }
+
+  function handleChooseVoice(voice: { provider: string; modelId: string; voiceId: string }) {
+    setSettings((current) => ({ ...current, voice }))
+    void settingsStore.setVoice(voice)
+  }
+
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
 
   function withSelectedDeck(fn: (deck: Deck) => Deck) {
@@ -130,12 +184,20 @@ function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore
   }
 
   if (settingsOpen) {
+    const previewText =
+      (decks ?? []).flatMap((d) => d.phrases).find((p) => p.french.trim().length > 0)?.french ??
+      FALLBACK_PREVIEW_PHRASE
+
     return (
       <SettingsScreen
         onBack={() => setSettingsOpen(false)}
         anthropicKeyPresent={settings.anthropicApiKey !== null}
         elevenLabsKeyPresent={settings.elevenLabsApiKey !== null}
         voice={settings.voice}
+        voices={VOICE_CATALOGUE}
+        previewText={previewText}
+        onPreviewVoice={handlePreviewVoice}
+        onChooseVoice={handleChooseVoice}
         onSaveAnthropicKey={(key) => {
           setSettings((current) => ({ ...current, anthropicApiKey: key }))
           void settingsStore.setAnthropicApiKey(key)

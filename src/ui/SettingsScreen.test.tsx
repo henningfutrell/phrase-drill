@@ -203,7 +203,7 @@ describe('SettingsScreen', () => {
     })
 
     it('previews a voice using the real phrase text handed to it, not a hardcoded one', async () => {
-      const props = renderScreen({ previewText: 'Où est la gare ?' })
+      const props = renderScreen({ previewText: 'Où est la gare ?', elevenLabsKeyPresent: true })
       await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
 
       expect(props.onPreviewVoice).toHaveBeenCalledTimes(1)
@@ -213,7 +213,7 @@ describe('SettingsScreen', () => {
     })
 
     it('passes a fresh AbortSignal to each preview', async () => {
-      const props = renderScreen()
+      const props = renderScreen({ elevenLabsKeyPresent: true })
       await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
       const [, , signal] = vi.mocked(props.onPreviewVoice).mock.calls[0]!
       expect(signal).toBeInstanceOf(AbortSignal)
@@ -226,7 +226,7 @@ describe('SettingsScreen', () => {
         resolveFirst = resolve
       })
       const onPreviewVoice = vi.fn().mockReturnValueOnce(firstPreview).mockResolvedValue({ ok: true })
-      renderScreen({ onPreviewVoice })
+      renderScreen({ onPreviewVoice, elevenLabsKeyPresent: true })
 
       act(() => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
       const [, , firstSignal] = onPreviewVoice.mock.calls[0]!
@@ -238,13 +238,15 @@ describe('SettingsScreen', () => {
 
     it('aborts an in-flight preview on unmount', () => {
       let capturedSignal: AbortSignal | undefined
-      const onPreviewVoice = vi.fn((_voice, _text, signal: AbortSignal) => {
-        capturedSignal = signal
-        return new Promise(() => {
-          // never resolves — simulates an in-flight request
-        })
-      })
-      renderScreen({ onPreviewVoice })
+      const onPreviewVoice = vi.fn(
+        (_voice: { modelId: string; voiceId: string }, _text: string, signal: AbortSignal) => {
+          capturedSignal = signal
+          return new Promise<{ ok: true }>(() => {
+            // never resolves — simulates an in-flight request
+          })
+        },
+      )
+      renderScreen({ onPreviewVoice, elevenLabsKeyPresent: true })
       act(() => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
 
       act(() => root.unmount())
@@ -253,7 +255,7 @@ describe('SettingsScreen', () => {
     })
 
     it('shows a plain-language error inline when a preview fails, without blocking the screen', async () => {
-      renderScreen({ onPreviewVoice: vi.fn().mockResolvedValue({ ok: false, reason: 'network' }) })
+      renderScreen({ onPreviewVoice: vi.fn().mockResolvedValue({ ok: false, reason: 'network' }), elevenLabsKeyPresent: true })
       await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
       await flush()
 
