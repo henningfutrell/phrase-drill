@@ -1,0 +1,86 @@
+import type { IDBPDatabase } from 'idb'
+import { openDatabase, SETTINGS_STORE } from './database'
+
+/** The pinned text-to-speech voice — provider, model, and voice id, together. */
+export interface Voice {
+  readonly provider: string
+  readonly modelId: string
+  readonly voiceId: string
+}
+
+/**
+ * The two API keys and the pinned voice, as read from the `settings` store.
+ * Never part of `Library` — `DeckStore.exportAll()` reads only the `decks`
+ * store and structurally cannot see this data (see its own test).
+ */
+export interface Settings {
+  readonly anthropicApiKey: string | null
+  readonly elevenLabsApiKey: string | null
+  readonly voice: Voice | null
+}
+
+export interface SettingsStore {
+  load(): Promise<Settings>
+  /** `null` clears the key. */
+  setAnthropicApiKey(key: string | null): Promise<void>
+  /** `null` clears the key. */
+  setElevenLabsApiKey(key: string | null): Promise<void>
+  /** `null` clears the pinned voice. */
+  setVoice(voice: Voice | null): Promise<void>
+}
+
+const ANTHROPIC_API_KEY = 'anthropicApiKey'
+const ELEVENLABS_API_KEY = 'elevenLabsApiKey'
+const VOICE = 'voice'
+
+/**
+ * The IndexedDB implementation of `SettingsStore`, via `idb`. Shares the one
+ * database `indexed-db-deck-store.ts` opens (`database.ts`), but touches
+ * only the `settings` store — never `decks` — so a key or the pinned voice
+ * can never ride along on a Deck read or write.
+ */
+export function createIndexedDbSettingsStore(): SettingsStore {
+  let dbPromise: Promise<IDBPDatabase> | undefined
+
+  function getDatabase(): Promise<IDBPDatabase> {
+    dbPromise ??= openDatabase()
+    return dbPromise
+  }
+
+  async function put(key: string, value: unknown): Promise<void> {
+    const db = await getDatabase()
+    if (value === null || value === undefined) {
+      await db.delete(SETTINGS_STORE, key)
+    } else {
+      await db.put(SETTINGS_STORE, value, key)
+    }
+  }
+
+  return {
+    async load(): Promise<Settings> {
+      const db = await getDatabase()
+      const [anthropicApiKey, elevenLabsApiKey, voice] = await Promise.all([
+        db.get(SETTINGS_STORE, ANTHROPIC_API_KEY) as Promise<string | undefined>,
+        db.get(SETTINGS_STORE, ELEVENLABS_API_KEY) as Promise<string | undefined>,
+        db.get(SETTINGS_STORE, VOICE) as Promise<Voice | undefined>,
+      ])
+      return {
+        anthropicApiKey: anthropicApiKey ?? null,
+        elevenLabsApiKey: elevenLabsApiKey ?? null,
+        voice: voice ?? null,
+      }
+    },
+
+    setAnthropicApiKey(key: string | null): Promise<void> {
+      return put(ANTHROPIC_API_KEY, key)
+    },
+
+    setElevenLabsApiKey(key: string | null): Promise<void> {
+      return put(ELEVENLABS_API_KEY, key)
+    },
+
+    setVoice(voice: Voice | null): Promise<void> {
+      return put(VOICE, voice)
+    },
+  }
+}

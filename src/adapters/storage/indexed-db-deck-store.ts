@@ -1,43 +1,10 @@
-import { openDB, type IDBPDatabase } from 'idb'
+import type { IDBPDatabase } from 'idb'
 import type { Deck, DeckId, DeckStore, Library } from '../../domain'
+import { DECKS_STORE, openDatabase } from './database'
 import { buildLibrary, migrateLibraryDecks } from './library'
 import { fromRecord, toRecord } from './mapping'
-import { CURRENT_SCHEMA_VERSION, migrateDeckRecord, type DeckRecord } from './migrations'
+import type { DeckRecord } from './migrations'
 import { requestPersistence } from './persistence'
-
-const DB_NAME = 'phrase-drill'
-const DECKS_STORE = 'decks'
-const SETTINGS_STORE = 'settings'
-
-/**
- * Opens the one IndexedDB database this app uses. Both stores are declared
- * here, in the single upgrade path, even though this module only exposes
- * DeckStore: `decks` and `settings` share one database and one version
- * number (T002 §4), so they share one place that defines the schema.
- * Nothing outside `adapters/storage` opens this database.
- */
-function openDatabase(): Promise<IDBPDatabase> {
-  return openDB(DB_NAME, CURRENT_SCHEMA_VERSION, {
-    upgrade(db, oldVersion, _newVersion, transaction) {
-      if (!db.objectStoreNames.contains(DECKS_STORE)) {
-        db.createObjectStore(DECKS_STORE, { keyPath: 'id' })
-      } else if (oldVersion < CURRENT_SCHEMA_VERSION) {
-        // A future schema bump lands its migration here, running the same
-        // pure migrateDeckRecord that importAll runs — one migration
-        // codebase for both paths.
-        const store = transaction.objectStore(DECKS_STORE)
-        void store.getAll().then((records: unknown[]) => {
-          for (const record of records) {
-            void store.put(migrateDeckRecord(record, oldVersion))
-          }
-        })
-      }
-      if (!db.objectStoreNames.contains(SETTINGS_STORE)) {
-        db.createObjectStore(SETTINGS_STORE)
-      }
-    },
-  })
-}
 
 /**
  * The IndexedDB implementation of `DeckStore`, via `idb`. Every write is a

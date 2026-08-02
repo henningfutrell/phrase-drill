@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { Deck, DeckId, DeckStore, PhraseId } from './domain'
 import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updatePhrase } from './domain'
+import type { Settings, SettingsStore } from './adapters/storage'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
+import { SettingsScreen } from './ui/SettingsScreen'
+
+const EMPTY_SETTINGS: Settings = { anthropicApiKey: null, elevenLabsApiKey: null, voice: null }
 
 /**
  * Composition root — the only place allowed to import from both `domain/`
@@ -10,9 +14,11 @@ import { DeckDetailScreen } from './ui/DeckDetailScreen'
  * every change through the injected `DeckStore` port; screens themselves
  * only see plain data and callbacks.
  */
-function App({ deckStore }: { deckStore: DeckStore }) {
+function App({ deckStore, settingsStore }: { deckStore: DeckStore; settingsStore: SettingsStore }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
+  const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -23,6 +29,16 @@ function App({ deckStore }: { deckStore: DeckStore }) {
       cancelled = true
     }
   }, [deckStore])
+
+  useEffect(() => {
+    let cancelled = false
+    void settingsStore.load().then((loaded) => {
+      if (!cancelled) setSettings(loaded)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [settingsStore])
 
   function persist(deck: Deck) {
     setDecks((current) => (current ?? []).map((d) => (d.id === deck.id ? deck : d)))
@@ -56,6 +72,33 @@ function App({ deckStore }: { deckStore: DeckStore }) {
 
   if (decks === undefined) {
     return <main className="screen" />
+  }
+
+  if (settingsOpen) {
+    return (
+      <SettingsScreen
+        onBack={() => setSettingsOpen(false)}
+        anthropicKeyPresent={settings.anthropicApiKey !== null}
+        elevenLabsKeyPresent={settings.elevenLabsApiKey !== null}
+        voice={settings.voice}
+        onSaveAnthropicKey={(key) => {
+          setSettings((current) => ({ ...current, anthropicApiKey: key }))
+          void settingsStore.setAnthropicApiKey(key)
+        }}
+        onClearAnthropicKey={() => {
+          setSettings((current) => ({ ...current, anthropicApiKey: null }))
+          void settingsStore.setAnthropicApiKey(null)
+        }}
+        onSaveElevenLabsKey={(key) => {
+          setSettings((current) => ({ ...current, elevenLabsApiKey: key }))
+          void settingsStore.setElevenLabsApiKey(key)
+        }}
+        onClearElevenLabsKey={() => {
+          setSettings((current) => ({ ...current, elevenLabsApiKey: null }))
+          void settingsStore.setElevenLabsApiKey(null)
+        }}
+      />
+    )
   }
 
   if (selectedDeck) {
@@ -97,6 +140,7 @@ function App({ deckStore }: { deckStore: DeckStore }) {
       onRenameDeck={handleRenameDeck}
       onDeleteDeck={handleDeleteDeck}
       onOpenDeck={setSelectedDeckId}
+      onOpenSettings={() => setSettingsOpen(true)}
     />
   )
 }
