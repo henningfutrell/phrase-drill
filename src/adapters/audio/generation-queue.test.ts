@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createGenerationQueue, type GenerationStatus } from './generation-queue'
-import type { SynthClient, SynthError } from './eleven-labs-synth-client'
+import type { SynthClient, SynthError } from './server-synth-client'
 import type { Clip, ClipCache } from '../storage/clip-cache'
 import { computeClipHash } from '../storage/clip-cache'
 import type { Voice } from '../storage/settings-store'

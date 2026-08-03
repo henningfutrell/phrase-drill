@@ -1,0 +1,9 @@
+# node_modules here is a symlink to a shared checkout outside this repo
+# (dev-environment convention, see AGENTS.md) — it must never enter the
+# build context. Without this, `COPY . .` in the Dockerfile's builder stage
+# overwrites the image's own `npm ci`-installed node_modules with a dangling
+# symlink pointing at a path that doesn't exist inside the container.
+node_modules
+dist
+data
+.git

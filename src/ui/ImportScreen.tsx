@@ -28,8 +28,7 @@ type DraftSheet = { kind: 'edit'; index: number } | undefined
 
 const UNREADABLE_COPY = "Couldn't read phrases from that photo — try better light or a closer shot."
 const NETWORK_COPY = "Couldn't reach the scanner — check your connection and try again."
-const NO_KEY_COPY = 'Scanning needs a key from whoever set this app up for you. Ask them to add it in Settings.'
-const UNAUTHORIZED_COPY = NO_KEY_COPY
+const UNAUTHORIZED_COPY = "Scanning isn't set up on the server yet. Ask whoever runs it to check."
 
 /**
  * Scan / correction (docs/design.md §3.5, glossary: Scan, Draft Phrase).
@@ -42,8 +41,6 @@ const UNAUTHORIZED_COPY = NO_KEY_COPY
 export function ImportScreen({
   decks,
   scanReader,
-  apiKeyPresent = true,
-  onOpenSettings,
   onSave,
   onCancel,
   showBackupNudge = false,
@@ -51,17 +48,6 @@ export function ImportScreen({
 }: {
   readonly decks: readonly Deck[]
   readonly scanReader: ScanReader
-  /**
-   * Whether an Anthropic key is on file (docs/design.md §3.5 Step 1, T010's
-   * carried gap). Known up front from `SettingsStore` — checked before any
-   * photo is taken, not discovered from `ScanReader.read`'s `unauthorized`
-   * rejection, which only fires after a call. Defaults `true` so every
-   * existing capture/reading/review test, which doesn't exercise this gate,
-   * is unaffected.
-   */
-  readonly apiKeyPresent?: boolean
-  /** Required whenever `apiKeyPresent` can be false — the no-key state's only action. */
-  onOpenSettings?(): void
   onSave(target: ImportTarget, phrases: readonly DraftPhrase[]): void
   onCancel(): void
   /**
@@ -123,25 +109,6 @@ export function ImportScreen({
   function handleSave() {
     if (!canSave) return
     onSave(target!, drafts)
-  }
-
-  if (!apiKeyPresent) {
-    return (
-      <main className="screen import-screen">
-        <header className="screen-header">
-          <button type="button" data-testid="cancel-import" className="btn-icon" onClick={onCancel}>
-            Cancel
-          </button>
-          <h1>Scan a page</h1>
-        </header>
-        <div className="import-status" data-testid="scan-no-key">
-          <p>{NO_KEY_COPY}</p>
-          <button type="button" data-testid="scan-open-settings" className="btn-secondary" onClick={onOpenSettings}>
-            Open Settings
-          </button>
-        </div>
-      </main>
-    )
   }
 
   return (
