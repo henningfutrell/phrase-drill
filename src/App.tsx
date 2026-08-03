@@ -343,7 +343,21 @@ function App({
         }
         speech={clipPlayer ?? NOOP_SPEECH}
         clock={systemClock}
-        unlock={async () => (clipPlayer ? clipPlayer.unlock() : false)}
+        unlock={async () => {
+          if (!clipPlayer) {
+            // Reachable only if readiness said canStart with no pinned voice —
+            // a wiring fault, not the phone's doing. Name it as one.
+            return { ok: false as const, name: 'NoVoicePinned', message: 'no voice is pinned' }
+          }
+          const ok = await clipPlayer.unlock()
+          if (ok) return { ok: true as const }
+          const failure = clipPlayer.lastUnlockFailure
+          return {
+            ok: false as const,
+            name: failure?.name ?? 'UnknownError',
+            message: failure?.message ?? '',
+          }
+        }}
         acquireWakeLock={() => wakeLock.acquire()}
         releaseWakeLock={() => wakeLock.release()}
         onExit={() => setDrillTarget(undefined)}

@@ -72,7 +72,7 @@ describe('DrillScreen — readiness gate', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour, merci]))}
         speech={instantSpeech()}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -90,7 +90,7 @@ describe('DrillScreen — readiness gate', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour], 3))}
         speech={instantSpeech()}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -109,7 +109,7 @@ describe('DrillScreen — readiness gate', () => {
         }
         speech={instantSpeech()}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
         onOpenSettings={onOpenSettings}
       />,
@@ -131,7 +131,7 @@ describe('DrillScreen — readiness gate', () => {
         }
         speech={instantSpeech()}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -149,7 +149,7 @@ describe('DrillScreen — readiness gate', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour], 1))}
         speech={speech}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -173,7 +173,7 @@ describe('DrillScreen — the one-tap unlock', () => {
     const speech = instantSpeech()
     const unlock = vi.fn(async () => {
       calls.push('unlock')
-      return true
+      return { ok: true as const }
     })
     render(
       <DrillScreen
@@ -206,7 +206,7 @@ describe('DrillScreen — the one-tap unlock', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(false)}
+        unlock={() => Promise.resolve({ ok: false as const, name: 'NotAllowedError', message: 'blocked' })}
         onExit={() => {}}
       />,
     )
@@ -233,7 +233,7 @@ describe('DrillScreen — running a Drill', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour, merci]))}
         speech={speech}
         clock={clock}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -277,7 +277,7 @@ describe('DrillScreen — running a Drill', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -299,7 +299,7 @@ describe('DrillScreen — running a Drill', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -322,7 +322,7 @@ describe('DrillScreen — running a Drill', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour, merci]))}
         speech={speech}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -345,7 +345,7 @@ describe('DrillScreen — running a Drill', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={onExit}
       />,
     )
@@ -367,7 +367,7 @@ describe('DrillScreen — running a Drill', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={clock}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={onExit}
       />,
     )
@@ -395,7 +395,7 @@ describe('DrillScreen — Wake Lock', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
         acquireWakeLock={acquireWakeLock}
         releaseWakeLock={releaseWakeLock}
@@ -417,7 +417,7 @@ describe('DrillScreen — Wake Lock', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -446,7 +446,7 @@ describe('DrillScreen — interrupted by screen lock', () => {
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
-        unlock={() => Promise.resolve(true)}
+        unlock={() => Promise.resolve({ ok: true as const })}
         onExit={() => {}}
       />,
     )
@@ -468,5 +468,37 @@ describe('DrillScreen — interrupted by screen lock', () => {
 
     expect(testid('drill-interrupted-banner')).toBeNull()
     expect(speech.calls).toHaveLength(2)
+  })
+})
+
+describe('DrillScreen — a failed unlock names the real cause', () => {
+  it('renders the DOMException name and message, not a blanket "this phone" verdict', async () => {
+    vi.useFakeTimers()
+    // The blanket message shipped for a release and blamed every device for a
+    // malformed unlock WAV. NotAllowedError (iOS autoplay refusal) and
+    // NotSupportedError (undecodable source) need opposite fixes and must be
+    // distinguishable from a screenshot.
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() =>
+          Promise.resolve({
+            ok: false as const,
+            name: 'NotSupportedError',
+            message: 'The operation is not supported.',
+          })
+        }
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    const detail = testid('drill-unlock-error-detail')
+    expect(detail?.textContent).toContain('NotSupportedError')
+    expect(detail?.textContent).toContain('The operation is not supported.')
   })
 })

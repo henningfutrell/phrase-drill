@@ -43,6 +43,13 @@ const DEFAULT_SLACK_MS = 750
 
 export type UnlockStatus = 'pending' | 'unlocked' | 'failed'
 
+/** What actually went wrong in `unlock()`, for the screen that has to explain it. */
+export interface UnlockFailure {
+  /** The DOMException name where there is one — `NotAllowedError`, `NotSupportedError`, … */
+  readonly name: string
+  readonly message: string
+}
+
 export interface ClipPlayer extends SpeechPort {
   /**
    * Unlocks the single shared `<audio>` element. Must be called
@@ -58,6 +65,8 @@ export interface ClipPlayer extends SpeechPort {
    */
   unlock(): Promise<boolean>
   readonly unlockStatus: UnlockStatus
+  /** Set when `unlock()` last returned false. `undefined` before any attempt, or after success. */
+  readonly lastUnlockFailure: UnlockFailure | undefined
 }
 
 export interface MissingClipInfo {
@@ -99,11 +108,16 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
   const { element, clipCache, voice, onMissingClip } = deps
   const slackMs = deps.slackMs ?? DEFAULT_SLACK_MS
   let unlockStatus: UnlockStatus = 'pending'
+  let lastUnlockFailure: UnlockFailure | undefined
   let stopCurrent: (() => void) | null = null
 
   return {
     get unlockStatus(): UnlockStatus {
       return unlockStatus
+    },
+
+    get lastUnlockFailure(): UnlockFailure | undefined {
+      return lastUnlockFailure
     },
 
     async unlock(): Promise<boolean> {
@@ -112,8 +126,19 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
         await element.play()
         element.pause()
         unlockStatus = 'unlocked'
+        lastUnlockFailure = undefined
         return true
-      } catch {
+      } catch (error) {
+        // The whole point of naming it: at this call site an iOS autoplay
+        // refusal (NotAllowedError) and an undecodable source
+        // (NotSupportedError) are the same catch, and they need opposite
+        // fixes. Reporting "couldn't start audio on this phone" for both
+        // blamed the device for a malformed 52-byte WAV for an entire
+        // release. Never collapse them again.
+        lastUnlockFailure =
+          error instanceof Error
+            ? { name: error.name, message: error.message }
+            : { name: 'UnknownError', message: String(error) }
         unlockStatus = 'failed'
         return false
       }

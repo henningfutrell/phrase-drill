@@ -103,7 +103,7 @@ export interface DrillScreenProps {
    * user-gesture context does not survive an `await` boundary on iOS, and
    * this ordering is the only thing this screen can do to preserve it.
    */
-  readonly unlock: () => Promise<boolean>
+  readonly unlock: () => Promise<UnlockOutcome>
   readonly acquireWakeLock?: () => Promise<void>
   readonly releaseWakeLock?: () => Promise<void>
   /** Back to whatever screen launched this Drill (Deck detail or Mix). */
@@ -112,10 +112,15 @@ export interface DrillScreenProps {
   readonly onOpenSettings?: () => void
 }
 
+/** What `unlock` reports back. `ok` false carries the reason the screen states verbatim. */
+export type UnlockOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly name: string; readonly message: string }
+
 type Phase =
   | { kind: 'checking' }
   | { kind: 'blocked'; reason: 'no-voice' | 'none-ready' }
-  | { kind: 'start'; ready: readonly Phrase[]; skippedCount: number; unlockFailed: boolean }
+  | { kind: 'start'; ready: readonly Phrase[]; skippedCount: number; unlockFailure?: UnlockOutcome & { ok: false } }
   | { kind: 'running'; skippedCount: number }
 
 /**
@@ -164,7 +169,7 @@ export function DrillScreen({
           kind: 'start',
           ready: result.ready,
           skippedCount: result.skippedCount,
-          unlockFailed: false,
+          unlockFailure: undefined,
         })
       }
     })
@@ -193,9 +198,9 @@ export function DrillScreen({
 
   async function handleStart(readyPhrases: readonly Phrase[], skippedCount: number) {
     // Unlock first, inside this tap — see the `unlock` prop doc comment.
-    const unlocked = await unlock()
-    if (!unlocked) {
-      setPhase({ kind: 'start', ready: readyPhrases, skippedCount, unlockFailed: true })
+    const outcome = await unlock()
+    if (!outcome.ok) {
+      setPhase({ kind: 'start', ready: readyPhrases, skippedCount, unlockFailure: outcome })
       return
     }
 
@@ -320,9 +325,13 @@ export function DrillScreen({
           You&apos;ll get a clear &quot;tap to resume.&quot;
         </p>
         <p className="drill-warning">Plays through the speaker even on silent.</p>
-        {phase.unlockFailed && (
+        {phase.unlockFailure && (
           <p data-testid="drill-unlock-error" className="drill-unlock-error">
-            Couldn&apos;t start audio on this phone. Tap Start Drill to try again.
+            Audio didn&apos;t start. Tap Start Drill to try again.
+            <br />
+            <code data-testid="drill-unlock-error-detail">
+              {phase.unlockFailure.name}: {phase.unlockFailure.message || '(no message)'}
+            </code>
           </p>
         )}
       </main>
