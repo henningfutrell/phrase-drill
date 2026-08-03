@@ -4,8 +4,9 @@
 # production mode fronting login. Set provider keys and admin passwords in
 # a `.env` file next to this one (git-ignored) — `.env.example` documents
 # every variable. The same file deploys unchanged on Coolify: point it at
-# this repo, set the secrets in Coolify's env UI, attach volumes for the
-# two Postgres/Keycloak-backed volumes below.
+# this repo, set the secrets in Coolify's env UI, attach a volume for the
+# one Postgres-backed volume below (Keycloak stores its data in Postgres,
+# not a volume of its own).
 
 services:
   postgres:
