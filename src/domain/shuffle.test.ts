@@ -45,4 +45,19 @@ describe('shuffle', () => {
     expect(result).toContain('B')
     expect(result).toContain('C')
   })
+
+  it('picks the swap index as floor(next() * (i + 1)), not a different index formula', () => {
+    // Pins the exact index computation at each step of Fisher-Yates, not just
+    // "some reordering happened". Hand-computed against ['A','B','C','D','E']:
+    //   i=4: j=floor(0.7*5)=3 -> swap(4,3): A B C E D
+    //   i=3: j=floor(0.3*4)=1 -> swap(3,1): A E C B D
+    //   i=2: j=floor(0.9*3)=2 -> swap(2,2): A E C B D (no-op)
+    //   i=1: j=floor(0.1*2)=0 -> swap(1,0): E A C B D
+    // A test that only checks "still a permutation" would not notice the index
+    // formula changing to next()/(i+1) or next()*(i-1) — both still produce a
+    // permutation, just not a uniformly random one.
+    const result = shuffle(['A', 'B', 'C', 'D', 'E'], sequenceRandom([0.7, 0.3, 0.9, 0.1]))
+
+    expect(result).toEqual(['E', 'A', 'C', 'B', 'D'])
+  })
 })
