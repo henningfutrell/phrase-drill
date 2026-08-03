@@ -34,7 +34,6 @@ import { SettingsScreen, type ExportOutcome, type PreviewOutcome, type RestoreFi
 import { DiagnosticsScreen } from './ui/DiagnosticsScreen'
 
 const EMPTY_SETTINGS: Settings = {
-  libraryKey: '',
   voice: null,
   backupNudgeDismissed: false,
   lastSyncAt: null,
@@ -380,16 +379,11 @@ function App({
     return (
       <SettingsScreen
         onBack={() => setSettingsOpen(false)}
-        libraryKey={settings.libraryKey}
         voice={settings.voice}
         voices={VOICE_CATALOGUE}
         previewText={previewText}
         onPreviewVoice={handlePreviewVoice}
         onChooseVoice={handleChooseVoice}
-        onUseLibraryKey={(key) => {
-          setSettings((current) => ({ ...current, libraryKey: key }))
-          void settingsStore.setLibraryKey(key)
-        }}
         onExportBackup={handleExportBackup}
         onRestoreFileChosen={handleRestoreFileChosen}
         onConfirmRestore={handleConfirmRestore}

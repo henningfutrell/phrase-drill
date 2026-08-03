@@ -15,13 +15,10 @@ vi.mock('./adapters/share/web-share', () => ({
 }))
 const { shareBackupFile } = await import('./adapters/share/web-share')
 
-const FAKE_LIBRARY_KEY = 'a'.repeat(64)
-
 /** In-memory SettingsStore fake — the real one is exercised in
  * src/adapters/storage; App's wiring is what these tests care about. */
 function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore {
   let settings: Settings = {
-    libraryKey: FAKE_LIBRARY_KEY,
     voice: null,
     backupNudgeDismissed: false,
     lastSyncAt: null,
@@ -30,9 +27,6 @@ function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore
   return {
     async load() {
       return settings
-    },
-    async setLibraryKey(key) {
-      settings = { ...settings, libraryKey: key }
     },
     async setVoice(voice) {
       settings = { ...settings, voice }
@@ -354,17 +348,6 @@ describe('App wired to backup and restore', () => {
     expect(file.name).toMatch(/^phrase-drill-backup-\d{4}-\d{2}-\d{2}\.json$/)
     const text = await file.text()
     expect(JSON.parse(text)).toMatchObject({ format: LIBRARY_FORMAT })
-  })
-
-  it('never puts the library key in the exported file', async () => {
-    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    await renderApp(store, createFakeSettingsStore({ libraryKey: FAKE_LIBRARY_KEY }))
-    await openSettings()
-    await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
-
-    const [file] = vi.mocked(shareBackupFile).mock.calls[0]!
-    const text = await file.text()
-    expect(text).not.toContain(FAKE_LIBRARY_KEY)
   })
 
   it('falls back to a plain download when the share adapter reports the platform cannot share files', async () => {
