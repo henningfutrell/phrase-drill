@@ -4,13 +4,11 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
-// Served by a Cloudflare Worker (worker/index.ts, docs/sync.md) from its own
-// origin's root — not GitHub Pages, and not a sub-path — so the build's
-// asset paths and the PWA manifest's identity all resolve at `/`. If this
-// ever moves origins again, note IndexedDB is scoped per-origin: every
-// saved Library on every phone would be orphaned, so origin changes are not
-// made lightly (see AGENTS.md "Persisted state").
-const base = '/'
+// GitHub Pages serves this app from https://henningfutrell.github.io/phrase-drill/
+// (gh-pages branch, shared with an unrelated spike/ diagnostic — see
+// scripts/deploy.sh), not from a domain root, so every built asset path and
+// the PWA manifest's identity have to carry this sub-path.
+const base = '/phrase-drill/'
 
 export default defineConfig({
   base,

@@ -17,18 +17,12 @@ user's phone, not for hypothetical others.
   engines nobody here uses. Test assumptions against Safari's behavior
   (audio element unlock and reuse, IndexedDB quirks, PWA install/offline
   behavior), not Chrome's.
-- **One Worker, one origin.** A Cloudflare Worker (`worker/`) serves the
-  built PWA (`dist/`, as static assets) and a small sync API
-  (`/api/library/:key`, `docs/sync.md`) from the same origin — no CORS, no
-  second host. Identity is a device-generated Library Key, never an
-  account: no email, no password, no PII beyond the phrases themselves.
-  IndexedDB (via `idb`) is still the on-device store and the thing the app
-  reads/writes during normal use; the Worker's R2 bucket is the durable
-  server-side copy that survives an iOS eviction or a new phone, which
-  IndexedDB alone cannot. Outbound network calls the *browser* makes
-  directly (never proxied by the Worker): the Claude vision API for
-  handwriting import, and the ElevenLabs text-to-speech API for Clip
-  generation. The Worker never sees either API key.
+- **No server.** This is a static PWA: HTML/CSS/JS built once and served as
+  files. All state lives in the browser (IndexedDB via `idb`). Outbound
+  network calls: the Claude vision API for handwriting import, and the
+  ElevenLabs text-to-speech API for Clip generation. Nothing here runs a
+  backend, a database, or an API route of its own. `npm run build` output
+  must be static files, deployable to any static host.
 
 ## Architecture: ports and adapters
 
@@ -39,14 +33,6 @@ src/
   adapters/storage/   IndexedDB (via idb) — decks, settings, the clip cache
   adapters/vision/     Claude vision API (handwriting import)
   App.tsx, main.tsx    composition root: wires adapters into domain, renders screens
-worker/               the Cloudflare Worker — a new seam, outside src/domain/
-                       and outside every src/adapters/ directory (docs/sync.md).
-                       It never imports from src/adapters/* (idb, the vision or
-                       ElevenLabs clients are browser-only) or from React/DOM.
-                       It does reuse the plain-data Library shape and
-                       schemaVersion from src/domain and
-                       src/adapters/storage/migrations.ts — both dependency-free
-                       — rather than inventing a second serialization.
 ```
 
 - `domain/` imports nothing from `adapters/*`, `react`, `idb`, the DOM, or any
@@ -69,16 +55,7 @@ call, that change belongs in an adapter, not the domain.
 Drill data (phrases, progress) lives in IndexedDB — it is the user's, not the
 code's. A schema/format change to what's stored migrates existing data or is
 not made. Breaking a contract elsewhere costs an afternoon; silently dropping
-the user's saved phrases is not recoverable. The same rule covers the
-server-side copy in R2 (`worker/`, `docs/sync.md`): it stores the same
-`Library`/`schemaVersion` shape, so a migration that covers IndexedDB covers
-it too — there is no second format to keep in step by hand.
-
-This is also why the app now serves from a Worker's origin root rather than
-GitHub Pages' `/phrase-drill/` sub-path (`vite.config.ts`): IndexedDB is
-scoped per-origin, so moving hosts orphans every saved Library on every
-phone. This move happened now, before any release, because no user data
-exists anywhere yet — it is not to be repeated once that stops being true.
+the user's saved phrases is not recoverable.
 
 ## Testing
 
