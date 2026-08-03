@@ -24,8 +24,7 @@ function fakeDeckStore(decks: readonly Deck[]): DeckStore {
 
 function fakeSettingsStore(overrides: Partial<Settings> = {}): SettingsStore {
   const settings: Settings = {
-    anthropicApiKey: null,
-    elevenLabsApiKey: null,
+    libraryKey: 'a'.repeat(64),
     voice: null,
     backupNudgeDismissed: false,
     lastSyncAt: null,
@@ -35,8 +34,7 @@ function fakeSettingsStore(overrides: Partial<Settings> = {}): SettingsStore {
     async load() {
       return settings
     },
-    async setAnthropicApiKey() {},
-    async setElevenLabsApiKey() {},
+    async setLibraryKey() {},
     async setVoice() {},
     async dismissBackupNudge() {},
     async recordSync() {},
@@ -81,20 +79,6 @@ const DECKS: Deck[] = [
 ]
 
 describe('collectDiagnostics', () => {
-  it('reports key presence, never the key value', async () => {
-    const snapshot = await collectDiagnostics({
-      deckStore: fakeDeckStore([]),
-      settingsStore: fakeSettingsStore({ anthropicApiKey: 'sk-ant-secret', elevenLabsApiKey: null }),
-      clipCache: fakeClipCache(new Set()),
-      errorLog: fakeErrorLog([]),
-      getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
-      getStorageEstimate: async () => ({ supported: false }),
-    })
-
-    expect(snapshot.anthropicKeyPresent).toBe(true)
-    expect(snapshot.elevenLabsKeyPresent).toBe(false)
-  })
-
   it('counts Clips ready against total Phrases, using the pinned voice', async () => {
     const snapshot = await collectDiagnostics({
       deckStore: fakeDeckStore(DECKS),
@@ -163,8 +147,6 @@ describe('formatDiagnosticsReport', () => {
   it('never includes phrase content — counts only', () => {
     const text = formatDiagnosticsReport({
       build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      anthropicKeyPresent: true,
-      elevenLabsKeyPresent: true,
       voice: VOICE,
       phrasesTotal: 2,
       clipsReady: 1,
@@ -179,27 +161,9 @@ describe('formatDiagnosticsReport', () => {
     expect(text).toContain('1')
   })
 
-  it('never includes a key value, only presence', () => {
-    const text = formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      anthropicKeyPresent: true,
-      elevenLabsKeyPresent: false,
-      voice: null,
-      phrasesTotal: 0,
-      clipsReady: 0,
-      storage: { supported: false },
-      lastSyncAt: null,
-      recentErrors: [],
-    })
-
-    expect(text).not.toMatch(/sk-ant-|el-key/)
-  })
-
   it('states storage as unavailable honestly rather than printing a fabricated zero', () => {
     const text = formatDiagnosticsReport({
       build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      anthropicKeyPresent: false,
-      elevenLabsKeyPresent: false,
       voice: null,
       phrasesTotal: 0,
       clipsReady: 0,
@@ -214,8 +178,6 @@ describe('formatDiagnosticsReport', () => {
   it('reports storage usage against quota when the estimate is available', () => {
     const text = formatDiagnosticsReport({
       build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      anthropicKeyPresent: false,
-      elevenLabsKeyPresent: false,
       voice: null,
       phrasesTotal: 0,
       clipsReady: 0,
@@ -231,8 +193,6 @@ describe('formatDiagnosticsReport', () => {
   it('reports the build sha and timestamp so a build can be identified over the phone', () => {
     const text = formatDiagnosticsReport({
       build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      anthropicKeyPresent: false,
-      elevenLabsKeyPresent: false,
       voice: null,
       phrasesTotal: 0,
       clipsReady: 0,
@@ -247,8 +207,6 @@ describe('formatDiagnosticsReport', () => {
   it('reports never for last sync when none has happened', () => {
     const text = formatDiagnosticsReport({
       build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      anthropicKeyPresent: false,
-      elevenLabsKeyPresent: false,
       voice: null,
       phrasesTotal: 0,
       clipsReady: 0,
@@ -263,8 +221,6 @@ describe('formatDiagnosticsReport', () => {
   it('includes the last N captured errors, each with a timestamp', () => {
     const text = formatDiagnosticsReport({
       build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      anthropicKeyPresent: false,
-      elevenLabsKeyPresent: false,
       voice: null,
       phrasesTotal: 0,
       clipsReady: 0,
@@ -280,8 +236,6 @@ describe('formatDiagnosticsReport', () => {
   it('states plainly when no errors have been captured, rather than an empty section', () => {
     const text = formatDiagnosticsReport({
       build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      anthropicKeyPresent: false,
-      elevenLabsKeyPresent: false,
       voice: null,
       phrasesTotal: 0,
       clipsReady: 0,

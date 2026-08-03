@@ -13,22 +13,53 @@ const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
 const { DB_NAME, SETTINGS_STORE } = await import('./database')
 const { CURRENT_SCHEMA_VERSION } = await import('./migrations')
 
+const LIBRARY_KEY_PATTERN = /^[0-9a-f]{64}$/
+
 describe('createIndexedDbSettingsStore', () => {
   beforeEach(() => {
     resetFakeIdb()
     vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
   })
 
-  it('reports no key, no voice, until something is saved', async () => {
+  it('generates a high-entropy library key on first load', async () => {
     const store = createIndexedDbSettingsStore()
 
-    expect(await store.load()).toEqual({
-      anthropicApiKey: null,
-      elevenLabsApiKey: null,
-      voice: null,
-      backupNudgeDismissed: false,
-      lastSyncAt: null,
-    })
+    const settings = await store.load()
+
+    expect(settings.libraryKey).toMatch(LIBRARY_KEY_PATTERN)
+    expect(settings.voice).toBeNull()
+    expect(settings.backupNudgeDismissed).toBe(false)
+    expect(settings.lastSyncAt).toBeNull()
+  })
+
+  it('persists the generated library key across reloads rather than regenerating it', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    const first = await store.load()
+    const second = await store.load()
+
+    expect(second.libraryKey).toBe(first.libraryKey)
+  })
+
+  it('generates different library keys for different devices (fresh stores)', async () => {
+    const storeA = createIndexedDbSettingsStore()
+    const keyA = (await storeA.load()).libraryKey
+
+    resetFakeIdb()
+    const storeB = createIndexedDbSettingsStore()
+    const keyB = (await storeB.load()).libraryKey
+
+    expect(keyA).not.toBe(keyB)
+  })
+
+  it('lets a device switch to a different library key (recovery on a wiped/replaced phone)', async () => {
+    const store = createIndexedDbSettingsStore()
+    await store.load()
+
+    const recoveryKey = 'b'.repeat(64)
+    await store.setLibraryKey(recoveryKey)
+
+    expect((await store.load()).libraryKey).toBe(recoveryKey)
   })
 
   it('reports no sync as ever having happened until one is recorded', async () => {
@@ -70,13 +101,13 @@ describe('createIndexedDbSettingsStore', () => {
         rawDb.createObjectStore(SETTINGS_STORE)
       },
     })
-    await db.put(SETTINGS_STORE, 'sk-ant-preexisting', 'anthropicApiKey')
+    await db.put(SETTINGS_STORE, 'a'.repeat(64), 'libraryKey')
 
     const store = createIndexedDbSettingsStore()
     const settings = await store.load()
 
     expect(settings.backupNudgeDismissed).toBe(false)
-    expect(settings.anthropicApiKey).toBe('sk-ant-preexisting')
+    expect(settings.libraryKey).toBe('a'.repeat(64))
   })
 
   it('dismisses the backup nudge permanently', async () => {
@@ -87,53 +118,13 @@ describe('createIndexedDbSettingsStore', () => {
     expect((await store.load()).backupNudgeDismissed).toBe(true)
   })
 
-  it('keeps the backup nudge dismissed across reloads, independent of keys and voice', async () => {
+  it('keeps the backup nudge dismissed across reloads, independent of the library key and voice', async () => {
     const store = createIndexedDbSettingsStore()
     await store.dismissBackupNudge()
 
-    await store.setAnthropicApiKey('sk-ant-abc123')
+    await store.setLibraryKey('c'.repeat(64))
 
     expect((await store.load()).backupNudgeDismissed).toBe(true)
-  })
-
-  it('saves and reloads the Anthropic key', async () => {
-    const store = createIndexedDbSettingsStore()
-
-    await store.setAnthropicApiKey('sk-ant-abc123')
-
-    expect((await store.load()).anthropicApiKey).toBe('sk-ant-abc123')
-  })
-
-  it('replaces the Anthropic key rather than keeping the old one alongside it', async () => {
-    const store = createIndexedDbSettingsStore()
-
-    await store.setAnthropicApiKey('sk-ant-old')
-    await store.setAnthropicApiKey('sk-ant-new')
-
-    expect((await store.load()).anthropicApiKey).toBe('sk-ant-new')
-  })
-
-  it('clears the Anthropic key back to null', async () => {
-    const store = createIndexedDbSettingsStore()
-    await store.setAnthropicApiKey('sk-ant-abc123')
-
-    await store.setAnthropicApiKey(null)
-
-    expect((await store.load()).anthropicApiKey).toBeNull()
-  })
-
-  it('saves, replaces, and clears the ElevenLabs key independently of the Anthropic key', async () => {
-    const store = createIndexedDbSettingsStore()
-    await store.setAnthropicApiKey('sk-ant-abc123')
-
-    await store.setElevenLabsApiKey('el-key-old')
-    await store.setElevenLabsApiKey('el-key-new')
-    expect((await store.load()).elevenLabsApiKey).toBe('el-key-new')
-    expect((await store.load()).anthropicApiKey).toBe('sk-ant-abc123')
-
-    await store.setElevenLabsApiKey(null)
-    expect((await store.load()).elevenLabsApiKey).toBeNull()
-    expect((await store.load()).anthropicApiKey).toBe('sk-ant-abc123')
   })
 
   it('saves and reloads the pinned voice', async () => {
@@ -157,7 +148,7 @@ describe('createIndexedDbSettingsStore', () => {
     expect((await store.load()).voice).toBeNull()
   })
 
-  it('never lets a saved key or voice appear in a Deck export', async () => {
+  it('never lets the library key or voice appear in a Deck export', async () => {
     const settingsStore = createIndexedDbSettingsStore()
     const deckStore = createIndexedDbDeckStore()
     await deckStore.save({
@@ -166,15 +157,13 @@ describe('createIndexedDbSettingsStore', () => {
       phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
     })
 
-    await settingsStore.setAnthropicApiKey('sk-ant-super-secret')
-    await settingsStore.setElevenLabsApiKey('el-super-secret')
+    const { libraryKey } = await settingsStore.load()
     await settingsStore.setVoice({ provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' })
 
     const library = await deckStore.exportAll()
 
     const serialized = JSON.stringify(library)
-    expect(serialized).not.toContain('sk-ant-super-secret')
-    expect(serialized).not.toContain('el-super-secret')
+    expect(serialized).not.toContain(libraryKey)
     expect(serialized).not.toContain('eleven_multilingual_v2')
   })
 })

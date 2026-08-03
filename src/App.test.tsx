@@ -5,21 +5,23 @@ import App from './App'
 import type { Deck, DeckStore, DraftPhrase, Library, ScanReader } from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
-import type { SynthClient, SynthResult } from './adapters/audio/eleven-labs-synth-client'
+import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry } from './adapters/diagnostics'
+import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/library-sync-client'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
 }))
 const { shareBackupFile } = await import('./adapters/share/web-share')
 
+const FAKE_LIBRARY_KEY = 'a'.repeat(64)
+
 /** In-memory SettingsStore fake — the real one is exercised in
  * src/adapters/storage; App's wiring is what these tests care about. */
 function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore {
   let settings: Settings = {
-    anthropicApiKey: null,
-    elevenLabsApiKey: null,
+    libraryKey: FAKE_LIBRARY_KEY,
     voice: null,
     backupNudgeDismissed: false,
     lastSyncAt: null,
@@ -29,11 +31,8 @@ function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore
     async load() {
       return settings
     },
-    async setAnthropicApiKey(key) {
-      settings = { ...settings, anthropicApiKey: key }
-    },
-    async setElevenLabsApiKey(key) {
-      settings = { ...settings, elevenLabsApiKey: key }
+    async setLibraryKey(key) {
+      settings = { ...settings, libraryKey: key }
     },
     async setVoice(voice) {
       settings = { ...settings, voice }
@@ -44,6 +43,28 @@ function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore
     async recordSync(timestamp) {
       settings = { ...settings, lastSyncAt: timestamp }
     },
+  }
+}
+
+/** In-memory LibrarySyncClient fake — the real adapter is exercised in
+ * src/adapters/sync; App's wiring (push after every mutation, pull-once on
+ * an empty mount) is what these tests care about. Defaults to a library
+ * with no existing server copy, so App's pull-on-empty-mount path is a
+ * harmless no-op unless a test wires it otherwise. */
+function createFakeLibrarySyncClient(
+  overrides: Partial<LibrarySyncClient> = {},
+): LibrarySyncClient & { pushed: Library[] } {
+  const pushed: Library[] = []
+  return {
+    pushed,
+    async push(library): Promise<PushResult> {
+      pushed.push(library)
+      return { ok: true }
+    },
+    async pull(): Promise<PullResult> {
+      return { ok: false, reason: 'not-found' }
+    },
+    ...overrides,
   }
 }
 
@@ -151,6 +172,16 @@ function click(el: Element): void {
   ;(el as HTMLElement).click()
 }
 
+/** Lets `syncToServer()`'s fire-and-forget `.then` chain settle before an
+ * assertion — it's not awaited by the click handler itself (persisting the
+ * Phrase text must never be gated on the sync round-trip). */
+async function flushMicrotasks(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
+
 let container: HTMLDivElement
 let root: Root
 
@@ -173,6 +204,7 @@ async function renderApp(
   clipCache: ClipCache = createFakeClipCache(),
   scanReader: ScanReader = createFakeScanReader(),
   errorLog: ErrorLog = createFakeErrorLog(),
+  librarySyncClient: LibrarySyncClient = createFakeLibrarySyncClient(),
 ) {
   await act(async () => {
     root.render(
@@ -184,6 +216,7 @@ async function renderApp(
         clipCache={clipCache}
         scanReader={scanReader}
         errorLog={errorLog}
+        librarySyncClient={librarySyncClient}
       />,
     )
   })
@@ -323,16 +356,15 @@ describe('App wired to backup and restore', () => {
     expect(JSON.parse(text)).toMatchObject({ format: LIBRARY_FORMAT })
   })
 
-  it('never puts an API key in the exported file', async () => {
+  it('never puts the library key in the exported file', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    await renderApp(store)
+    await renderApp(store, createFakeSettingsStore({ libraryKey: FAKE_LIBRARY_KEY }))
     await openSettings()
-    act(() => click(container.querySelector('[data-testid="anthropic-key-input"]')!))
     await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
 
     const [file] = vi.mocked(shareBackupFile).mock.calls[0]!
     const text = await file.text()
-    expect(text).not.toMatch(/apiKey|anthropic|elevenlabs/i)
+    expect(text).not.toContain(FAKE_LIBRARY_KEY)
   })
 
   it('falls back to a plain download when the share adapter reports the platform cannot share files', async () => {
@@ -411,7 +443,7 @@ describe('App wired to voice preview and selection', () => {
       { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Où est la gare ?', english: 'Where is the station?' }] },
     ])
     const synthClient = createFakeSynthClient()
-    await renderApp(store, createFakeSettingsStore({ elevenLabsApiKey: 'el-key' }), synthClient)
+    await renderApp(store, createFakeSettingsStore(), synthClient)
     await openSettings()
 
     const firstVoice = container.querySelector('[data-testid^="voice-preview-"]') as HTMLButtonElement
@@ -426,7 +458,7 @@ describe('App wired to voice preview and selection', () => {
   it('falls back to a built-in French phrase to preview when the library has no phrases', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
     const synthClient = createFakeSynthClient()
-    await renderApp(store, createFakeSettingsStore({ elevenLabsApiKey: 'el-key' }), synthClient)
+    await renderApp(store, createFakeSettingsStore(), synthClient)
     await openSettings()
 
     const firstVoice = container.querySelector('[data-testid^="voice-preview-"]') as HTMLButtonElement
@@ -553,7 +585,7 @@ describe('App wired to the Drill screen', () => {
 describe('App wired to Import', () => {
   it('opens Import from Decks and returns to Decks when cancelled', async () => {
     const store = createFakeDeckStore([])
-    await renderApp(store, createFakeSettingsStore({ anthropicApiKey: 'sk-ant' }))
+    await renderApp(store)
 
     await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
     expect(container.querySelector('[data-testid="take-photo"]')).not.toBeNull()
@@ -562,12 +594,12 @@ describe('App wired to Import', () => {
     expect(container.querySelector('[data-testid="open-import"]')).not.toBeNull()
   })
 
-  it('resolves the missing-key state before any photo is taken, and Settings routes back to Import', async () => {
+  it('offers capture immediately — there is no on-device key to be missing any more', async () => {
     const store = createFakeDeckStore([])
     const scanReader = createFakeScanReader()
     await renderApp(
       store,
-      createFakeSettingsStore({ anthropicApiKey: null }),
+      createFakeSettingsStore(),
       createFakeSynthClient(),
       createFakeGenerationQueue(),
       createFakeClipCache(),
@@ -575,24 +607,8 @@ describe('App wired to Import', () => {
     )
 
     await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
-    expect(container.querySelector('[data-testid="scan-no-key"]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="take-photo"]')).toBeNull()
-    expect(scanReader.read).not.toHaveBeenCalled()
-
-    await act(async () => click(container.querySelector('[data-testid="scan-open-settings"]')!))
-    expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
-
-    await act(async () => click(container.querySelector('[data-testid="settings-back"]')!))
-    expect(container.querySelector('[data-testid="scan-no-key"]')).not.toBeNull()
-  })
-
-  it('offers capture immediately when an Anthropic key is already present', async () => {
-    const store = createFakeDeckStore([])
-    await renderApp(store, createFakeSettingsStore({ anthropicApiKey: 'sk-ant' }))
-
-    await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
     expect(container.querySelector('[data-testid="take-photo"]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="scan-no-key"]')).toBeNull()
+    expect(scanReader.read).not.toHaveBeenCalled()
   })
 
   it('confirming a Scan creates the target Deck, persists the Phrases through DeckStore, and queues generation for each', async () => {
@@ -606,7 +622,7 @@ describe('App wired to Import', () => {
     const generationQueue = createFakeGenerationQueue()
     await renderApp(
       store,
-      createFakeSettingsStore({ anthropicApiKey: 'sk-ant' }),
+      createFakeSettingsStore(),
       createFakeSynthClient(),
       generationQueue,
       createFakeClipCache(),
@@ -668,7 +684,7 @@ describe('App wired to the backup nudge (T027)', () => {
     scanReader.read.mockResolvedValue([{ french: 'Bonjour', english: 'Hello' }])
     await renderApp(
       store,
-      createFakeSettingsStore({ anthropicApiKey: 'sk-ant', backupNudgeDismissed: false }),
+      createFakeSettingsStore({ backupNudgeDismissed: false }),
       createFakeSynthClient(),
       createFakeGenerationQueue(),
       createFakeClipCache(),
@@ -687,18 +703,118 @@ describe('App wired to the backup nudge (T027)', () => {
   })
 })
 
+describe('App wired to library sync (T041)', () => {
+  it('pulls from the server on mount when local storage is empty, and renders what came back', async () => {
+    const store = createFakeDeckStore([])
+    const library: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: 1,
+      exportedAt: 1,
+      decks: [{ id: 'remote', name: 'From server', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+    store.importAll = async (lib) => {
+      store.decks = new Map(lib.decks.map((d) => [d.id, { id: d.id, name: d.name, phrases: d.phrases }]))
+    }
+    store.loadAll = async () => [...store.decks.values()]
+    const librarySyncClient = createFakeLibrarySyncClient({
+      pull: async () => ({ ok: true, library }),
+    })
+
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      librarySyncClient,
+    )
+
+    expect(container.textContent).toContain('From server')
+  })
+
+  it('never pulls when local storage already has Decks — a device with local data is never overwritten by an empty or older server copy', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    let pullCalled = false
+    const librarySyncClient = createFakeLibrarySyncClient({
+      pull: async () => {
+        pullCalled = true
+        return { ok: false, reason: 'not-found' }
+      },
+    })
+
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      librarySyncClient,
+    )
+
+    expect(pullCalled).toBe(false)
+  })
+
+  it('pushes the whole library to the server after a Deck is created', async () => {
+    const store = createFakeDeckStore([])
+    const librarySyncClient = createFakeLibrarySyncClient()
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      librarySyncClient,
+    )
+
+    act(() => click(container.querySelector('[data-testid="new-deck"]')!))
+    const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+    act(() => typeInto(input, 'Work'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await flushMicrotasks()
+
+    expect(librarySyncClient.pushed.length).toBeGreaterThan(0)
+  })
+
+  it('pushes to the server after a Deck is deleted', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const librarySyncClient = createFakeLibrarySyncClient()
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      librarySyncClient,
+    )
+
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="delete-deck"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-deck"]')!))
+    await flushMicrotasks()
+
+    expect(librarySyncClient.pushed.length).toBeGreaterThan(0)
+  })
+})
+
 describe('App wired to Diagnostics (T039)', () => {
-  it('is reachable from Settings and shows key presence, never a value, and Phrase counts, never text', async () => {
+  it('is reachable from Settings and shows Phrase counts, never text — no provider key is held on device to leak', async () => {
     const store = createFakeDeckStore([
       { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
     ])
-    await renderApp(store, createFakeSettingsStore({ anthropicApiKey: 'sk-ant-super-secret' }))
+    await renderApp(store, createFakeSettingsStore())
     await openSettings()
 
     await act(async () => click(container.querySelector('[data-testid="open-diagnostics"]')!))
 
     const report = container.querySelector('[data-testid="diagnostics-report"]')!.textContent!
-    expect(report).not.toContain('sk-ant-super-secret')
     expect(report).not.toContain('Bonjour')
     expect(report).toMatch(/1/) // 1 Phrase total, counted, not named
   })

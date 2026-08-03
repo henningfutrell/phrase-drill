@@ -76,14 +76,14 @@ describe('PWA build output', () => {
     expect(html).toContain('rel="manifest"')
   })
 
-  // GitHub Pages serves this app from https://henningfutrell.github.io/phrase-drill/,
-  // not from a domain root — the gh-pages branch also hosts an unrelated
-  // spike/ diagnostic that must keep working. Every absolute path emitted by
-  // the build (manifest identity, hashed asset hrefs, the favicon and
-  // apple-touch-icon links) has to carry the /phrase-drill/ sub-path, or the
-  // service worker registers against the wrong scope and the installed-app
-  // launch 404s.
-  it('scopes the manifest identity to the /phrase-drill/ sub-path', () => {
+  // T041: this build now ships to two different roots — GitHub Pages under
+  // /phrase-drill/ (scripts/deploy.sh) and the Docker/Coolify server
+  // (server/static.js) at a domain root. The app has no URL-based routing
+  // (App.tsx switches screens by React state, never the path), so
+  // vite.config.ts uses a relative base ('./'): every emitted path resolves
+  // relative to wherever index.html itself is served from, correct under
+  // either root without a second build.
+  it('scopes the manifest identity relative to index.html, not to a fixed root', () => {
     const manifestPath = path.join(distDir, 'manifest.webmanifest')
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
       id?: string
@@ -91,12 +91,12 @@ describe('PWA build output', () => {
       scope?: string
     }
 
-    expect(manifest.id).toBe('/phrase-drill/')
-    expect(manifest.start_url).toBe('/phrase-drill/')
-    expect(manifest.scope).toBe('/phrase-drill/')
+    expect(manifest.id).toBe('./')
+    expect(manifest.start_url).toBe('./')
+    expect(manifest.scope).toBe('./')
   })
 
-  it('emits every asset and icon href under the /phrase-drill/ sub-path', () => {
+  it('emits every asset and icon href relative to index.html, not under a fixed root', () => {
     const html = readFileSync(path.join(distDir, 'index.html'), 'utf-8')
 
     const scriptSrc = html.match(/<script type="module"[^>]*src="([^"]+)"/)?.[1]
@@ -107,10 +107,10 @@ describe('PWA build output', () => {
       /<link rel="apple-touch-icon"[^>]*href="([^"]+)"/,
     )?.[1]
 
-    expect(scriptSrc).toMatch(/^\/phrase-drill\/assets\//)
-    expect(stylesheetHref).toMatch(/^\/phrase-drill\/assets\//)
-    expect(manifestHref).toBe('/phrase-drill/manifest.webmanifest')
-    expect(faviconHref).toBe('/phrase-drill/favicon.svg')
-    expect(appleTouchIconHref).toBe('/phrase-drill/icons/apple-touch-icon-180.png')
+    expect(scriptSrc).toMatch(/^\.\/assets\//)
+    expect(stylesheetHref).toMatch(/^\.\/assets\//)
+    expect(manifestHref).toBe('./manifest.webmanifest')
+    expect(faviconHref).toBe('./favicon.svg')
+    expect(appleTouchIconHref).toBe('./icons/apple-touch-icon-180.png')
   })
 })
