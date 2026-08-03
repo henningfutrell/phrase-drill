@@ -7,6 +7,7 @@ import { LIBRARY_FORMAT } from './domain'
 import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
 import type { SynthClient, SynthResult } from './adapters/audio/eleven-labs-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
+import type { ErrorLog, LogEntry } from './adapters/diagnostics'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
@@ -21,6 +22,7 @@ function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore
     elevenLabsApiKey: null,
     voice: null,
     backupNudgeDismissed: false,
+    lastSyncAt: null,
     ...initial,
   }
   return {
@@ -38,6 +40,9 @@ function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore
     },
     async dismissBackupNudge() {
       settings = { ...settings, backupNudgeDismissed: true }
+    },
+    async recordSync(timestamp) {
+      settings = { ...settings, lastSyncAt: timestamp }
     },
   }
 }
@@ -122,6 +127,18 @@ function createFakeScanReader(): ScanReader & { read: ReturnType<typeof vi.fn> }
   return { read }
 }
 
+/** In-memory ErrorLog fake — the real IndexedDB-backed ring buffer is
+ * exercised in src/adapters/diagnostics; App's wiring (does Diagnostics show
+ * what's in the log) is what these tests care about. */
+function createFakeErrorLog(entries: readonly LogEntry[] = []): ErrorLog {
+  return {
+    async record() {},
+    async list() {
+      return entries
+    },
+  }
+}
+
 const FAKE_VOICE: Voice = { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }
 
 function typeInto(input: HTMLInputElement, value: string): void {
@@ -155,6 +172,7 @@ async function renderApp(
   generationQueue: GenerationQueue = createFakeGenerationQueue(),
   clipCache: ClipCache = createFakeClipCache(),
   scanReader: ScanReader = createFakeScanReader(),
+  errorLog: ErrorLog = createFakeErrorLog(),
 ) {
   await act(async () => {
     root.render(
@@ -165,6 +183,7 @@ async function renderApp(
         generationQueue={generationQueue}
         clipCache={clipCache}
         scanReader={scanReader}
+        errorLog={errorLog}
       />,
     )
   })
@@ -665,5 +684,73 @@ describe('App wired to the backup nudge (T027)', () => {
     await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
 
     expect(container.querySelector('[data-testid="backup-nudge"]')).not.toBeNull()
+  })
+})
+
+describe('App wired to Diagnostics (T039)', () => {
+  it('is reachable from Settings and shows key presence, never a value, and Phrase counts, never text', async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    await renderApp(store, createFakeSettingsStore({ anthropicApiKey: 'sk-ant-super-secret' }))
+    await openSettings()
+
+    await act(async () => click(container.querySelector('[data-testid="open-diagnostics"]')!))
+
+    const report = container.querySelector('[data-testid="diagnostics-report"]')!.textContent!
+    expect(report).not.toContain('sk-ant-super-secret')
+    expect(report).not.toContain('Bonjour')
+    expect(report).toMatch(/1/) // 1 Phrase total, counted, not named
+  })
+
+  it('shows the last captured errors from the injected ErrorLog', async () => {
+    const store = createFakeDeckStore([])
+    const errorLog = createFakeErrorLog([
+      { id: 1, timestamp: 1_700_000_000_000, source: 'window.onerror', message: 'TypeError: oops' },
+    ])
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      errorLog,
+    )
+    await openSettings()
+
+    await act(async () => click(container.querySelector('[data-testid="open-diagnostics"]')!))
+
+    expect(container.querySelector('[data-testid="diagnostics-report"]')!.textContent).toContain(
+      'TypeError: oops',
+    )
+  })
+
+  it('copies the whole report as text through one control', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const store = createFakeDeckStore([])
+    await renderApp(store)
+    await openSettings()
+    await act(async () => click(container.querySelector('[data-testid="open-diagnostics"]')!))
+
+    await act(async () => click(container.querySelector('[data-testid="copy-diagnostics-report"]')!))
+
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const [copied] = writeText.mock.calls[0]!
+    expect(typeof copied).toBe('string')
+    expect((copied as string).length).toBeGreaterThan(0)
+    vi.unstubAllGlobals()
+  })
+
+  it('returns to Settings from Diagnostics', async () => {
+    const store = createFakeDeckStore([])
+    await renderApp(store)
+    await openSettings()
+    await act(async () => click(container.querySelector('[data-testid="open-diagnostics"]')!))
+
+    await act(async () => click(container.querySelector('[data-testid="diagnostics-back"]')!))
+
+    expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
   })
 })

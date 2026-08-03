@@ -27,7 +27,31 @@ describe('createIndexedDbSettingsStore', () => {
       elevenLabsApiKey: null,
       voice: null,
       backupNudgeDismissed: false,
+      lastSyncAt: null,
     })
+  })
+
+  it('reports no sync as ever having happened until one is recorded', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    expect((await store.load()).lastSyncAt).toBeNull()
+  })
+
+  it('records and reloads the timestamp of the last successful sync', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    await store.recordSync(1_700_000_000_000)
+
+    expect((await store.load()).lastSyncAt).toBe(1_700_000_000_000)
+  })
+
+  it('replaces the last-sync timestamp with a newer one rather than keeping the old one alongside it', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    await store.recordSync(1_000)
+    await store.recordSync(2_000)
+
+    expect((await store.load()).lastSyncAt).toBe(2_000)
   })
 
   it('reports the backup nudge as not dismissed until dismissed', async () => {
