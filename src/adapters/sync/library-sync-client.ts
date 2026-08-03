@@ -5,13 +5,13 @@ import type { Library } from '../../domain'
  * `SynthError`/`ScanError` — there is no `quota` here (T041's rate limit on
  * `/api/library` is generous and sync is not user-initiated per action), and
  * `not-found` is a normal, expected outcome (nothing has ever been pushed
- * for this library key yet), not a failure.
+ * before nobody has ever synced, not a failure.
  */
 export type PullResult = { ok: true; library: Library } | { ok: false; reason: 'not-found' | 'unauthorized' | 'network' }
 export type PushResult = { ok: true } | { ok: false; reason: 'unauthorized' | 'network' }
 
 export interface LibrarySyncClientDeps {
-  getLibraryKey(): Promise<string>
+  getAccessToken(): Promise<string>
   fetchImpl?: typeof fetch
 }
 
@@ -27,19 +27,19 @@ export interface LibrarySyncClient {
  * a wiped or replaced phone" (T041): pushes the full local `Library`
  * envelope (the same shape `DeckStore.exportAll()`/backup files already
  * use) to `/api/library`, and pulls it back down. Same-origin,
- * authenticated with the library key — the one credential the device holds.
+ * authenticated with a Keycloak access token (T043).
  */
 export function createLibrarySyncClient(deps: LibrarySyncClientDeps): LibrarySyncClient {
   const fetchImpl = deps.fetchImpl ?? fetch
 
   return {
     async push(library) {
-      const libraryKey = await deps.getLibraryKey()
+      const accessToken = await deps.getAccessToken()
       let response: Response
       try {
         response = await fetchImpl('/api/library', {
           method: 'PUT',
-          headers: { 'content-type': 'application/json', authorization: `Bearer ${libraryKey}` },
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
           body: JSON.stringify(library),
         })
       } catch {
@@ -51,11 +51,11 @@ export function createLibrarySyncClient(deps: LibrarySyncClientDeps): LibrarySyn
     },
 
     async pull() {
-      const libraryKey = await deps.getLibraryKey()
+      const accessToken = await deps.getAccessToken()
       let response: Response
       try {
         response = await fetchImpl('/api/library', {
-          headers: { authorization: `Bearer ${libraryKey}` },
+          headers: { authorization: `Bearer ${accessToken}` },
         })
       } catch {
         return { ok: false, reason: 'network' }
