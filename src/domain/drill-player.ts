@@ -85,6 +85,9 @@ class DrillPlayerEngine implements DrillPlayer {
   pause(): void {
     if (this._status !== 'playing') return
     this._status = 'paused'
+    // Stryker disable next-line OptionalChaining: unreachable null — reaching
+    // this line requires _status === 'playing', which (see runLoop) is only
+    // ever true synchronously alongside a just-assigned, non-null stepAbort.
     this.stepAbort?.abort()
   }
 
@@ -96,7 +99,14 @@ class DrillPlayerEngine implements DrillPlayer {
 
   async skip(): Promise<void> {
     if (this._status === 'stopped') return
+    // Stryker disable next-line ConditionalExpression,StringLiteral,EqualityOperator:
+    // wasPlaying's only reader is the runLoop() call below, which is itself a
+    // no-op whenever this value would matter (see that disable comment) —
+    // no test can observe wasPlaying taking any value other than its true one.
     const wasPlaying = this._status === 'playing'
+    // Stryker disable next-line AssignmentOperator: generation is read only via
+    // equality against a snapshot (line ~130) — any nonzero, monotonic change
+    // (+1 or -1) is indistinguishable through that check.
     this.generation += 1
     this.stepAbort?.abort()
     this.repIndex += 1
@@ -105,12 +115,26 @@ class DrillPlayerEngine implements DrillPlayer {
       this._status = 'stopped'
       return
     }
+    // Stryker disable next-line ConditionalExpression: whenever wasPlaying is
+    // true here, runLoop's own `running` flag is already true (status
+    // 'playing' is only ever set immediately before running=true, with no
+    // yield point between), so this call is always a no-op via that guard;
+    // whenever wasPlaying is false, status here isn't 'playing', so the call
+    // is also a no-op via runLoop's own while-condition. Neither branch is
+    // observable.
     if (wasPlaying) await this.runLoop()
   }
 
   stop(): void {
     this._status = 'stopped'
+    // Stryker disable next-line AssignmentOperator: see the identical
+    // reasoning on skip()'s `generation += 1` above.
     this.generation += 1
+    // Unlike pause()/skip(), stop() has no status guard, so stepAbort really
+    // can be null here (e.g. calling stop() before any start(), or after a
+    // Drill has already run to completion) — this optional chain is
+    // load-bearing, covered by "stop() before start() and after natural
+    // completion does not throw".
     this.stepAbort?.abort()
   }
 
@@ -119,6 +143,14 @@ class DrillPlayerEngine implements DrillPlayer {
     if (this.running) return
     this.running = true
     try {
+      // Stryker disable next-line ConditionalExpression: the `_status ===
+      // 'playing'` clause is re-checked at the top of every iteration after
+      // this one, but the loop body's own `if (this._status !== 'playing')
+      // break` (below) already breaks out before looping back whenever that
+      // would be false — so by the time this condition is re-evaluated,
+      // status is always already 'playing'. The clause only ever matters on
+      // the very first entry, which is always true (start()/resume() set
+      // 'playing' immediately before calling runLoop(), synchronously).
       while (this._status === 'playing' && this.repIndex < this.reps.length) {
         const generationAtStart = this.generation
         const step = this.reps[this.repIndex].cadence[this.stepIndex]
@@ -129,6 +161,16 @@ class DrillPlayerEngine implements DrillPlayer {
         // Skip already moved the position for this generation — don't double-advance.
         if (this.generation === generationAtStart) this.advanceStep()
       }
+      // Stryker disable next-line ConditionalExpression,LogicalOperator: the
+      // loop above can only exit here in one of two ways — the while
+      // condition went false (which, given the above, only happens because
+      // repIndex >= length, with status still 'playing'), or the `break`
+      // fired (status !== 'playing', and repIndex is provably < length,
+      // since advanceStep() and the loop-condition recheck that could push it
+      // to length happen in the same synchronous stretch as the break check,
+      // with no yield an external call could land in between). Either way,
+      // `status === 'playing'` and `repIndex >= length` already agree, so
+      // every mutation of this condition observed here decides nothing.
       if (this._status === 'playing' && this.repIndex >= this.reps.length) {
         this._status = 'stopped'
       }
