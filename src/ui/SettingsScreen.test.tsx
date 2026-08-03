@@ -66,6 +66,7 @@ function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> =
     onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: true }),
     onConfirmRestore: vi.fn().mockResolvedValue(undefined),
     onCancelRestore: vi.fn(),
+    onOpenDiagnostics: vi.fn(),
     ...overrides,
   }
   act(() => {
@@ -85,6 +86,16 @@ function chooseRestoreFile(file: File): void {
 }
 
 describe('SettingsScreen', () => {
+  it('offers Diagnostics reachably — not buried behind a gesture — and routes to it on tap', () => {
+    const props = renderScreen()
+    const link = container.querySelector('[data-testid="open-diagnostics"]')
+    expect(link).not.toBeNull()
+
+    click(link!)
+
+    expect(props.onOpenDiagnostics).toHaveBeenCalledTimes(1)
+  })
+
   it('shows a calm, non-error explanation when the scan key is absent', () => {
     renderScreen({ anthropicKeyPresent: false })
     expect(container.textContent).not.toMatch(/error|failed/i)
