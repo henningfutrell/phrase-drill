@@ -14,6 +14,8 @@ import type {
 import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updatePhrase } from './domain'
 import type { ClipCache, Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, parseLibraryFile } from './adapters/storage'
+import type { ErrorLog } from './adapters/diagnostics'
+import { collectDiagnostics, copyText, formatDiagnosticsReport, getBuildInfo, getStorageEstimate } from './adapters/diagnostics'
 import { shareBackupFile } from './adapters/share/web-share'
 import type { SynthClient } from './adapters/audio/eleven-labs-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
@@ -28,12 +30,14 @@ import { MixSelectScreen } from './ui/MixSelectScreen'
 import { ImportScreen, type ImportTarget } from './ui/ImportScreen'
 import { DrillScreen, type DrillReadinessResult } from './ui/DrillScreen'
 import { SettingsScreen, type ExportOutcome, type PreviewOutcome, type RestoreFileResult } from './ui/SettingsScreen'
+import { DiagnosticsScreen } from './ui/DiagnosticsScreen'
 
 const EMPTY_SETTINGS: Settings = {
   anthropicApiKey: null,
   elevenLabsApiKey: null,
   voice: null,
   backupNudgeDismissed: false,
+  lastSyncAt: null,
 }
 
 /**
@@ -96,6 +100,7 @@ function App({
   generationQueue,
   clipCache,
   scanReader,
+  errorLog,
 }: {
   deckStore: DeckStore
   settingsStore: SettingsStore
@@ -103,11 +108,14 @@ function App({
   generationQueue: GenerationQueue
   clipCache: ClipCache
   scanReader: ScanReader
+  errorLog: ErrorLog
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
+  const [diagnosticsReport, setDiagnosticsReport] = useState<string | undefined>(undefined)
   const [pendingRestore, setPendingRestore] = useState<Library | undefined>(undefined)
   const [mixOpen, setMixOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
@@ -249,6 +257,25 @@ function App({
     void settingsStore.dismissBackupNudge()
   }
 
+  /**
+   * Diagnostics (T039): gathers the snapshot fresh every time it's opened —
+   * counts and status can change between visits (a key just saved, a Clip
+   * that just finished generating) — and formats it once, so the screen
+   * only ever shows one already-formatted string, never structured data.
+   */
+  function handleOpenDiagnostics(): void {
+    setDiagnosticsReport(undefined)
+    setDiagnosticsOpen(true)
+    void collectDiagnostics({
+      deckStore,
+      settingsStore,
+      clipCache,
+      errorLog,
+      getBuildInfo,
+      getStorageEstimate: () => getStorageEstimate(),
+    }).then((snapshot) => setDiagnosticsReport(formatDiagnosticsReport(snapshot)))
+  }
+
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
 
   function withSelectedDeck(fn: (deck: Deck) => Deck): Deck | undefined {
@@ -295,6 +322,16 @@ function App({
     return <main className="screen" />
   }
 
+  if (diagnosticsOpen) {
+    return (
+      <DiagnosticsScreen
+        onBack={() => setDiagnosticsOpen(false)}
+        reportText={diagnosticsReport}
+        onCopyReport={(text) => copyText(text)}
+      />
+    )
+  }
+
   if (settingsOpen) {
     const previewText =
       (decks ?? []).flatMap((d) => d.phrases).find((p) => p.french.trim().length > 0)?.french ??
@@ -330,6 +367,7 @@ function App({
         onRestoreFileChosen={handleRestoreFileChosen}
         onConfirmRestore={handleConfirmRestore}
         onCancelRestore={handleCancelRestore}
+        onOpenDiagnostics={handleOpenDiagnostics}
       />
     )
   }

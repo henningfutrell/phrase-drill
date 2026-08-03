@@ -10,6 +10,13 @@ export const SETTINGS_STORE = 'settings'
  * Derived, regenerable cache, not user data: never read by `exportAll`.
  */
 export const CLIPS_STORE = 'clips'
+/**
+ * Bounded ring buffer of captured errors (T039 diagnostics — `error-log.ts`
+ * owns the cap/trim logic; this store just holds whatever it decides to
+ * keep). Keyed by an incrementing numeric `id` so entries can be listed
+ * oldest-to-newest and the oldest trimmed first.
+ */
+export const ERRORS_STORE = 'errors'
 
 /**
  * Opens the one IndexedDB database this app uses. All stores are declared
@@ -44,6 +51,10 @@ export function openDatabase(): Promise<IDBPDatabase> {
         // v1 -> v2, additive: existing decks/settings pass through
         // untouched (see the branches above); this store is new.
         db.createObjectStore(CLIPS_STORE, { keyPath: 'hash' })
+      }
+      if (!db.objectStoreNames.contains(ERRORS_STORE)) {
+        // v2 -> v3, additive: every other store passes through untouched.
+        db.createObjectStore(ERRORS_STORE, { keyPath: 'id' })
       }
     },
   })
