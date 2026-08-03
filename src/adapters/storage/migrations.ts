@@ -68,7 +68,13 @@ const neverExisted: RecordMigration = (() => {
  */
 const v1ToV2: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
 
-const DECK_MIGRATIONS: readonly RecordMigration[] = [neverExisted, v1ToV2]
+/**
+ * Exported so `DECK_MIGRATIONS.length` can be checked against
+ * `CURRENT_SCHEMA_VERSION` directly (persisted-shape.test.ts) — the two
+ * must move together, and that test is what turns a mismatch into a build
+ * failure instead of a runtime throw on the user's device.
+ */
+export const DECK_MIGRATIONS: readonly RecordMigration[] = [neverExisted, v1ToV2]
 
 /**
  * Bring a deck record from `fromVersion` up to the current schema. The same
