@@ -126,9 +126,88 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
     await vi.runAllTimersAsync()
     await done
     expect(player.status).toBe('stopped')
+    const positionBefore = player.position
 
     await player.skip()
 
     expect(player.status).toBe('stopped')
+    expect(player.position).toBe(positionBefore) // guard, not the out-of-bounds fallback, keeps this unchanged
+  })
+
+  it('start() while paused is a no-op — it does not reset position or restart from the top', async () => {
+    const speech = instantSpeech()
+    const clock = fakeClock()
+    const player = createDrillPlayer([bonjour, merci], { speech, clock })
+
+    const done = player.start()
+    await flushMicrotasks()
+    await player.skip() // move to position 1
+    await flushMicrotasks()
+    player.pause()
+    await flushMicrotasks()
+    expect(player.status).toBe('paused')
+    expect(player.position).toBe(1)
+    const callsBefore = speech.calls.length
+
+    await player.start() // must no-op: the Drill is paused, not stopped
+
+    expect(player.status).toBe('paused')
+    expect(player.position).toBe(1)
+    expect(speech.calls.length).toBe(callsBefore)
+
+    player.stop()
+    await done
+  })
+
+  it('skip while paused advances position without resuming playback, and does not throw', async () => {
+    const speech = instantSpeech()
+    const clock = fakeClock()
+    const player = createDrillPlayer([bonjour, merci], { speech, clock })
+
+    const done = player.start()
+    await flushMicrotasks()
+    player.pause()
+    await flushMicrotasks()
+    expect(player.status).toBe('paused')
+    const callsBefore = speech.calls.length
+
+    await expect(player.skip()).resolves.toBeUndefined()
+
+    expect(player.position).toBe(1)
+    expect(player.status).toBe('paused') // skip does not auto-resume
+    expect(speech.calls.length).toBe(callsBefore) // no new speech triggered
+
+    player.stop()
+    await done
+  })
+
+  it('skip past the final Rep while paused stops the Drill directly', async () => {
+    const speech = instantSpeech()
+    const clock = fakeClock()
+    const player = createDrillPlayer([bonjour], { speech, clock })
+
+    const done = player.start()
+    await flushMicrotasks()
+    player.pause()
+    await flushMicrotasks()
+    expect(player.status).toBe('paused')
+
+    await player.skip()
+
+    expect(player.status).toBe('stopped')
+    await done
+  })
+
+  it('stop() before any start(), and after the Drill has already run to completion, does not throw', async () => {
+    const speech = instantSpeech()
+    const clock = fakeClock()
+    const player = createDrillPlayer([bonjour], { speech, clock })
+
+    expect(() => player.stop()).not.toThrow()
+
+    const done = player.start()
+    await vi.runAllTimersAsync()
+    await done
+    expect(() => player.stop()).not.toThrow()
   })
 })
