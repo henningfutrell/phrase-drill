@@ -7,8 +7,11 @@ vi.mock('idb', async () => {
 })
 
 // Imported after the mock is registered, per Vitest's hoisting contract.
+const idbModule = await import('idb')
 const { createIndexedDbSettingsStore } = await import('./settings-store')
 const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
+const { DB_NAME, SETTINGS_STORE } = await import('./database')
+const { CURRENT_SCHEMA_VERSION } = await import('./migrations')
 
 describe('createIndexedDbSettingsStore', () => {
   beforeEach(() => {
@@ -31,6 +34,25 @@ describe('createIndexedDbSettingsStore', () => {
     const store = createIndexedDbSettingsStore()
 
     expect((await store.load()).backupNudgeDismissed).toBe(false)
+  })
+
+  it('reads a key an older build never wrote as its documented default, not undefined or a throw', async () => {
+    // Simulates a store written before `backupNudgeDismissed` existed: keys
+    // an earlier build did know about are present, the new one is absent —
+    // never written by any setter, not even as `null`. `load()` must still
+    // resolve, and resolve to the documented default, not `undefined`.
+    const db = await idbModule.openDB(DB_NAME, CURRENT_SCHEMA_VERSION, {
+      upgrade(rawDb: { createObjectStore(name: string): unknown }) {
+        rawDb.createObjectStore(SETTINGS_STORE)
+      },
+    })
+    await db.put(SETTINGS_STORE, 'sk-ant-preexisting', 'anthropicApiKey')
+
+    const store = createIndexedDbSettingsStore()
+    const settings = await store.load()
+
+    expect(settings.backupNudgeDismissed).toBe(false)
+    expect(settings.anthropicApiKey).toBe('sk-ant-preexisting')
   })
 
   it('dismisses the backup nudge permanently', async () => {
