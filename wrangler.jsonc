@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // One origin, one Worker: serves the built PWA (dist/, via the assets
+  // binding) and the /api/library/:key sync API (worker/index.ts). See
+  // docs/sync.md for the wire contract and README.md for the one-time
+  // Cloudflare setup this needs before the first `npm run deploy`.
+  "name": "phrase-drill",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-02",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    // Only /api/* reaches worker/index.ts; every other request is served
+    // straight from dist/ without invoking the Worker script at all.
+    "run_worker_first": ["/api/*"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "LIBRARY_BUCKET",
+      // Created by the human step in README.md ("wrangler r2 bucket create
+      // phrase-drill-library") before the first deploy.
+      "bucket_name": "phrase-drill-library"
+    }
+  ]
+}
