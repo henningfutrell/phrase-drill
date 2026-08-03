@@ -1,4 +1,4 @@
-import { getBearerToken, isValidLibraryKey } from './auth.js'
+import { getBearerToken } from './auth.js'
 import { readBody, sendJson, PayloadTooLargeError } from './http-helpers.js'
 import { createStaticHandler } from './static.js'
 
@@ -15,7 +15,7 @@ const LIBRARY_FORMAT = 'phrase-drill-library'
  * so this module never itself imports `node:sqlite` or `fetch` and is
  * exercised in tests with fakes for all of them.
  */
-export function createApp({ libraryStore, elevenLabs, anthropic, ttsLimiter, scanLimiter, libraryLimiter, distDir, logger }) {
+export function createApp({ libraryStore, elevenLabs, anthropic, ttsLimiter, scanLimiter, libraryLimiter, distDir, logger, tokenVerifier }) {
   const serveStatic = createStaticHandler(distDir)
 
   async function handleTts(req, res, key) {
@@ -87,7 +87,7 @@ export function createApp({ libraryStore, elevenLabs, anthropic, ttsLimiter, sca
 
   async function handleLibraryGet(req, res, key) {
     if (!libraryLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
-    const row = libraryStore.get(key)
+    const row = await libraryStore.get(key)
     if (!row) return sendJson(res, 404, { error: 'not-found' })
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(row.data)
@@ -120,7 +120,7 @@ export function createApp({ libraryStore, elevenLabs, anthropic, ttsLimiter, sca
       return sendJson(res, 400, { error: 'invalid-request' })
     }
 
-    libraryStore.put(key, JSON.stringify(parsed), Date.now())
+    await libraryStore.put(key, JSON.stringify(parsed), Date.now())
     res.writeHead(204)
     res.end()
   }
@@ -136,11 +136,23 @@ export function createApp({ libraryStore, elevenLabs, anthropic, ttsLimiter, sca
       }
 
       if (url.pathname.startsWith('/api/')) {
-        const key = getBearerToken(req)
-        if (!isValidLibraryKey(key)) {
+        const token = getBearerToken(req)
+        let claims = null
+        if (token) {
+          try {
+            claims = await tokenVerifier.verify(token)
+          } catch {
+            claims = null
+          }
+        }
+        if (!claims || typeof claims.sub !== 'string' || claims.sub.length === 0) {
           sendJson(res, 401, { error: 'unauthorized' })
           return
         }
+        // Her library is keyed by the Keycloak subject (T043) — a stable,
+        // server-issued identity, never a value the device could pick or a
+        // pasted key someone else could hand out.
+        const key = claims.sub
 
         if (url.pathname === '/api/tts' && req.method === 'POST') return await handleTts(req, res, key)
         if (url.pathname === '/api/scan' && req.method === 'POST') return await handleScan(req, res, key)

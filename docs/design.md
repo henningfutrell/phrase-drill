@@ -340,9 +340,10 @@ first-class state, not an error:
 Reached from `Scan a page` in the Decks list header (§3.2).
 `src/ui/ImportScreen.tsx` implements this flow; `App.tsx` renders it with
 `createServerScanReader` (T041), which calls this app's own `/api/scan`,
-authenticated with the device's library key. The device holds no Anthropic
-key at all any more, so there is nothing to be present or missing — the old
-`apiKeyPresent` gate is gone with it.
+authenticated with her Keycloak access token (T043, replacing the earlier
+device library key). The device holds no Anthropic key at all any more, so
+there is nothing to be present or missing — the old `apiKeyPresent` gate is
+gone with it.
 
 Three-step flow, one screen each. **Unbuilt intention:** the sketch called for a
 top progress trail (`--text-xs`, three dots, not a percentage bar) marking
@@ -397,26 +398,22 @@ one Deck for the whole batch, matching the domain model's confirmation semantics
   prompt — the domain notes accept this for v1 (a Scan is cheap to redo); a
   confirmation dialog here would misrepresent the decision as costly.
 
-### 3.6 Settings — sync key, the voice picker, and the backup
+### 3.6 Settings — the voice picker and the backup
 
 Deliberately short — a personal-scale settings screen, not a developer panel.
 Amended three times since the original sketch: a second key for speech, once
 the app moved from the browser's own `speechSynthesis` to a TTS API
 generating cached Clips (§3.1); a full voice picker, once the owner asked
 mid-build to be able to choose the voice herself; and, in T041, both
-provider-key fields were deleted outright and replaced with the **Sync**
-section below — the server now holds both credentials, so there is no key
-left for this screen to collect.
+provider-key fields were deleted outright and replaced with a **Sync**
+section — the server now holds both credentials, so there was no key
+left for this screen to collect. T043 deleted that Sync section in turn:
+identity is now a Keycloak login (browser redirect, authorization code +
+PKCE), not a pasted key, so there is nothing left on this screen to display,
+copy, or recover by hand — a wiped or replaced phone recovers by logging in
+again, the same as any other account.
 
-1. **Sync** — shows the device's **library key** in the open (unmasked,
-   `data-testid="library-key-display"`) with a `Copy` button, plus a
-   "use a different key" flow (a text field validated against 64 lowercase
-   hex characters, `Use this key`) for recovering a library onto a wiped or
-   replaced phone. This key is the whole recovery story, so it is
-   deliberately not treated like the old provider keys were (masked, hidden):
-   it identifies which library on the server is hers, nothing more sensitive
-   than that (see "what a key holder can do" in `docs/server.md`).
-2. **Voice — a picker.** A curated catalogue of voices (currently three, each
+1. **Voice — a picker.** A curated catalogue of voices (currently three, each
    named and described, e.g. "Female voice, American-accented English
    speaking French" — none is French-native, and the accent is stated plainly
    rather than implied). Each entry carries:
@@ -433,7 +430,7 @@ left for this screen to collect.
      sheet actually pins the new voice, because every cached Clip is
      content-addressed by voice (glossary) and a change orphans the whole
      cache.
-3. **Backup** — still present alongside server sync, in its own card
+2. **Backup** — still present alongside server sync, in its own card
    treatment, reframed as extra insurance rather than the only copy: "Your
    phrases sync to the server automatically, but you can also save a backup
    file you keep or send yourself, for extra peace of mind." Clips are not
@@ -463,8 +460,8 @@ review step (§3.5 Step 3, above the Draft Phrase list), the moment a Scan has
 actually produced phrases to save. One flag backs both: `Settings.
 backupNudgeDismissed`, `false` until she dismisses the nudge from either
 place, `true` and permanent after — there is no way back to shown. It is not
-part of the exported backup itself, same treatment as the library key and the
-pinned voice (§3.6, `DeckStore.exportAll()` cannot see it).
+part of the exported backup itself, same treatment as the pinned voice
+(§3.6, `DeckStore.exportAll()` cannot see it).
 
 ### 3.7 Diagnostics — answer "it's not working" without guessing (T039)
 

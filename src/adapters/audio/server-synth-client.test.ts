@@ -3,7 +3,7 @@ import { createServerSynthClient } from './server-synth-client'
 import type { SynthError, SynthVoice } from './server-synth-client'
 
 const VOICE: SynthVoice = { modelId: 'eleven_multilingual_v2', voiceId: 'voice-123' }
-const LIBRARY_KEY = 'd'.repeat(64)
+const ACCESS_TOKEN = 'test-access-token-d'
 
 function mp3Response(status: number, byteLength: number, durationMs?: number): Response {
   return {
@@ -26,13 +26,13 @@ function errorResponse(status: number): Response {
 }
 
 function makeClient(overrides: {
-  libraryKey?: string
+  accessToken?: string
   fetchImpl?: ReturnType<typeof vi.fn<typeof fetch>>
 } = {}) {
   const fetchImpl = overrides.fetchImpl ?? vi.fn<typeof fetch>()
-  const getLibraryKey = vi.fn().mockResolvedValue(overrides.libraryKey ?? LIBRARY_KEY)
-  const client = createServerSynthClient({ getLibraryKey, fetchImpl })
-  return { client, fetchImpl, getLibraryKey }
+  const getAccessToken = vi.fn().mockResolvedValue(overrides.accessToken ?? ACCESS_TOKEN)
+  const client = createServerSynthClient({ getAccessToken, fetchImpl })
+  return { client, fetchImpl, getAccessToken }
 }
 
 describe('createServerSynthClient', () => {
@@ -66,7 +66,7 @@ describe('createServerSynthClient', () => {
 
     const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
     const headers = init.headers as Record<string, string>
-    expect(headers['authorization']).toBe(`Bearer ${LIBRARY_KEY}`)
+    expect(headers['authorization']).toBe(`Bearer ${ACCESS_TOKEN}`)
     expect(headers['xi-api-key']).toBeUndefined()
   })
 
