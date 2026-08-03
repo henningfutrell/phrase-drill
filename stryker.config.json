@@ -16,11 +16,11 @@
   "htmlReporter": {
     "fileName": "reports/mutation/index.html"
   },
-  "_thresholds_comment": "break is a RATCHET, set at the measured baseline (82.74 over three runs, 2026-08-02), not at an aspiration. 82 leaves 0.74 of slack because 5 mutants are killed by timeout and a timeout is a wall-clock judgement, not a deterministic one. Raise this as survivors are killed; never lower it.",
+  "_thresholds_comment": "break is a RATCHET: raise it as survivors are killed, never lower it. 82 -> 95 on 2026-08-03 (T044/T045) when the domain reached 100.00% over three runs, 0 survived, 0 uncovered. NOT set to 100 deliberately: 4-5 of the 151 mutants are killed by TIMEOUT, and a timeout is a wall-clock judgement. A machine faster than the one measured here could let one of them complete instead, at which point it may survive and a 100 threshold would fail a build that has no defect in it. 95 tolerates one such flip and still fails loudly on a real regression.",
   "thresholds": {
-    "high": 90,
-    "low": 80,
-    "break": 82
+    "high": 100,
+    "low": 95,
+    "break": 95
   },
   "tempDirName": ".stryker-tmp",
   "cleanTempDir": true
