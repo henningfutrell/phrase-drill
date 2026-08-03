@@ -18,17 +18,10 @@ const CHARLOTTE: VoiceOption = {
   description: 'Female voice, European-accented English speaking French.',
 }
 const VOICES: VoiceOption[] = [RACHEL, CHARLOTTE]
-const LIBRARY_KEY = 'a'.repeat(64)
 
 /** Resolves after a microtask so a promise-returning handler's `.then` runs before assertions. */
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0))
-}
-
-function typeInto(input: HTMLInputElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
-  setter.call(input, value)
-  input.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
 function click(el: Element): void {
@@ -53,9 +46,7 @@ afterEach(() => {
 function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> = {}) {
   const props = {
     onBack: vi.fn(),
-    libraryKey: LIBRARY_KEY,
     voice: null,
-    onUseLibraryKey: vi.fn(),
     voices: VOICES,
     previewText: 'Bonjour, comment ça va ?',
     onPreviewVoice: vi.fn().mockResolvedValue({ ok: true }),
@@ -94,52 +85,10 @@ describe('SettingsScreen', () => {
     expect(props.onOpenDiagnostics).toHaveBeenCalledTimes(1)
   })
 
-  describe('sync (library key)', () => {
-    it('shows the library key in the open, unmasked', () => {
-      renderScreen()
-      const display = container.querySelector('[data-testid="library-key-display"]')
-      expect(display?.textContent).toBe(LIBRARY_KEY)
-    })
-
-    it('copies the library key to the clipboard on tap', async () => {
-      renderScreen()
-      await act(async () => click(container.querySelector('[data-testid="library-key-copy"]')!))
-      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(LIBRARY_KEY)
-      expect(container.querySelector('[data-testid="library-key-copy-status"]')).not.toBeNull()
-    })
-
-    it('explains plainly what someone holding this key can do', () => {
-      renderScreen()
-      const section = container.querySelector('[data-testid="sync-section"]')
-      expect(section?.textContent).toMatch(/see and change your phrases/i)
-    })
-
-    it('lets a different key be entered and used, for a phone that already has one', () => {
-      const props = renderScreen()
-      const input = container.querySelector('[data-testid="library-key-input"]') as HTMLInputElement
-      const otherKey = 'b'.repeat(64)
-      act(() => typeInto(input, otherKey))
-      act(() => click(container.querySelector('[data-testid="library-key-use"]')!))
-
-      expect(props.onUseLibraryKey).toHaveBeenCalledWith(otherKey)
-      expect(input.value).toBe('')
-    })
-
-    it('disables "Use this key" until something is typed', () => {
-      renderScreen()
-      const use = container.querySelector('[data-testid="library-key-use"]') as HTMLButtonElement
-      expect(use.disabled).toBe(true)
-    })
-
-    it('refuses a key that is not 64 hex characters, without calling onUseLibraryKey', () => {
-      const props = renderScreen()
-      const input = container.querySelector('[data-testid="library-key-input"]') as HTMLInputElement
-      act(() => typeInto(input, 'not-a-real-key'))
-      act(() => click(container.querySelector('[data-testid="library-key-use"]')!))
-
-      expect(props.onUseLibraryKey).not.toHaveBeenCalled()
-      expect(container.querySelector('[data-testid="library-key-error"]')).not.toBeNull()
-    })
+  it('no longer offers a Sync section — identity is a Keycloak login now, not a pasted key (T043)', () => {
+    renderScreen()
+    expect(container.querySelector('[data-testid="sync-section"]')).toBeNull()
+    expect(container.querySelector('[data-testid="library-key-display"]')).toBeNull()
   })
 
   describe('voice picker', () => {

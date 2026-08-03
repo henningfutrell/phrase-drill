@@ -13,53 +13,21 @@ const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
 const { DB_NAME, SETTINGS_STORE } = await import('./database')
 const { CURRENT_SCHEMA_VERSION } = await import('./migrations')
 
-const LIBRARY_KEY_PATTERN = /^[0-9a-f]{64}$/
-
 describe('createIndexedDbSettingsStore', () => {
   beforeEach(() => {
     resetFakeIdb()
     vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
   })
 
-  it('generates a high-entropy library key on first load', async () => {
+  it('loads with no identity field — device identity is a Keycloak token now, not settings-store state (T043)', async () => {
     const store = createIndexedDbSettingsStore()
 
     const settings = await store.load()
 
-    expect(settings.libraryKey).toMatch(LIBRARY_KEY_PATTERN)
+    expect(settings).not.toHaveProperty('libraryKey')
     expect(settings.voice).toBeNull()
     expect(settings.backupNudgeDismissed).toBe(false)
     expect(settings.lastSyncAt).toBeNull()
-  })
-
-  it('persists the generated library key across reloads rather than regenerating it', async () => {
-    const store = createIndexedDbSettingsStore()
-
-    const first = await store.load()
-    const second = await store.load()
-
-    expect(second.libraryKey).toBe(first.libraryKey)
-  })
-
-  it('generates different library keys for different devices (fresh stores)', async () => {
-    const storeA = createIndexedDbSettingsStore()
-    const keyA = (await storeA.load()).libraryKey
-
-    resetFakeIdb()
-    const storeB = createIndexedDbSettingsStore()
-    const keyB = (await storeB.load()).libraryKey
-
-    expect(keyA).not.toBe(keyB)
-  })
-
-  it('lets a device switch to a different library key (recovery on a wiped/replaced phone)', async () => {
-    const store = createIndexedDbSettingsStore()
-    await store.load()
-
-    const recoveryKey = 'b'.repeat(64)
-    await store.setLibraryKey(recoveryKey)
-
-    expect((await store.load()).libraryKey).toBe(recoveryKey)
   })
 
   it('reports no sync as ever having happened until one is recorded', async () => {
@@ -91,11 +59,12 @@ describe('createIndexedDbSettingsStore', () => {
     expect((await store.load()).backupNudgeDismissed).toBe(false)
   })
 
-  it('reads a key an older build never wrote as its documented default, not undefined or a throw', async () => {
-    // Simulates a store written before `backupNudgeDismissed` existed: keys
-    // an earlier build did know about are present, the new one is absent —
-    // never written by any setter, not even as `null`. `load()` must still
-    // resolve, and resolve to the documented default, not `undefined`.
+  it('reads a key an older build never wrote as its documented default, not undefined or a throw — including ignoring a pre-T043 stored library key', async () => {
+    // Simulates a store written before `backupNudgeDismissed` existed, and
+    // before T043 deleted the library-key identity model: an old,
+    // never-cleaned-up `libraryKey` entry is present but must simply be
+    // ignored — `load()` must still resolve, and resolve to the documented
+    // defaults for the fields it does read, not `undefined` or a throw.
     const db = await idbModule.openDB(DB_NAME, CURRENT_SCHEMA_VERSION, {
       upgrade(rawDb: { createObjectStore(name: string): unknown }) {
         rawDb.createObjectStore(SETTINGS_STORE)
@@ -107,7 +76,7 @@ describe('createIndexedDbSettingsStore', () => {
     const settings = await store.load()
 
     expect(settings.backupNudgeDismissed).toBe(false)
-    expect(settings.libraryKey).toBe('a'.repeat(64))
+    expect(settings).not.toHaveProperty('libraryKey')
   })
 
   it('dismisses the backup nudge permanently', async () => {
@@ -118,11 +87,10 @@ describe('createIndexedDbSettingsStore', () => {
     expect((await store.load()).backupNudgeDismissed).toBe(true)
   })
 
-  it('keeps the backup nudge dismissed across reloads, independent of the library key and voice', async () => {
+  it('keeps the backup nudge dismissed across reloads, independent of the pinned voice', async () => {
     const store = createIndexedDbSettingsStore()
     await store.dismissBackupNudge()
-
-    await store.setLibraryKey('c'.repeat(64))
+    await store.setVoice({ provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' })
 
     expect((await store.load()).backupNudgeDismissed).toBe(true)
   })
@@ -148,7 +116,7 @@ describe('createIndexedDbSettingsStore', () => {
     expect((await store.load()).voice).toBeNull()
   })
 
-  it('never lets the library key or voice appear in a Deck export', async () => {
+  it('never lets the pinned voice appear in a Deck export', async () => {
     const settingsStore = createIndexedDbSettingsStore()
     const deckStore = createIndexedDbDeckStore()
     await deckStore.save({
@@ -157,13 +125,11 @@ describe('createIndexedDbSettingsStore', () => {
       phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
     })
 
-    const { libraryKey } = await settingsStore.load()
     await settingsStore.setVoice({ provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' })
 
     const library = await deckStore.exportAll()
 
     const serialized = JSON.stringify(library)
-    expect(serialized).not.toContain(libraryKey)
     expect(serialized).not.toContain('eleven_multilingual_v2')
   })
 })

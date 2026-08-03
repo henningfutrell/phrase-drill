@@ -11,9 +11,29 @@ import { createBoundedQueue } from './bounded-queue.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
 import { createAnthropicProvider } from './providers/anthropic-client.js'
 
-const REAL_KEY = 'a'.repeat(64)
 const SECRET_ELEVENLABS_KEY = 'xi-live-secret-99999'
 const SECRET_ANTHROPIC_KEY = 'anthropic-live-secret-88888'
+
+// T043: identity is a verified Keycloak access token, not a device-generated
+// hex key. `app.js` never parses a token itself — it only calls the
+// injected `tokenVerifier.verify()` and trusts the `sub` it returns (or
+// rejects on any thrown error), so these tests fake that seam directly
+// rather than minting real JWTs. `server/jwt-verifier.test.js` is what
+// proves the real verifier's four rejections against real signatures.
+const VALID_TOKEN = 'valid-token-for-sub-1'
+const SUB = 'keycloak-sub-1111'
+const OTHER_TOKEN = 'valid-token-for-sub-2'
+const OTHER_SUB = 'keycloak-sub-2222'
+
+function fakeTokenVerifier(tokenToClaims = new Map([[VALID_TOKEN, { sub: SUB }], [OTHER_TOKEN, { sub: OTHER_SUB }]])) {
+  return {
+    async verify(token) {
+      const claims = tokenToClaims.get(token)
+      if (!claims) throw new Error('invalid or expired token')
+      return claims
+    },
+  }
+}
 
 /** Every log line captured during a test, so tests can assert none contains a secret. */
 function collectingLogger() {
@@ -48,6 +68,40 @@ function fetchAnthropicOk(phrases) {
   }
 }
 
+/** In-memory stand-in for a `pg` pool, same shape `db.test.js` uses — see its own comment. */
+function fakePool() {
+  let tableCreated = false
+  const rows = new Map()
+  return {
+    async query(text, params = []) {
+      const sql = text.trim()
+      if (sql.startsWith('CREATE TABLE')) {
+        tableCreated = true
+        return { rows: [] }
+      }
+      if (sql.startsWith('SELECT')) {
+        if (!tableCreated) throw new Error('relation "libraries" does not exist')
+        const row = rows.get(params[0])
+        return { rows: row ? [{ data: row.data, updatedAt: row.updatedAt }] : [] }
+      }
+      if (sql.startsWith('INSERT')) {
+        if (!tableCreated) throw new Error('relation "libraries" does not exist')
+        const [key, data, updatedAt] = params
+        rows.set(key, { data, updatedAt })
+        return { rows: [] }
+      }
+      throw new Error(`fakePool: unrecognized query: ${sql}`)
+    },
+    async end() {},
+  }
+}
+
+async function newLibraryStore() {
+  const store = createLibraryStore(fakePool())
+  await store.init()
+  return store
+}
+
 describe('server app (integration, fake upstreams)', () => {
   let server
   let baseUrl
@@ -55,8 +109,8 @@ describe('server app (integration, fake upstreams)', () => {
   let distDir
   let logger
 
-  function boot({ elevenLabsFetch = fetchElevenLabsOk(), anthropicFetch = fetchAnthropicOk([]) } = {}) {
-    libraryStore = createLibraryStore(':memory:')
+  async function boot({ elevenLabsFetch = fetchElevenLabsOk(), anthropicFetch = fetchAnthropicOk([]) } = {}) {
+    libraryStore = await newLibraryStore()
     distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-dist-'))
     mkdirSync(join(distDir, 'assets'), { recursive: true })
     writeFileSync(join(distDir, 'index.html'), '<!doctype html><title>phrase-drill</title>')
@@ -87,6 +141,7 @@ describe('server app (integration, fake upstreams)', () => {
       libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       distDir,
       logger,
+      tokenVerifier: fakeTokenVerifier(),
     })
 
     server = createServer(handleRequest)
@@ -100,7 +155,7 @@ describe('server app (integration, fake upstreams)', () => {
 
   afterEach(async () => {
     await new Promise((resolve) => server.close(resolve))
-    libraryStore.close()
+    await libraryStore.close()
     rmSync(distDir, { recursive: true, force: true })
   })
 
@@ -145,7 +200,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
       })
       expect(res.status).toBe(200)
@@ -159,7 +214,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: JSON.stringify({ text: 'x'.repeat(20_000), voiceId: 'v1', modelId: 'm1' }),
       })
       expect(res.status).toBe(413)
@@ -169,14 +224,14 @@ describe('server app (integration, fake upstreams)', () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: JSON.stringify({ text: '' }),
       })
       expect(res.status).toBe(400)
     })
 
     it('returns 503 not-configured when the upstream key is missing, without ever leaking the (absent) key', async () => {
-      libraryStore = createLibraryStore(':memory:')
+      libraryStore = await newLibraryStore()
       distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-dist-'))
       writeFileSync(join(distDir, 'index.html'), '<!doctype html>')
       logger = collectingLogger()
@@ -191,6 +246,7 @@ describe('server app (integration, fake upstreams)', () => {
         libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         distDir,
         logger,
+        tokenVerifier: fakeTokenVerifier(),
       })
       server = createServer(handleRequest)
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -198,7 +254,7 @@ describe('server app (integration, fake upstreams)', () => {
 
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
       })
       expect(res.status).toBe(503)
@@ -208,7 +264,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot({ elevenLabsFetch: fetchThatFailsWith(429) })
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
       })
       expect(res.status).toBe(429)
@@ -219,7 +275,7 @@ describe('server app (integration, fake upstreams)', () => {
       const request = () =>
         fetch(`${baseUrl}/api/tts`, {
           method: 'POST',
-          headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+          headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
           body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
         })
       await request()
@@ -235,7 +291,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot({ anthropicFetch: fetchAnthropicOk([{ french: 'bonjour', english: 'hello' }]) })
       const res = await fetch(`${baseUrl}/api/scan`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'image/jpeg' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'image/jpeg' },
         body: Buffer.from([0xff, 0xd8, 0xff, 0xdb]),
       })
       expect(res.status).toBe(200)
@@ -246,7 +302,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/scan`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'image/jpeg' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'image/jpeg' },
         body: Buffer.alloc(7 * 1024 * 1024, 1),
       })
       expect(res.status).toBe(413)
@@ -256,7 +312,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/scan`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}` },
+        headers: { authorization: `Bearer ${VALID_TOKEN}` },
         body: Buffer.alloc(0),
       })
       expect(res.status).toBe(400)
@@ -266,7 +322,7 @@ describe('server app (integration, fake upstreams)', () => {
   describe('library sync', () => {
     it('GET returns 404 before anything has been pushed', async () => {
       await boot()
-      const res = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${REAL_KEY}` } })
+      const res = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
       expect(res.status).toBe(404)
     })
 
@@ -275,17 +331,16 @@ describe('server app (integration, fake upstreams)', () => {
       const payload = { format: 'phrase-drill-library', schemaVersion: 1, decks: [{ id: 'd1', name: 'Café' }] }
       const put = await fetch(`${baseUrl}/api/library`, {
         method: 'PUT',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: JSON.stringify(payload),
       })
       expect(put.status).toBe(204)
 
-      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${REAL_KEY}` } })
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
       expect(get.status).toBe(200)
       expect(await get.json()).toEqual(payload)
 
-      const otherKey = 'b'.repeat(64)
-      const getOther = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${otherKey}` } })
+      const getOther = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${OTHER_TOKEN}` } })
       expect(getOther.status).toBe(404)
     })
 
@@ -293,7 +348,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/library`, {
         method: 'PUT',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: JSON.stringify({ nonsense: true }),
       })
       expect(res.status).toBe(400)
@@ -303,7 +358,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/library`, {
         method: 'PUT',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: Buffer.alloc(9 * 1024 * 1024, 1),
       })
       expect(res.status).toBe(413)
@@ -321,15 +376,15 @@ describe('server app (integration, fake upstreams)', () => {
         fetch(`${baseUrl}/api/health`),
         fetch(`${baseUrl}/api/tts`, {
           method: 'POST',
-          headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+          headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
           body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
         }),
         fetch(`${baseUrl}/api/scan`, {
           method: 'POST',
-          headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'image/jpeg' },
+          headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'image/jpeg' },
           body: Buffer.from([0xff, 0xd8]),
         }),
-        fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${REAL_KEY}` } }),
+        fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } }),
         fetch(`${baseUrl}/api/tts`, { headers: { authorization: 'Bearer bad' } }),
         fetch(`${baseUrl}/nonexistent-page`),
       ])
@@ -349,7 +404,7 @@ describe('server app (integration, fake upstreams)', () => {
       await boot({ elevenLabsFetch: fetchThatFailsWith(500) })
       await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${REAL_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
       })
       for (const line of logger.lines) {
