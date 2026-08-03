@@ -12,10 +12,6 @@ dist
 dist-ssr
 *.local
 
-# wrangler's local dev/deploy state (never contains secrets to commit,
-# but it's per-machine, like node_modules)
-.wrangler
-
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
