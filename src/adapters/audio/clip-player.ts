@@ -21,11 +21,22 @@ export interface AudioElementLike {
  * A near-silent, effectively zero-length WAV as a data URI — played and
  * immediately paused inside the Drill-start tap to unlock the shared
  * element for iOS Safari (T019 §4 obligation 2: "New video Policies for
- * iOS", https://webkit.org/blog/6784/new-video-policies-for-ios/). One
- * PCM sample, 8kHz mono.
+ * iOS", https://webkit.org/blog/6784/new-video-policies-for-ios/). 8 silent
+ * 8-bit PCM samples, 8kHz mono — 52 bytes.
+ *
+ * Generated, never hand-edited. The previous constant carried one stray zero
+ * byte after the RIFF size field, putting "WAVE" at offset 9 instead of 8;
+ * every browser refused to decode it, so `play()` rejected, `unlock()`
+ * returned false, and the Drill screen reported "Couldn't start audio on this
+ * phone" on every device. A decode failure is indistinguishable from an iOS
+ * autoplay refusal at this call site — hence the byte-level test in
+ * `clip-player.test.ts` rather than trust.
  */
 const SILENT_UNLOCK_SOURCE =
-  'data:audio/wav;base64,UklGRiQAAAAAV0FWRWZtdCAQAAAAAQABAEANAAAAgD8AAgAIAGRhdGEAAAAA'
+  'data:audio/wav;base64,UklGRiwAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQgAAACAgICAgICAgA=='
+
+/** The unlock source, exposed so a test can read its bytes. Not for callers. */
+export const UNLOCK_SOURCE_FOR_TEST = SILENT_UNLOCK_SOURCE
 
 /** Added to `clip.durationMs` before the `ended`-race times out (T019 §4 ob.3). */
 const DEFAULT_SLACK_MS = 750
