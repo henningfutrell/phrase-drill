@@ -1,0 +1,17 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`persisted DeckRecord/PhraseRecord shape > pins the exact field names and types written to IndexedDB and to the export file 1`] = `
+{
+  "createdAt": "number",
+  "id": "string",
+  "name": "string",
+  "phrases": [
+    {
+      "english": "string",
+      "french": "string",
+      "id": "string",
+    },
+  ],
+  "updatedAt": "number",
+}
+`;
