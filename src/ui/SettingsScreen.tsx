@@ -70,6 +70,7 @@ export function SettingsScreen({
   onRestoreFileChosen,
   onConfirmRestore,
   onCancelRestore,
+  onOpenDiagnostics,
 }: {
   onBack: () => void
   anthropicKeyPresent: boolean
@@ -91,6 +92,7 @@ export function SettingsScreen({
   onRestoreFileChosen: (file: File) => Promise<RestoreFileResult>
   onConfirmRestore: () => void
   onCancelRestore: () => void
+  onOpenDiagnostics: () => void
 }) {
   const [anthropicInput, setAnthropicInput] = useState('')
   const [elevenLabsInput, setElevenLabsInput] = useState('')
@@ -399,6 +401,17 @@ export function SettingsScreen({
             {restoreError}
           </p>
         )}
+      </section>
+
+      <section className="settings-section" data-testid="diagnostics-section">
+        <h2 className="settings-section-title">Diagnostics</h2>
+        <p className="settings-help">
+          If something isn't working, open this and copy the report into a message —
+          it says what's set up and what's gone wrong, never your phrases.
+        </p>
+        <button type="button" data-testid="open-diagnostics" className="btn-icon" onClick={onOpenDiagnostics}>
+          Open diagnostics
+        </button>
       </section>
 
       <p className="settings-help settings-privacy-note">

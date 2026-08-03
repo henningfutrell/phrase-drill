@@ -25,6 +25,14 @@ export interface Settings {
    * so existing data needs no migration.
    */
   readonly backupNudgeDismissed: boolean
+  /**
+   * Epoch ms of the last successful Library sync (`docs/sync.md`), or `null`
+   * if none has ever completed. Diagnostics (T039) is the first reader;
+   * nothing writes this yet — the sync feature that calls `recordSync` is a
+   * separate change. Additive field: missing in previously-stored settings
+   * reads as `null`, same treatment as `backupNudgeDismissed`.
+   */
+  readonly lastSyncAt: number | null
 }
 
 export interface SettingsStore {
@@ -37,12 +45,16 @@ export interface SettingsStore {
   setVoice(voice: Voice | null): Promise<void>
   /** One-way: there is no way back to `false` once dismissed. */
   dismissBackupNudge(): Promise<void>
+  /** Records the epoch-ms time of a sync that just completed successfully,
+   * replacing whatever was there before. */
+  recordSync(timestamp: number): Promise<void>
 }
 
 const ANTHROPIC_API_KEY = 'anthropicApiKey'
 const ELEVENLABS_API_KEY = 'elevenLabsApiKey'
 const VOICE = 'voice'
 const BACKUP_NUDGE_DISMISSED = 'backupNudgeDismissed'
+const LAST_SYNC_AT = 'lastSyncAt'
 
 /**
  * The IndexedDB implementation of `SettingsStore`, via `idb`. Shares the one
@@ -70,17 +82,19 @@ export function createIndexedDbSettingsStore(): SettingsStore {
   return {
     async load(): Promise<Settings> {
       const db = await getDatabase()
-      const [anthropicApiKey, elevenLabsApiKey, voice, backupNudgeDismissed] = await Promise.all([
+      const [anthropicApiKey, elevenLabsApiKey, voice, backupNudgeDismissed, lastSyncAt] = await Promise.all([
         db.get(SETTINGS_STORE, ANTHROPIC_API_KEY) as Promise<string | undefined>,
         db.get(SETTINGS_STORE, ELEVENLABS_API_KEY) as Promise<string | undefined>,
         db.get(SETTINGS_STORE, VOICE) as Promise<Voice | undefined>,
         db.get(SETTINGS_STORE, BACKUP_NUDGE_DISMISSED) as Promise<boolean | undefined>,
+        db.get(SETTINGS_STORE, LAST_SYNC_AT) as Promise<number | undefined>,
       ])
       return {
         anthropicApiKey: anthropicApiKey ?? null,
         elevenLabsApiKey: elevenLabsApiKey ?? null,
         voice: voice ?? null,
         backupNudgeDismissed: backupNudgeDismissed ?? false,
+        lastSyncAt: lastSyncAt ?? null,
       }
     },
 
@@ -98,6 +112,10 @@ export function createIndexedDbSettingsStore(): SettingsStore {
 
     dismissBackupNudge(): Promise<void> {
       return put(BACKUP_NUDGE_DISMISSED, true)
+    },
+
+    recordSync(timestamp: number): Promise<void> {
+      return put(LAST_SYNC_AT, timestamp)
     },
   }
 }
