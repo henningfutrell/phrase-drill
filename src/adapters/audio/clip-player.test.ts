@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createClipPlayer } from './clip-player'
+import { createClipPlayer, UNLOCK_SOURCE_FOR_TEST } from './clip-player'
 import type { AudioElementLike } from './clip-player'
 import type { Clip, ClipCache } from '../storage/clip-cache'
 import { computeClipHash } from '../storage/clip-cache'
@@ -278,5 +278,32 @@ describe('createClipPlayer', () => {
       expect(element.pauseCalls).toBe(1)
       expect(revokeObjectURL).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('createClipPlayer — the unlock source itself', () => {
+  it('is a structurally valid WAV: RIFF magic, WAVE at byte 8, a fmt chunk and a data chunk', () => {
+    // Regression. The original constant carried one stray zero byte after the
+    // RIFF size field, which pushed "WAVE" to offset 9. Every browser rejected
+    // it, `element.play()` rejected, `unlock()` returned false, and the drill
+    // screen reported "Couldn't start audio on this phone" on every device —
+    // a decode failure wearing the costume of an iOS autoplay-policy failure.
+    // The fakes in the tests above resolve `play()` unconditionally, so no
+    // test could see it. This one reads the bytes.
+    const base64 = UNLOCK_SOURCE_FOR_TEST.replace(/^data:audio\/wav;base64,/, '')
+    expect(base64).not.toBe(UNLOCK_SOURCE_FOR_TEST)
+
+    const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))
+    const ascii = (start: number, end: number) =>
+      String.fromCharCode(...bytes.subarray(start, end))
+    const uint32 = (offset: number) =>
+      new DataView(bytes.buffer).getUint32(offset, true)
+
+    expect(ascii(0, 4)).toBe('RIFF')
+    expect(ascii(8, 12)).toBe('WAVE')
+    expect(ascii(12, 16)).toBe('fmt ')
+    expect(uint32(4)).toBe(bytes.length - 8)
+    expect(ascii(36, 40)).toBe('data')
+    expect(uint32(40)).toBe(bytes.length - 44)
   })
 })
