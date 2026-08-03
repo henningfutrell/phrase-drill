@@ -1,9 +1,9 @@
 // @vitest-environment node
 //
 // Runs the actual Worker script against the real Workers runtime (workerd,
-// via wrangler's `unstable_dev`) with R2 simulated by the same engine
+// via wrangler's `unstable_dev`) with D1 simulated by the same engine
 // `wrangler dev`/`wrangler deploy` use locally — not a hand-rolled mock of
-// R2 or of `fetch`. `@cloudflare/vitest-pool-workers` is not installed in
+// D1 or of `fetch`. `@cloudflare/vitest-pool-workers` is not installed in
 // this repo (nothing here may run `npm install`); `unstable_dev` is the
 // next-closest honest option already available via the `wrangler` devDependency.
 //
@@ -36,7 +36,7 @@ beforeAll(async () => {
   }
 
   worker = await unstable_dev('worker/index.ts', {
-    r2: [{ binding: 'LIBRARY_BUCKET' }],
+    d1Databases: [{ binding: 'LIBRARY_DB', database_name: 'test-library-db' }],
     persist: false,
     logLevel: 'error',
     experimental: { disableExperimentalWarning: true },
@@ -192,6 +192,63 @@ describe('PUT /api/library/:key', () => {
     const body = (await res.json()) as Record<string, unknown>
     expect(body.error).toBe('schema-version-too-new')
     expect(body.serverSchemaVersion).toBe(CURRENT_SCHEMA_VERSION)
+  })
+
+  // R2's `onlyIf` could never have raced two writes against each other in a
+  // test — R2 is Cloudflare's storage layer, out of process from the Worker
+  // under test. D1 lives in the same request path, so this is the one case
+  // this migration adds: fire two conditional writes at the same key with
+  // the same (now-stale-to-one-of-them) If-Match etag and confirm exactly
+  // one commits. Honesty about what this proves: `unstable_dev` runs one
+  // workerd instance handling both `fetch()` calls, and whether the two
+  // requests' D1 statements are truly interleaved by the runtime or happen
+  // to be scheduled back-to-back is not something this test can observe or
+  // control. What it does prove is the property that matters: the atomic
+  // `UPDATE ... WHERE key = ? AND version = ?` never lets both writers
+  // succeed, never merges them, and never leaves the row in a state neither
+  // writer produced — which is true whether or not the two requests were
+  // ever simultaneously in flight at the SQL layer.
+  it('races two concurrent writes on the same key: exactly one wins, the loser gets 409 with the current copy', async () => {
+    const key = freshKey()
+    const created = await worker.fetch(`/api/library/${key}`, {
+      method: 'PUT',
+      headers: { 'if-none-match': '*' },
+      body: JSON.stringify(library({ exportedAt: 1 })),
+    })
+    const { etag } = (await created.json()) as { etag: string }
+
+    const [a, b] = await Promise.all([
+      worker.fetch(`/api/library/${key}`, {
+        method: 'PUT',
+        headers: { 'if-match': etag },
+        body: JSON.stringify(library({ exportedAt: 2 })),
+      }),
+      worker.fetch(`/api/library/${key}`, {
+        method: 'PUT',
+        headers: { 'if-match': etag },
+        body: JSON.stringify(library({ exportedAt: 3 })),
+      }),
+    ])
+
+    const statuses = [a.status, b.status].sort()
+    expect(statuses).toEqual([200, 409])
+
+    const winner = a.status === 200 ? a : b
+    const loser = a.status === 200 ? b : a
+    const winnerJson = (await winner.json()) as { ok: boolean; etag: string }
+    const loserJson = (await loser.json()) as Record<string, unknown>
+
+    expect(winnerJson.ok).toBe(true)
+    expect(loserJson.error).toBe('conflict')
+    expect(loserJson.reason).toBe('stale')
+
+    // The loser is told exactly what's now stored — the winner's write, not
+    // a third state — proving the two writes did not both apply (a lost
+    // update) and did not corrupt the row into a mix of the two.
+    const getRes = await worker.fetch(`/api/library/${key}`)
+    const stored = await getRes.json()
+    expect(getRes.headers.get('etag')).toBe(winnerJson.etag)
+    expect(loserJson.current).toEqual(stored)
   })
 
   it('413s on a body over the size cap, and does not store it', async () => {
