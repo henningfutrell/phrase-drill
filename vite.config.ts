@@ -1,7 +1,27 @@
 /// <reference types="vitest/config" />
+import { execFileSync } from 'node:child_process'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+
+/**
+ * The build stamp Diagnostics (T039) shows so a remote bug report can be
+ * pinned to a deploy — she reads the sha aloud rather than guessing whether
+ * she has today's build. Computed once here (build or dev-server start) via
+ * `define`, so it's a compile-time constant `src/vite-env.d.ts` declares as
+ * `__BUILD_SHA__`/`__BUILD_TIME__` — available under `npm test` too, since
+ * Vitest shares this config file. Falls back to `'unknown'` rather than
+ * failing the build if `.git` is unavailable (e.g. a source archive).
+ */
+function readBuildSha(): string {
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim()
+  } catch {
+    return 'unknown'
+  }
+}
+const buildSha = readBuildSha()
+const buildTime = new Date().toISOString()
 
 // https://vite.dev/config/
 // Served by a Cloudflare Worker (worker/index.ts, docs/sync.md) from its own
@@ -14,6 +34,10 @@ const base = '/'
 
 export default defineConfig({
   base,
+  define: {
+    __BUILD_SHA__: JSON.stringify(buildSha),
+    __BUILD_TIME__: JSON.stringify(buildTime),
+  },
   plugins: [
     react(),
     VitePWA({

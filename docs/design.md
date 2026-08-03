@@ -460,6 +460,45 @@ place, `true` and permanent after — there is no way back to shown. It is not
 part of the exported backup itself, same treatment as the API keys and the
 pinned voice (§3.6, `DeckStore.exportAll()` cannot see it).
 
+### 3.7 Diagnostics — answer "it's not working" without guessing (T039)
+
+Reached from Settings by a plainly-labelled `Open diagnostics` button, in its
+own card — not a hidden gesture. Built because the app has one remote,
+non-technical user: when she says something is broken, there was previously
+no way to find out why without guessing.
+
+Shows one already-formatted report, gathered fresh every time the screen
+opens:
+
+- **Build** — the git commit short SHA and build timestamp (`vite.config.ts`
+  embeds both via `define` at build time), so a build can be identified over
+  the phone rather than assumed current.
+- **Key presence** — whether the handwriting-scan key and the speech key are
+  saved, never the value or a truncated prefix.
+- **Voice** — whether one is pinned, and which provider.
+- **Clips ready vs total Phrases** — a count, never phrase text.
+- **Storage** — usage against quota via `navigator.storage.estimate()`,
+  reported honestly as unavailable rather than a fabricated zero when the
+  browser doesn't support it.
+- **Last sync** — the timestamp of the last successful Library sync, or
+  "never."
+- **Recent errors** — the last several entries from a bounded, on-device
+  error log (`ErrorLog`, capped at 50 entries, oldest dropped first),
+  populated by `window.onerror`, `unhandledrejection`, and adapter failures
+  (a failed scan, a failed synthesis call). Any key value that could appear
+  in a captured error message is redacted (`[REDACTED]`) before it is ever
+  written to the log.
+
+One control, `Copy report`, copies the whole formatted report as text for
+pasting into a message — the only way she has of sending back what's wrong.
+If the Clipboard API is unavailable or the copy itself fails, the screen says
+so plainly and leaves the report visible to select by hand, rather than
+failing silently.
+
+Never included, by design: phrase text (counts only), a key's value (presence
+only), and any third-party analytics or error-reporting service — everything
+here stays on-device until she chooses to paste it somewhere.
+
 ---
 
 ## 4. What was deliberately left out, and why
