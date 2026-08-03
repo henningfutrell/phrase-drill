@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "The mutation gate. Scope, threshold and runner are asserted by mutation.config.test.ts; docs/testing.md explains what a surviving mutant means and how to read the report.",
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "vitest": {
+    "configFile": "vitest.mutation.config.ts"
+  },
+  "mutate": [
+    "src/domain/**/*.ts",
+    "!src/domain/**/*.test.ts",
+    "!src/domain/**/*test-support*"
+  ],
+  "coverageAnalysis": "perTest",
+  "reporters": ["progress", "clear-text", "html"],
+  "htmlReporter": {
+    "fileName": "reports/mutation/index.html"
+  },
+  "_thresholds_comment": "break is a RATCHET, set at the measured baseline (82.74 over three runs, 2026-08-02), not at an aspiration. 82 leaves 0.74 of slack because 5 mutants are killed by timeout and a timeout is a wall-clock judgement, not a deterministic one. Raise this as survivors are killed; never lower it.",
+  "thresholds": {
+    "high": 90,
+    "low": 80,
+    "break": 82
+  },
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": true
+}
