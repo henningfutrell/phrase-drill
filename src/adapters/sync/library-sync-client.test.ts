@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createLibrarySyncClient } from './library-sync-client'
 import type { Library } from '../../domain'
 
-const LIBRARY_KEY = 'f'.repeat(64)
+const ACCESS_TOKEN = 'test-access-token-f'
 const LIBRARY: Library = { format: 'phrase-drill-library', schemaVersion: 1, exportedAt: 1000, decks: [] }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -14,8 +14,8 @@ function emptyResponse(status: number): Response {
 }
 
 function makeClient(fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>) {
-  const getLibraryKey = vi.fn().mockResolvedValue(LIBRARY_KEY)
-  return { client: createLibrarySyncClient({ getLibraryKey, fetchImpl }), getLibraryKey }
+  const getAccessToken = vi.fn().mockResolvedValue(ACCESS_TOKEN)
+  return { client: createLibrarySyncClient({ getAccessToken, fetchImpl }), getAccessToken }
 }
 
 describe('createLibrarySyncClient', () => {
@@ -29,7 +29,7 @@ describe('createLibrarySyncClient', () => {
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/library')
     expect(init.method).toBe('PUT')
-    expect((init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${LIBRARY_KEY}`)
+    expect((init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${ACCESS_TOKEN}`)
     expect(JSON.parse(init.body as string)).toEqual(LIBRARY)
   })
 
@@ -56,7 +56,7 @@ describe('createLibrarySyncClient', () => {
     expect(result).toEqual({ ok: true, library: LIBRARY })
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/library')
-    expect((init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${LIBRARY_KEY}`)
+    expect((init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${ACCESS_TOKEN}`)
   })
 
   it('reports not-found when nothing has been pushed for this key yet', async () => {

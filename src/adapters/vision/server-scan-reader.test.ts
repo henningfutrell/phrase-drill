@@ -3,7 +3,7 @@ import { createServerScanReader } from './server-scan-reader'
 import type { ScanError } from '../../domain'
 
 const PREPARED = { base64: 'ZmFrZS1qcGVn', mediaType: 'image/jpeg' }
-const LIBRARY_KEY = 'e'.repeat(64)
+const ACCESS_TOKEN = 'test-access-token-e'
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -14,14 +14,14 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 function makeReader(overrides: {
-  libraryKey?: string
+  accessToken?: string
   fetchImpl?: ReturnType<typeof vi.fn<typeof fetch>>
 } = {}) {
   const fetchImpl = overrides.fetchImpl ?? vi.fn<typeof fetch>()
-  const getLibraryKey = vi.fn().mockResolvedValue(overrides.libraryKey ?? LIBRARY_KEY)
+  const getAccessToken = vi.fn().mockResolvedValue(overrides.accessToken ?? ACCESS_TOKEN)
   const prepareImage = vi.fn().mockResolvedValue(PREPARED)
-  const reader = createServerScanReader({ getLibraryKey, prepareImage, fetchImpl })
-  return { reader, fetchImpl, getLibraryKey, prepareImage }
+  const reader = createServerScanReader({ getAccessToken, prepareImage, fetchImpl })
+  return { reader, fetchImpl, getAccessToken, prepareImage }
 }
 
 describe('createServerScanReader', () => {
@@ -72,7 +72,7 @@ describe('createServerScanReader', () => {
 
     const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
     const headers = init.headers as Record<string, string>
-    expect(headers['authorization']).toBe(`Bearer ${LIBRARY_KEY}`)
+    expect(headers['authorization']).toBe(`Bearer ${ACCESS_TOKEN}`)
     expect(headers['x-api-key']).toBeUndefined()
     expect(headers['anthropic-dangerous-direct-browser-access']).toBeUndefined()
   })
@@ -115,6 +115,6 @@ describe('createServerScanReader', () => {
 
     const error = (await reader.read(new Blob()).catch((e: ScanError) => e)) as ScanError
 
-    expect(JSON.stringify(error)).not.toContain(LIBRARY_KEY)
+    expect(JSON.stringify(error)).not.toContain(ACCESS_TOKEN)
   })
 })
