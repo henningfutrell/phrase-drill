@@ -17,8 +17,11 @@ export type PhraseRecordV1 = PhraseRecord
  * see `DECK_MIGRATIONS[1]` below — but the database version, and therefore
  * `Library.schemaVersion`, still advances, because the two are one number
  * by design (T002 §4).
+ *
+ * v2 -> v3 (T039): the `errors` store was added for the diagnostics ring
+ * buffer. Deck records are untouched — see `DECK_MIGRATIONS[2]` below.
  */
-export const CURRENT_SCHEMA_VERSION = 2
+export const CURRENT_SCHEMA_VERSION = 3
 
 /** One step of a migration chain: a pure transform from a version-n record to version-(n+1). */
 export type RecordMigration = (record: never) => unknown
@@ -69,12 +72,18 @@ const neverExisted: RecordMigration = (() => {
 const v1ToV2: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
 
 /**
+ * v2 -> v3: the `errors` store landed beside `decks` — the deck record
+ * shape itself does not change, so this step is identity, same as v1 -> v2.
+ */
+const v2ToV3: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
+
+/**
  * Exported so `DECK_MIGRATIONS.length` can be checked against
  * `CURRENT_SCHEMA_VERSION` directly (persisted-shape.test.ts) — the two
  * must move together, and that test is what turns a mismatch into a build
  * failure instead of a runtime throw on the user's device.
  */
-export const DECK_MIGRATIONS: readonly RecordMigration[] = [neverExisted, v1ToV2]
+export const DECK_MIGRATIONS: readonly RecordMigration[] = [neverExisted, v1ToV2, v2ToV3]
 
 /**
  * Bring a deck record from `fromVersion` up to the current schema. The same

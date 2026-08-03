@@ -8,7 +8,7 @@ vi.mock('idb', async () => {
 
 // Imported after the mock is registered, per Vitest's hoisting contract.
 const idbModule = await import('idb')
-const { openDatabase, DB_NAME, DECKS_STORE, SETTINGS_STORE, CLIPS_STORE } = await import('./database')
+const { openDatabase, DB_NAME, DECKS_STORE, SETTINGS_STORE, CLIPS_STORE, ERRORS_STORE } = await import('./database')
 
 /**
  * Fixture: a v1 database, as it would sit on a real device today — no
@@ -67,11 +67,57 @@ describe('openDatabase v1 -> v2 migration', () => {
     expect(await db.get(CLIPS_STORE, 'abc123')).toEqual(clip)
   })
 
-  it('creates a fresh database with all three stores when there is nothing to migrate from', async () => {
+  it('creates a fresh database with all four stores when there is nothing to migrate from', async () => {
     const db = await openDatabase()
 
     expect(db.objectStoreNames.contains(DECKS_STORE)).toBe(true)
     expect(db.objectStoreNames.contains(SETTINGS_STORE)).toBe(true)
     expect(db.objectStoreNames.contains(CLIPS_STORE)).toBe(true)
+    expect(db.objectStoreNames.contains(ERRORS_STORE)).toBe(true)
+  })
+})
+
+describe('openDatabase v2 -> v3 migration', () => {
+  beforeEach(() => {
+    resetFakeIdb()
+  })
+
+  /** Fixture: a v2 database (clips store present, errors store not yet) —
+   * "existing data before T039 shipped". */
+  async function seedV2Database(): Promise<void> {
+    const v2db = await idbModule.openDB(DB_NAME, 2, {
+      upgrade(db) {
+        db.createObjectStore(DECKS_STORE, { keyPath: 'id' })
+        db.createObjectStore(SETTINGS_STORE)
+        db.createObjectStore(CLIPS_STORE, { keyPath: 'hash' })
+      },
+    })
+    await v2db.put(DECKS_STORE, {
+      id: 'home',
+      name: 'Home',
+      phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+  }
+
+  it('adds the errors store on top of a real v2 database, without touching existing decks', async () => {
+    await seedV2Database()
+
+    const db = await openDatabase()
+
+    expect(await db.get(DECKS_STORE, 'home')).toMatchObject({ id: 'home', name: 'Home' })
+    expect(db.objectStoreNames.contains(ERRORS_STORE)).toBe(true)
+    expect(await db.getAll(ERRORS_STORE)).toEqual([])
+  })
+
+  it('lets error log entries be written and read once the migration has run', async () => {
+    await seedV2Database()
+
+    const db = await openDatabase()
+    const entry = { id: 1, timestamp: 1, source: 'window.onerror', message: 'boom' }
+    await db.put(ERRORS_STORE, entry)
+
+    expect(await db.get(ERRORS_STORE, 1)).toEqual(entry)
   })
 })
