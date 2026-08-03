@@ -1,6 +1,6 @@
-/// <reference types="vitest/config" />
 import { execFileSync } from 'node:child_process'
 import { defineConfig } from 'vite'
+import { configDefaults } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
@@ -99,5 +99,11 @@ export default defineConfig({
   ],
   test: {
     environment: 'jsdom',
+    // Stryker's sandbox (T043) is a full copy of the repo with the source
+    // deliberately mutated. Without this, `npm test` collects both copies —
+    // the suite silently doubles and half of it is asserting against code
+    // that was broken on purpose. A failed or interrupted mutation run
+    // leaves the directory behind, so the exclusion cannot be conditional.
+    exclude: [...configDefaults.exclude, '.stryker-tmp/**'],
   },
 })

@@ -71,6 +71,12 @@ and adapters alike. `npm test` must exit 0 before a change lands. The domain,
 having no I/O, is tested directly with plain unit tests; adapters are tested
 against fakes/mocks of the browser API they wrap.
 
+**Changing `src/domain/` also means running `npm run test:mutation`** (~15s).
+It breaks the domain on purpose and checks the tests notice — a surviving
+mutant is a located statement that some behaviour is not pinned by anything.
+The threshold is a ratchet: raise it as survivors are killed, never lower it.
+`docs/testing.md` covers scope, how to read a survivor, and the known baseline.
+
 ## Glossary
 
 `docs/glossary.md` is the single source of the domain's terms. Code, tests,
