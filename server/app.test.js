@@ -14,23 +14,42 @@ import { createAnthropicProvider } from './providers/anthropic-client.js'
 const SECRET_ELEVENLABS_KEY = 'xi-live-secret-99999'
 const SECRET_ANTHROPIC_KEY = 'anthropic-live-secret-88888'
 
-// T043: identity is a verified Keycloak access token, not a device-generated
-// hex key. `app.js` never parses a token itself — it only calls the
-// injected `tokenVerifier.verify()` and trusts the `sub` it returns (or
-// rejects on any thrown error), so these tests fake that seam directly
-// rather than minting real JWTs. `server/jwt-verifier.test.js` is what
-// proves the real verifier's four rejections against real signatures.
+// T050: identity is an opaque session token, a database row, not a JWT — no
+// signature, no issuer/audience, no JWKS. `app.js` never touches a password
+// or a token's bytes itself — it only calls the injected `sessionAuth`
+// seam (`login`/`logout`/`verify`) and trusts what it returns (or rejects
+// on any thrown error), so these tests fake that seam directly rather than
+// running real scrypt/crypto. `server/session-auth.test.js` is what proves
+// the real implementation's hashing, token generation, and expiry.
 const VALID_TOKEN = 'valid-token-for-sub-1'
-const SUB = 'keycloak-sub-1111'
+const SUB = 'user-1111'
 const OTHER_TOKEN = 'valid-token-for-sub-2'
-const OTHER_SUB = 'keycloak-sub-2222'
+const OTHER_SUB = 'user-2222'
+const VALID_USERNAME = 'her'
+const VALID_PASSWORD = 'correct-password'
 
-function fakeTokenVerifier(tokenToClaims = new Map([[VALID_TOKEN, { sub: SUB }], [OTHER_TOKEN, { sub: OTHER_SUB }]])) {
+function fakeSessionAuth({
+  tokenToClaims = new Map([[VALID_TOKEN, { sub: SUB }], [OTHER_TOKEN, { sub: OTHER_SUB }]]),
+  credentials = new Map([[VALID_USERNAME, VALID_PASSWORD]]),
+} = {}) {
+  const loggedOut = new Set()
   return {
+    tokenToClaims,
     async verify(token) {
+      if (loggedOut.has(token)) throw new Error('session was logged out')
       const claims = tokenToClaims.get(token)
       if (!claims) throw new Error('invalid or expired token')
       return claims
+    },
+    async login(username, password) {
+      if (credentials.get(username) !== password) return null
+      const token = `issued-token-for-${username}`
+      const claims = { sub: `user-for-${username}` }
+      tokenToClaims.set(token, claims)
+      return { token, expiresAt: 999_999 }
+    },
+    async logout(token) {
+      loggedOut.add(token)
     },
   }
 }
@@ -139,9 +158,10 @@ describe('server app (integration, fake upstreams)', () => {
       ttsLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+      loginLimiter: createRateLimiter({ capacity: 5, refillMs: 60_000 }),
       distDir,
       logger,
-      tokenVerifier: fakeTokenVerifier(),
+      sessionAuth: fakeSessionAuth(),
     })
 
     server = createServer(handleRequest)
@@ -244,9 +264,10 @@ describe('server app (integration, fake upstreams)', () => {
         ttsLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+        loginLimiter: createRateLimiter({ capacity: 5, refillMs: 60_000 }),
         distDir,
         logger,
-        tokenVerifier: fakeTokenVerifier(),
+        sessionAuth: fakeSessionAuth(),
       })
       server = createServer(handleRequest)
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -416,6 +437,122 @@ describe('server app (integration, fake upstreams)', () => {
       // a raw secret into a log field to begin with (see logger.test.js for
       // the redaction guarantee itself).
       expect(logger.lines.length).toBeGreaterThan(0)
+    })
+  })
+
+  describe('POST /api/login', () => {
+    it('returns a token and expiry for correct credentials, no auth header required', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: VALID_USERNAME, password: VALID_PASSWORD }),
+      })
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.token).toBeTruthy()
+      expect(body.expiresAt).toBeTypeOf('number')
+    })
+
+    it('the issued token authenticates subsequent /api/* calls', async () => {
+      await boot()
+      const login = await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: VALID_USERNAME, password: VALID_PASSWORD }),
+      })
+      const { token } = await login.json()
+
+      const res = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${token}` } })
+      expect(res.status).toBe(404) // authenticated, just nothing pushed yet — proves it wasn't a 401
+    })
+
+    it('returns 401 for a wrong password, with a body identical to a nonexistent username', async () => {
+      await boot()
+      const wrongPassword = await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: VALID_USERNAME, password: 'not-the-password' }),
+      })
+      const noSuchUser = await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'nobody-registered', password: 'anything' }),
+      })
+      expect(wrongPassword.status).toBe(401)
+      expect(noSuchUser.status).toBe(401)
+      expect(await wrongPassword.json()).toEqual(await noSuchUser.json())
+    })
+
+    it('rejects a malformed request body with 400', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 123 }),
+      })
+      expect(res.status).toBe(400)
+    })
+
+    it('rate-limits hard, keyed by username, well before a real brute force gets anywhere', async () => {
+      await boot()
+      const attempt = () =>
+        fetch(`${baseUrl}/api/login`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ username: VALID_USERNAME, password: 'wrong-every-time' }),
+        })
+      for (let i = 0; i < 5; i++) {
+        const res = await attempt()
+        expect(res.status).toBe(401)
+      }
+      const sixth = await attempt()
+      expect(sixth.status).toBe(429)
+    })
+
+    it('never logs the password, on success or failure', async () => {
+      await boot()
+      await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: VALID_USERNAME, password: VALID_PASSWORD }),
+      })
+      await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: VALID_USERNAME, password: 'a-guessed-password' }),
+      })
+      for (const line of logger.lines) {
+        expect(line).not.toContain(VALID_PASSWORD)
+        expect(line).not.toContain('a-guessed-password')
+      }
+    })
+  })
+
+  describe('POST /api/logout', () => {
+    it('deletes the session so the token no longer authenticates, and responds 204', async () => {
+      await boot()
+      const login = await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: VALID_USERNAME, password: VALID_PASSWORD }),
+      })
+      const { token } = await login.json()
+
+      const logout = await fetch(`${baseUrl}/api/logout`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+      })
+      expect(logout.status).toBe(204)
+
+      const after = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${token}` } })
+      expect(after.status).toBe(401)
+    })
+
+    it('is a harmless no-op with no bearer token at all', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/logout`, { method: 'POST' })
+      expect(res.status).toBe(204)
     })
   })
 })

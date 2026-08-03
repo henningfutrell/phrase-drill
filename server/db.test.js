@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
-import { createLibraryStore, waitForDatabase, extractPassword } from './db.js'
+import { createLibraryStore, createAuthStore, waitForDatabase, extractPassword } from './db.js'
 
 /**
  * A minimal stand-in for a `pg` `Pool`: real enough to exercise
@@ -111,6 +111,149 @@ describe('createLibraryStore (Postgres)', () => {
     await store.close()
 
     expect(end).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * A minimal stand-in for a `pg` `Pool` covering `users`/`sessions` — real
+ * enough to exercise `createAuthStore`'s SQL (two idempotent `CREATE TABLE
+ * IF NOT EXISTS`, a unique-username insert that raises Postgres's real
+ * `23505` violation code on a duplicate, and keyed session CRUD) without a
+ * live Postgres.
+ */
+function fakeAuthPool() {
+  let tablesCreated = false
+  const users = new Map() // username -> row
+  const sessions = new Map() // token_hash -> row
+  const queries = []
+
+  return {
+    queries,
+    async query(text, params = []) {
+      queries.push({ text, params })
+      const sql = text.trim()
+
+      if (sql.startsWith('CREATE TABLE')) {
+        tablesCreated = true
+        return { rows: [] }
+      }
+
+      if (sql.startsWith('SELECT') && sql.includes('FROM users')) {
+        if (!tablesCreated) throw new Error('relation "users" does not exist')
+        const [username] = params
+        const row = users.get(username)
+        return { rows: row ? [row] : [] }
+      }
+
+      if (sql.startsWith('INSERT INTO users')) {
+        if (!tablesCreated) throw new Error('relation "users" does not exist')
+        const [id, username, passwordHash, createdAt] = params
+        for (const existing of users.values()) {
+          if (existing.username === username) {
+            const err = new Error('duplicate key value violates unique constraint "users_username_key"')
+            err.code = '23505'
+            throw err
+          }
+        }
+        users.set(id, { id, username, password_hash: passwordHash, created_at: createdAt })
+        return { rows: [] }
+      }
+
+      if (sql.startsWith('SELECT') && sql.includes('FROM sessions')) {
+        if (!tablesCreated) throw new Error('relation "sessions" does not exist')
+        const [tokenHash] = params
+        const row = sessions.get(tokenHash)
+        return { rows: row ? [row] : [] }
+      }
+
+      if (sql.startsWith('INSERT INTO sessions')) {
+        if (!tablesCreated) throw new Error('relation "sessions" does not exist')
+        const [tokenHash, userId, createdAt, expiresAt] = params
+        sessions.set(tokenHash, { token_hash: tokenHash, user_id: userId, created_at: createdAt, expires_at: expiresAt })
+        return { rows: [] }
+      }
+
+      if (sql.startsWith('DELETE FROM sessions')) {
+        if (!tablesCreated) throw new Error('relation "sessions" does not exist')
+        const [tokenHash] = params
+        sessions.delete(tokenHash)
+        return { rows: [] }
+      }
+
+      throw new Error(`fakeAuthPool: unrecognized query: ${sql}`)
+    },
+    async end() {},
+  }
+}
+
+describe('createAuthStore (Postgres) — users', () => {
+  it('creates both tables idempotently, on init', async () => {
+    const pool = fakeAuthPool()
+    const store = createAuthStore(pool)
+
+    await store.init()
+    await store.init()
+
+    const createCalls = pool.queries.filter((q) => q.text.trim().startsWith('CREATE TABLE'))
+    expect(createCalls.length).toBe(4) // users + sessions, twice
+    for (const call of createCalls) expect(call.text).toContain('IF NOT EXISTS')
+  })
+
+  it('creates a user, retrievable by username, with the password hash and nothing else guessable', async () => {
+    const store = createAuthStore(fakeAuthPool())
+    await store.init()
+
+    await store.createUser({ id: 'user-1', username: 'her', passwordHash: 'scrypt:...', createdAt: 1000 })
+    const row = await store.getUserByUsername('her')
+
+    expect(row).toEqual({ id: 'user-1', username: 'her', passwordHash: 'scrypt:...', createdAt: 1000 })
+  })
+
+  it('returns null for an unknown username', async () => {
+    const store = createAuthStore(fakeAuthPool())
+    await store.init()
+
+    expect(await store.getUserByUsername('nobody')).toBeNull()
+  })
+
+  it('refuses to create a second user with an existing username, rather than silently overwriting', async () => {
+    const store = createAuthStore(fakeAuthPool())
+    await store.init()
+
+    await store.createUser({ id: 'user-1', username: 'her', passwordHash: 'hash-1', createdAt: 1000 })
+    await expect(store.createUser({ id: 'user-2', username: 'her', passwordHash: 'hash-2', createdAt: 2000 })).rejects.toThrow()
+
+    const row = await store.getUserByUsername('her')
+    expect(row.id).toBe('user-1') // untouched by the rejected attempt
+  })
+})
+
+describe('createAuthStore (Postgres) — sessions', () => {
+  it('round-trips a created session through get, keyed by token hash', async () => {
+    const store = createAuthStore(fakeAuthPool())
+    await store.init()
+
+    await store.createSession('hash-abc', 'user-1', 1000, 999_000)
+    const row = await store.getSession('hash-abc')
+
+    expect(row).toEqual({ userId: 'user-1', expiresAt: 999_000 })
+  })
+
+  it('returns null for an unknown token hash', async () => {
+    const store = createAuthStore(fakeAuthPool())
+    await store.init()
+
+    expect(await store.getSession('nonexistent')).toBeNull()
+  })
+
+  it('deletes a session so it no longer resolves', async () => {
+    const store = createAuthStore(fakeAuthPool())
+    await store.init()
+
+    await store.createSession('hash-abc', 'user-1', 1000, 999_000)
+    await store.deleteSession('hash-abc')
+
+    expect(await store.getSession('hash-abc')).toBeNull()
   })
 })
 
