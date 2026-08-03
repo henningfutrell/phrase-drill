@@ -9,20 +9,17 @@ export interface Voice {
 }
 
 /**
- * The library key and the pinned voice, as read from the `settings` store.
+ * The pinned voice and small UI flags, as read from the `settings` store.
  * Never part of `Library` — `DeckStore.exportAll()` reads only the `decks`
  * store and structurally cannot see this data (see its own test).
+ *
+ * There is no identity field here (T043): the device's identity on the
+ * server is a Keycloak access token, held by `keycloak-auth.ts` (in-memory
+ * plus its own refresh-token storage), never generated or stored by this
+ * module — the old device-generated 64-hex library key it replaces is
+ * deleted, not deprecated.
  */
 export interface Settings {
-  /**
-   * The device's identity on the server (T041): 64 lowercase hex characters,
-   * 256 bits of entropy, generated on first `load()` if none is stored yet.
-   * Never a provider API key — the server holds those, not the device. Not
-   * masked or secret in the UI the way the old provider keys were: showing
-   * and copying it is the whole recovery story for a wiped or replaced
-   * phone, so `SettingsScreen` displays it in the open, deliberately.
-   */
-  readonly libraryKey: string
   readonly voice: Voice | null
   /**
    * The first-run backup nudge (docs/design.md §3.6, T027), dismissed once
@@ -43,14 +40,7 @@ export interface Settings {
 }
 
 export interface SettingsStore {
-  /** Generates and persists a library key on first call if none exists yet. */
   load(): Promise<Settings>
-  /**
-   * Switches this device to a different library key — "use a different key"
-   * in Settings, the recovery path for a wiped/replacement phone that still
-   * has the old key written down. Overwrites whatever key was stored, if any.
-   */
-  setLibraryKey(key: string): Promise<void>
   /** `null` clears the pinned voice. */
   setVoice(voice: Voice | null): Promise<void>
   /** One-way: there is no way back to `false` once dismissed. */
@@ -60,17 +50,9 @@ export interface SettingsStore {
   recordSync(timestamp: number): Promise<void>
 }
 
-const LIBRARY_KEY = 'libraryKey'
 const VOICE = 'voice'
 const BACKUP_NUDGE_DISMISSED = 'backupNudgeDismissed'
 const LAST_SYNC_AT = 'lastSyncAt'
-
-/** 32 random bytes, hex-encoded — 256 bits of entropy, 64 lowercase hex characters. */
-function generateLibraryKey(): string {
-  const bytes = new Uint8Array(32)
-  crypto.getRandomValues(bytes)
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-}
 
 /**
  * The IndexedDB implementation of `SettingsStore`, via `idb`. Shares the one
@@ -98,27 +80,16 @@ export function createIndexedDbSettingsStore(): SettingsStore {
   return {
     async load(): Promise<Settings> {
       const db = await getDatabase()
-      const [storedLibraryKey, voice, backupNudgeDismissed, lastSyncAt] = await Promise.all([
-        db.get(SETTINGS_STORE, LIBRARY_KEY) as Promise<string | undefined>,
+      const [voice, backupNudgeDismissed, lastSyncAt] = await Promise.all([
         db.get(SETTINGS_STORE, VOICE) as Promise<Voice | undefined>,
         db.get(SETTINGS_STORE, BACKUP_NUDGE_DISMISSED) as Promise<boolean | undefined>,
         db.get(SETTINGS_STORE, LAST_SYNC_AT) as Promise<number | undefined>,
       ])
-      let libraryKey = storedLibraryKey
-      if (libraryKey === undefined) {
-        libraryKey = generateLibraryKey()
-        await put(LIBRARY_KEY, libraryKey)
-      }
       return {
-        libraryKey,
         voice: voice ?? null,
         backupNudgeDismissed: backupNudgeDismissed ?? false,
         lastSyncAt: lastSyncAt ?? null,
       }
-    },
-
-    setLibraryKey(key: string): Promise<void> {
-      return put(LIBRARY_KEY, key)
     },
 
     setVoice(voice: Voice | null): Promise<void> {

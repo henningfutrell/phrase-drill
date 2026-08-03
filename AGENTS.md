@@ -20,10 +20,12 @@ user's phone, not for hypothetical others.
 - **The server holds the keys, she never touches one (T041).** `server/`
   is a plain-Node HTTP server — no framework, no vendor SDK — that owns both
   provider credentials (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, env only)
-  and her phrase library (`node:sqlite`). The device never sees a provider
-  key: it authenticates to the server with a device-generated library key
-  and calls same-origin `/api/tts`, `/api/scan`, `/api/library`. One
-  container (`Dockerfile`) serves the built PWA and this API together; see
+  and her phrase library (Postgres, T043). The device never sees a provider
+  key: it authenticates to the server with a Keycloak-issued access token
+  (browser login, authorization code + PKCE — T043, replacing the earlier
+  device-generated library key entirely) and calls same-origin `/api/tts`,
+  `/api/scan`, `/api/library`. Three services (`docker-compose.yml`) —
+  the app, Postgres, Keycloak — serve the stack together; see
   `docs/server.md` for endpoints, env vars, local run, and Coolify deploy.
   The offline drill is unaffected — the server generates Clips, the device
   still caches and plays them from cache with no mid-run network dependency.

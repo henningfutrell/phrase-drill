@@ -34,15 +34,15 @@ export interface SynthClient {
 }
 
 export interface ServerSynthClientDeps {
-  /** Reads the device's library key from wherever it is stored (T041 — never a provider key). */
-  getLibraryKey(): Promise<string>
+  /** Reads the current Keycloak access token from wherever it is stored (T043 — never a provider key). */
+  getAccessToken(): Promise<string>
   /** Injected in tests; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch
 }
 
 /**
  * The `SynthClient` implementation for T041: talks to this app's own
- * `/api/tts`, same-origin, authenticated with the device's library key
+ * `/api/tts`, same-origin, authenticated with a Keycloak access token
  * (`Authorization: Bearer <key>`) — never an ElevenLabs key, which the
  * device no longer holds at all. Replaces
  * `eleven-labs-synth-client.ts` as the sole thing `generation-queue.ts` and
@@ -60,7 +60,7 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
 
   return {
     async synthesize(text, _lang, voice, signal) {
-      const libraryKey = await deps.getLibraryKey()
+      const accessToken = await deps.getAccessToken()
 
       let response: Response
       try {
@@ -69,7 +69,7 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
           signal,
           headers: {
             'content-type': 'application/json',
-            authorization: `Bearer ${libraryKey}`,
+            authorization: `Bearer ${accessToken}`,
           },
           body: JSON.stringify({ text, voiceId: voice.voiceId, modelId: voice.modelId }),
         })

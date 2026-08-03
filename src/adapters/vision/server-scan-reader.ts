@@ -2,8 +2,8 @@ import type { DraftPhrase, ScanError, ScanReader } from '../../domain'
 import { type PreparedImage, prepareImageForUpload } from './image-prep'
 
 export interface ServerScanReaderDeps {
-  /** Reads the device's library key from wherever it is stored (T041 — never a provider key). */
-  getLibraryKey(): Promise<string>
+  /** Reads the current Keycloak access token from wherever it is stored (T043 — never a provider key). */
+  getAccessToken(): Promise<string>
   /** Re-encodes and downscales the photo before upload. Defaults to the canvas-based encoder. */
   prepareImage?: (image: Blob) => Promise<PreparedImage>
   /** Injected in tests; defaults to the global `fetch`. */
@@ -12,7 +12,7 @@ export interface ServerScanReaderDeps {
 
 /**
  * The `ScanReader` implementation for T041: talks to this app's own
- * `/api/scan`, same-origin, authenticated with the device's library key —
+ * `/api/scan`, same-origin, authenticated with a Keycloak access token —
  * never an Anthropic key, which the device no longer holds. Replaces
  * `claude-scan-reader.ts`; the domain-level `ScanReader`/`ScanError`/
  * `DraftPhrase` types are untouched (they were always domain ports, not this
@@ -26,7 +26,7 @@ export function createServerScanReader(deps: ServerScanReaderDeps): ScanReader {
 
   return {
     async read(image, signal) {
-      const libraryKey = await deps.getLibraryKey()
+      const accessToken = await deps.getAccessToken()
 
       let prepared: PreparedImage
       try {
@@ -44,7 +44,7 @@ export function createServerScanReader(deps: ServerScanReaderDeps): ScanReader {
           signal,
           headers: {
             'content-type': prepared.mediaType,
-            authorization: `Bearer ${libraryKey}`,
+            authorization: `Bearer ${accessToken}`,
           },
           body: new Blob([bytes], { type: prepared.mediaType }),
         })

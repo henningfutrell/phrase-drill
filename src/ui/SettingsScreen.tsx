@@ -41,28 +41,21 @@ const RESTORE_ERROR_COPY: Record<RestoreRefusal['reason'], string> = {
   invalid: "That doesn't look like a phrase-drill backup. Choose the file that was saved from Export backup.",
 }
 
-const LIBRARY_KEY_PATTERN = /^[0-9a-f]{64}$/
-
 /**
- * Settings — Sync (the library key), the voice picker, and backup/restore
- * (docs/design.md §3.6, amended by T041 to replace the two API key fields
- * with the library key). Purely presentational: every persist decision,
- * every synth call, every file read, and the actual share/download call are
- * the composition root's (App.tsx) — this component only describes the
- * choice and shows what the callbacks resolved to.
- *
- * Unlike the provider keys it replaces, the library key is shown in the
- * open, not masked: it has to be, since reading and copying it down
- * somewhere safe is the entire recovery story for a wiped or replaced
- * phone (T041).
+ * Settings — the voice picker and backup/restore (docs/design.md §3.6). Her
+ * identity on the server is now a Keycloak login (T043), not a key this
+ * screen shows or lets her paste in — the Sync section that used to do that
+ * is gone entirely: log-in/out lives wherever the app puts an
+ * account-status affordance, not here. Purely presentational: every persist
+ * decision, every synth call, every file read, and the actual share/download
+ * call are the composition root's (App.tsx) — this component only describes
+ * the choice and shows what the callbacks resolved to.
  */
 export function SettingsScreen({
   onBack,
-  libraryKey,
   voice,
   voices,
   previewText,
-  onUseLibraryKey,
   onPreviewVoice,
   onChooseVoice,
   onExportBackup,
@@ -72,11 +65,9 @@ export function SettingsScreen({
   onOpenDiagnostics,
 }: {
   onBack: () => void
-  libraryKey: string
   voice: VoiceInfo | null
   voices: readonly VoiceOption[]
   previewText: string
-  onUseLibraryKey: (key: string) => void
   onPreviewVoice: (
     voice: { modelId: string; voiceId: string },
     text: string,
@@ -89,9 +80,6 @@ export function SettingsScreen({
   onCancelRestore: () => void
   onOpenDiagnostics: () => void
 }) {
-  const [switchKeyInput, setSwitchKeyInput] = useState('')
-  const [switchKeyError, setSwitchKeyError] = useState<string | null>(null)
-  const [copyStatus, setCopyStatus] = useState<string | null>(null)
   const [exportStatus, setExportStatus] = useState<string | null>(null)
   const [restoreError, setRestoreError] = useState<string | null>(null)
   const [confirmingRestore, setConfirmingRestore] = useState(false)
@@ -146,26 +134,6 @@ export function SettingsScreen({
     setConfirmingVoice(null)
   }
 
-  async function handleCopyLibraryKey() {
-    try {
-      await navigator.clipboard.writeText(libraryKey)
-      setCopyStatus('Copied.')
-    } catch {
-      setCopyStatus('Could not copy — select and copy the key by hand.')
-    }
-  }
-
-  function handleUseLibraryKey() {
-    const candidate = switchKeyInput.trim().toLowerCase()
-    if (!LIBRARY_KEY_PATTERN.test(candidate)) {
-      setSwitchKeyError('That doesn’t look like a sync key — it should be 64 letters and numbers, with nothing else.')
-      return
-    }
-    setSwitchKeyError(null)
-    setSwitchKeyInput('')
-    onUseLibraryKey(candidate)
-  }
-
   async function handleExportBackup() {
     const outcome = await onExportBackup()
     if (outcome === 'shared') {
@@ -212,58 +180,6 @@ export function SettingsScreen({
         <h1>Settings</h1>
         <span />
       </header>
-
-      <section className="settings-section" data-testid="sync-section">
-        <h2 className="settings-section-title">Sync</h2>
-        <p className="settings-help">
-          This is what makes your phrases yours on the server — write it down somewhere
-          safe. If this phone is ever lost, wiped, or replaced, enter this same key on
-          the new one and your phrases come back.
-        </p>
-        <p className="settings-help">Anyone who has this key can see and change your phrases, so keep it private.</p>
-        <p className="sheet-label" data-testid="library-key-display" style={{ wordBreak: 'break-all' }}>
-          {libraryKey}
-        </p>
-        <div className="settings-actions">
-          <button type="button" data-testid="library-key-copy" className="btn-icon" onClick={() => void handleCopyLibraryKey()}>
-            Copy
-          </button>
-        </div>
-        {copyStatus && (
-          <p className="settings-status settings-status--calm" data-testid="library-key-copy-status">
-            {copyStatus}
-          </p>
-        )}
-
-        <p className="settings-help">Setting up a phone that already has a key? Enter it here instead of using this one.</p>
-        <input
-          type="text"
-          autoComplete="off"
-          autoCapitalize="off"
-          autoCorrect="off"
-          data-testid="library-key-input"
-          className="sheet-input"
-          placeholder="Paste sync key"
-          value={switchKeyInput}
-          onChange={(e) => setSwitchKeyInput(e.target.value)}
-        />
-        <div className="settings-actions">
-          <button
-            type="button"
-            data-testid="library-key-use"
-            className="btn-primary"
-            disabled={switchKeyInput.trim().length === 0}
-            onClick={handleUseLibraryKey}
-          >
-            Use this key
-          </button>
-        </div>
-        {switchKeyError && (
-          <p className="settings-status" data-testid="library-key-error">
-            {switchKeyError}
-          </p>
-        )}
-      </section>
 
       <section className="settings-section">
         <h2 className="settings-section-title">Voice</h2>
@@ -386,8 +302,8 @@ export function SettingsScreen({
       </section>
 
       <p className="settings-help settings-privacy-note">
-        This phone holds no server credentials — only your sync key, which stays on
-        this phone unless you choose to copy it.
+        This phone holds no server credentials — you're signed in through the server's
+        own login, the same as any other account.
       </p>
 
       {confirmingVoice && (
