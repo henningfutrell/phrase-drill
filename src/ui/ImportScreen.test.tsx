@@ -102,40 +102,6 @@ describe('ImportScreen — capture', () => {
   })
 })
 
-describe('ImportScreen — missing key', () => {
-  it('shows the no-key state up front, without ever calling scanReader.read, and routes Open Settings', () => {
-    const { reader, read } = fakeScanReader()
-    const onOpenSettings = vi.fn()
-    render(
-      <ImportScreen
-        decks={[]}
-        scanReader={reader}
-        apiKeyPresent={false}
-        onOpenSettings={onOpenSettings}
-        onSave={vi.fn()}
-        onCancel={vi.fn()}
-      />,
-    )
-
-    expect(container.querySelector('[data-testid="scan-no-key"]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="take-photo"]')).toBeNull()
-    expect(container.querySelector('[data-testid="choose-from-library"]')).toBeNull()
-    expect(container.textContent).toContain('Ask them to add it in Settings')
-
-    click(container.querySelector('[data-testid="scan-open-settings"]'))
-    expect(onOpenSettings).toHaveBeenCalledTimes(1)
-    expect(read).not.toHaveBeenCalled()
-  })
-
-  it('offers capture as normal when apiKeyPresent is true (the default)', () => {
-    const { reader } = fakeScanReader()
-    render(<ImportScreen decks={[]} scanReader={reader} onSave={vi.fn()} onCancel={vi.fn()} />)
-
-    expect(container.querySelector('[data-testid="scan-no-key"]')).toBeNull()
-    expect(container.querySelector('[data-testid="take-photo"]')).not.toBeNull()
-  })
-})
-
 describe('ImportScreen — reading', () => {
   it('moves to a reading state with Cancel once a photo is chosen, and calls scanReader.read', () => {
     const { reader, read } = fakeScanReader()
@@ -207,7 +173,7 @@ describe('ImportScreen — ScanError', () => {
     expect(container.textContent).toContain("Couldn't reach the scanner")
   })
 
-  it('shows the calm "ask Henning" copy for unauthorized, with no stack trace and no Try again', async () => {
+  it('shows the calm "ask whoever runs it" copy for unauthorized, with no stack trace and no Try again', async () => {
     const { reader, read } = fakeScanReader()
     const error: ScanError = { kind: 'unauthorized' }
     read.mockRejectedValue(error)
@@ -216,7 +182,7 @@ describe('ImportScreen — ScanError', () => {
     chooseFile(container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement, file())
     await flush()
 
-    expect(container.textContent).toContain('Ask them to add it in Settings')
+    expect(container.textContent).toContain("Ask whoever runs it to check")
     expect(container.querySelector('[data-testid="scan-try-again"]')).toBeNull()
     expect(container.querySelector('[data-testid="scan-back-to-capture"]')).not.toBeNull()
   })

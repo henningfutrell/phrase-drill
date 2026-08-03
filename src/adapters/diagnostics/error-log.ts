@@ -32,10 +32,13 @@ export interface ErrorLog {
 export const ERROR_LOG_CAP = 50
 
 export interface ErrorLogDeps {
-  /** Live API keys to redact out of a message before it is ever persisted —
-   * called on every `record()` so a key entered after the log was created
-   * is still caught. Typically `() => settingsStore.load().then(s =>
-   * [s.anthropicApiKey, s.elevenLabsApiKey])`. */
+  /** Live secrets to redact out of a message before it is ever persisted —
+   * called on every `record()` so one entered after the log was created is
+   * still caught. T041: the device no longer holds a provider key, so
+   * `main.tsx` wires this to `() => Promise.resolve([])` — the library key
+   * is deliberately not treated as a secret here (it's shown in the open in
+   * Settings as the recovery mechanism). Kept as a hook, not deleted, so a
+   * future on-device secret has somewhere to plug in. */
   getSecrets(): Promise<readonly (string | null | undefined)[]>
 }
 

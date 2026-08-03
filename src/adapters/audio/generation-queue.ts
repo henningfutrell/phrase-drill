@@ -1,7 +1,7 @@
 import type { Language, Phrase } from '../../domain'
 import { computeClipHash, type ClipCache } from '../storage/clip-cache'
 import type { Voice } from '../storage/settings-store'
-import type { SynthClient, SynthError } from './eleven-labs-synth-client'
+import type { SynthClient, SynthError } from './server-synth-client'
 
 /** Bounded automatic retries for a `network` failure before giving up.
  * "Never retry forever" (T019 §3) applies to every failure kind, not only

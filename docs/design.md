@@ -130,9 +130,11 @@ Reused across every screen — a component built once is not rebuilt per screen.
   for a single-field edit — respects the product doctrine against modal-as-first-
   thought.
 - **Banner** — full-width, fixed under the safe-area top inset, `--danger` or
-  neutral background, used exactly once for the interrupted-Drill state and for
-  the "no API key" Scan state. Never for confirmations (those use the `--ok` toast,
-  2s auto-dismiss, non-blocking).
+  neutral background, used exactly once for the interrupted-Drill state. Never
+  for confirmations (those use the `--ok` toast, 2s auto-dismiss,
+  non-blocking). T041 removed the second use this bullet used to name (a "no
+  API key" Scan state) — the device holds no provider key any more, so there
+  is nothing left to warn about at that point in the flow.
 
 ---
 
@@ -336,9 +338,11 @@ first-class state, not an error:
 ### 3.5 Scan / correction — photograph, review, assign
 
 Reached from `Scan a page` in the Decks list header (§3.2).
-`src/ui/ImportScreen.tsx` implements this flow; `App.tsx` renders it with the
-real `createClaudeScanReader` and passes `apiKeyPresent`, so a missing Anthropic
-key is handled by the screen itself rather than by a failed call.
+`src/ui/ImportScreen.tsx` implements this flow; `App.tsx` renders it with
+`createServerScanReader` (T041), which calls this app's own `/api/scan`,
+authenticated with the device's library key. The device holds no Anthropic
+key at all any more, so there is nothing to be present or missing — the old
+`apiKeyPresent` gate is gone with it.
 
 Three-step flow, one screen each. **Unbuilt intention:** the sketch called for a
 top progress trail (`--text-xs`, three dots, not a percentage bar) marking
@@ -352,11 +356,12 @@ camera view is real engineering risk for zero product benefit). Secondary:
 `Choose from Library`.
 
 - **What shipped instead of a proactive "No API key present" state:** this
-  screen has no key-presence check at all, and no `Open Settings` action —
-  Step 1 always offers Take Photo / Choose from Library regardless of whether a
-  key is saved. A missing key is only discovered reactively, as an
-  `unauthorized` failure after a photo is taken and read fails (Step 2 below),
-  not proactively before a photo is ever taken as originally sketched.
+  screen never had a key-presence check to remove (T041 made the question
+  moot rather than resolving it) — Step 1 always offers Take Photo / Choose
+  from Library. The only remaining reason a scan fails at the door is the
+  server itself having no Anthropic key configured, surfaced reactively as an
+  `unauthorized` failure after a photo is taken and read fails (Step 2
+  below), never proactively before a photo is ever taken.
 
 **Step 2 — Reading.** `Reading your photo…` with a `Cancel` button. **Unbuilt
 intention:** the sketch called for a photo thumbnail and an animated beat-row
@@ -368,9 +373,10 @@ thumbnail and no beat-row animation, just the status line above.
   the domain model, each with its own plain-language copy: `unreadable` →
   "Couldn't read phrases from that photo — try better light or a closer shot."
   (`Try again`) `network` → "Couldn't reach the scanner — check your connection
-  and try again." (`Try again`) `unauthorized` → "Scanning needs a key from
-  whoever set this app up for you. Ask them to add it in Settings." (`Back`,
-  not `Open Settings` — this screen has no Settings-navigation callback).
+  and try again." (`Try again`) `unauthorized` (T041: now a server
+  misconfiguration, not a missing on-device key) → "Scanning isn't set up on
+  the server yet. Ask whoever runs it to check." (`Back`, not `Open Settings`
+  — there is no on-device setting that would fix this).
 - **Not in the sketch:** a fourth outcome, a successful read that finds no
   phrases on the photo at all (`No phrases found on that photo — nothing to
   correct here`, with `Try another photo`) — the sketch only accounted for
@@ -391,59 +397,59 @@ one Deck for the whole batch, matching the domain model's confirmation semantics
   prompt — the domain notes accept this for v1 (a Scan is cheap to redo); a
   confirmation dialog here would misrepresent the decision as costly.
 
-### 3.6 Settings — two keys, the voice picker, and the backup
+### 3.6 Settings — sync key, the voice picker, and the backup
 
 Deliberately short — a personal-scale settings screen, not a developer panel.
-Amended twice since the original sketch: a second key for speech, once the app
-moved from the browser's own `speechSynthesis` to a TTS API generating cached
-Clips (§3.1); and a full voice picker, once the owner asked mid-build to be
-able to choose the voice herself, opening what had been a display-only
-readout into the picker described below.
+Amended three times since the original sketch: a second key for speech, once
+the app moved from the browser's own `speechSynthesis` to a TTS API
+generating cached Clips (§3.1); a full voice picker, once the owner asked
+mid-build to be able to choose the voice herself; and, in T041, both
+provider-key fields were deleted outright and replaced with the **Sync**
+section below — the server now holds both credentials, so there is no key
+left for this screen to collect.
 
-1. **Handwriting scan key** — one field, masked, `Save`, plus a `Clear`
-   action once a key is saved. Helper text: "Used only to read photos of
-   handwritten phrases. It's scoped to this app's workspace and spend-capped
-   — it can't run up a large bill." Status line states plainly whether a key
-   is saved yet, and that scanning simply waits if not — never framed as an
-   error.
-2. **Speech key** — a second, identically-shaped field for the TTS provider
-   (ElevenLabs) that generates the Clips a Drill plays, `Save`/`Clear`,
-   capped with a monthly credit limit per its own helper text. Existing audio
-   keeps working with no key present; only new phrases wait for one.
-3. **Voice — no longer display-only, now a picker.** A curated catalogue of
-   voices (currently three, each named and described, e.g. "Female voice,
-   American-accented English speaking French" — none is French-native, and the
-   accent is stated plainly rather than implied). Each entry carries:
+1. **Sync** — shows the device's **library key** in the open (unmasked,
+   `data-testid="library-key-display"`) with a `Copy` button, plus a
+   "use a different key" flow (a text field validated against 64 lowercase
+   hex characters, `Use this key`) for recovering a library onto a wiped or
+   replaced phone. This key is the whole recovery story, so it is
+   deliberately not treated like the old provider keys were (masked, hidden):
+   it identifies which library on the server is hers, nothing more sensitive
+   than that (see "what a key holder can do" in `docs/server.md`).
+2. **Voice — a picker.** A curated catalogue of voices (currently three, each
+   named and described, e.g. "Female voice, American-accented English
+   speaking French" — none is French-native, and the accent is stated plainly
+   rather than implied). Each entry carries:
    - **Preview** — plays a real French phrase from her own library (the first
      Phrase with French text on file, or a fixed fallback phrase if she has
      none yet) spoken in that voice, so she is choosing by ear against her own
-     material, not a generic sample.
+     material, not a generic sample. No key gate any more — a preview is
+     always attempted; if the server has no speech provider configured, the
+     failure is surfaced with copy naming the server, not a device fix.
    - **Use this voice**, which does not switch immediately — it opens a
      **confirmation sheet**: "Switch to `<voice>`? The audio for every phrase
      will be made again in this voice — that takes a little while, so phrases
      will be briefly silent while it catches up." Only `Switch voice` on that
      sheet actually pins the new voice, because every cached Clip is
      content-addressed by voice (glossary) and a change orphans the whole
-     cache. Requires the speech key above; previewing and choosing are both
-     blocked with inline copy until one is saved.
-4. **Backup** — the single most important item on this screen, in its own
-   card treatment. "Your phrases are saved on this phone only, and an iPhone
-   can sometimes clear old app data if it hasn't been opened in a while. Save
-   a backup you can keep or send yourself — then you can always get them
-   back." A second line, not in the original sketch: Clips are not part of
-   the backup — they regenerate automatically next time she's online, in the
-   same voice, so a freshly restored phrase is normal to sit briefly silent.
-   `Export backup` invokes the native iOS share sheet (`navigator.share`)
-   where available, falling back to a plain file download only when sharing
-   itself is unsupported — a fallback the original sketch didn't name, added
-   because the primary path isn't universal. `Restore from backup` accepts a
+     cache.
+3. **Backup** — still present alongside server sync, in its own card
+   treatment, reframed as extra insurance rather than the only copy: "Your
+   phrases sync to the server automatically, but you can also save a backup
+   file you keep or send yourself, for extra peace of mind." Clips are not
+   part of the backup — they regenerate automatically next time she's online,
+   in the same voice, so a freshly restored phrase is normal to sit briefly
+   silent. `Export backup` invokes the native iOS share sheet
+   (`navigator.share`) where available, falling back to a plain file download
+   only when sharing itself is unsupported. `Restore from backup` accepts a
    chosen file and, on a valid one, opens a confirmation sheet before
    replacing anything: "This replaces everything currently saved... This
    can't be undone. Are you sure?", confirmed via `Replace my phrases`. An
    invalid or unreadable file is refused with plain-language copy naming the
    likely cause, never a raw parse error.
-- A closing privacy line, not in the original sketch: keys stay on the phone,
-  never in a link, a log, or an exported backup.
+- A closing privacy line, rewritten for T041: "This phone holds no server
+  credentials — only your sync key, which stays on this phone unless you
+  choose to copy it."
 
 **Unbuilt intention — About.** The sketch called for a third, minimal section
 here: app name, nothing else. Not built — there is no About section in the
@@ -457,7 +463,7 @@ review step (§3.5 Step 3, above the Draft Phrase list), the moment a Scan has
 actually produced phrases to save. One flag backs both: `Settings.
 backupNudgeDismissed`, `false` until she dismisses the nudge from either
 place, `true` and permanent after — there is no way back to shown. It is not
-part of the exported backup itself, same treatment as the API keys and the
+part of the exported backup itself, same treatment as the library key and the
 pinned voice (§3.6, `DeckStore.exportAll()` cannot see it).
 
 ### 3.7 Diagnostics — answer "it's not working" without guessing (T039)
@@ -473,9 +479,9 @@ opens:
 - **Build** — the git commit short SHA and build timestamp (`vite.config.ts`
   embeds both via `define` at build time), so a build can be identified over
   the phone rather than assumed current.
-- **Key presence** — whether the handwriting-scan key and the speech key are
-  saved, never the value or a truncated prefix.
-- **Voice** — whether one is pinned, and which provider.
+- **Voice** — whether one is pinned, and which provider. (T041 dropped the
+  "key presence" line this report used to carry — the device holds no
+  provider key any more, so there is nothing to report presence of.)
 - **Clips ready vs total Phrases** — a count, never phrase text.
 - **Storage** — usage against quota via `navigator.storage.estimate()`,
   reported honestly as unavailable rather than a fabricated zero when the
@@ -495,9 +501,10 @@ If the Clipboard API is unavailable or the copy itself fails, the screen says
 so plainly and leaves the report visible to select by hand, rather than
 failing silently.
 
-Never included, by design: phrase text (counts only), a key's value (presence
-only), and any third-party analytics or error-reporting service — everything
-here stays on-device until she chooses to paste it somewhere.
+Never included, by design: phrase text (counts only), a provider key (the
+device does not hold one to include), and any third-party analytics or
+error-reporting service — everything here stays on-device until she chooses
+to paste it somewhere.
 
 ---
 

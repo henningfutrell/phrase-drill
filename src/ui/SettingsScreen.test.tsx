@@ -18,6 +18,7 @@ const CHARLOTTE: VoiceOption = {
   description: 'Female voice, European-accented English speaking French.',
 }
 const VOICES: VoiceOption[] = [RACHEL, CHARLOTTE]
+const LIBRARY_KEY = 'a'.repeat(64)
 
 /** Resolves after a microtask so a promise-returning handler's `.then` runs before assertions. */
 function flush(): Promise<void> {
@@ -41,6 +42,7 @@ beforeEach(() => {
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
+  Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
 })
 
 afterEach(() => {
@@ -51,13 +53,9 @@ afterEach(() => {
 function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> = {}) {
   const props = {
     onBack: vi.fn(),
-    anthropicKeyPresent: false,
-    elevenLabsKeyPresent: false,
+    libraryKey: LIBRARY_KEY,
     voice: null,
-    onSaveAnthropicKey: vi.fn(),
-    onClearAnthropicKey: vi.fn(),
-    onSaveElevenLabsKey: vi.fn(),
-    onClearElevenLabsKey: vi.fn(),
+    onUseLibraryKey: vi.fn(),
     voices: VOICES,
     previewText: 'Bonjour, comment ça va ?',
     onPreviewVoice: vi.fn().mockResolvedValue({ ok: true }),
@@ -96,96 +94,52 @@ describe('SettingsScreen', () => {
     expect(props.onOpenDiagnostics).toHaveBeenCalledTimes(1)
   })
 
-  it('shows a calm, non-error explanation when the scan key is absent', () => {
-    renderScreen({ anthropicKeyPresent: false })
-    expect(container.textContent).not.toMatch(/error|failed/i)
-    expect(container.textContent).toContain('No key yet')
-  })
+  describe('sync (library key)', () => {
+    it('shows the library key in the open, unmasked', () => {
+      renderScreen()
+      const display = container.querySelector('[data-testid="library-key-display"]')
+      expect(display?.textContent).toBe(LIBRARY_KEY)
+    })
 
-  it('shows a calm, non-error explanation when the speech key is absent', () => {
-    renderScreen({ elevenLabsKeyPresent: false })
-    const status = container.querySelectorAll('.settings-status--calm')
-    expect(status.length).toBeGreaterThanOrEqual(2)
-  })
+    it('copies the library key to the clipboard on tap', async () => {
+      renderScreen()
+      await act(async () => click(container.querySelector('[data-testid="library-key-copy"]')!))
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(LIBRARY_KEY)
+      expect(container.querySelector('[data-testid="library-key-copy-status"]')).not.toBeNull()
+    })
 
-  it('states the scan key is workspace-scoped and spend-capped', () => {
-    renderScreen()
-    expect(container.textContent).toMatch(/workspace/i)
-    expect(container.textContent).toMatch(/cap/i)
-  })
+    it('explains plainly what someone holding this key can do', () => {
+      renderScreen()
+      const section = container.querySelector('[data-testid="sync-section"]')
+      expect(section?.textContent).toMatch(/see and change your phrases/i)
+    })
 
-  it('states the speech key is scoped to text-to-speech with a monthly credit cap', () => {
-    renderScreen()
-    expect(container.textContent).toMatch(/text-to-speech/i)
-    expect(container.textContent).toMatch(/monthly/i)
-  })
+    it('lets a different key be entered and used, for a phone that already has one', () => {
+      const props = renderScreen()
+      const input = container.querySelector('[data-testid="library-key-input"]') as HTMLInputElement
+      const otherKey = 'b'.repeat(64)
+      act(() => typeInto(input, otherKey))
+      act(() => click(container.querySelector('[data-testid="library-key-use"]')!))
 
-  it('saves the Anthropic key that was typed, then clears the input', () => {
-    const props = renderScreen()
-    const input = container.querySelector('[data-testid="anthropic-key-input"]') as HTMLInputElement
-    act(() => typeInto(input, 'sk-ant-abc'))
-    act(() => click(container.querySelector('[data-testid="anthropic-key-save"]')!))
+      expect(props.onUseLibraryKey).toHaveBeenCalledWith(otherKey)
+      expect(input.value).toBe('')
+    })
 
-    expect(props.onSaveAnthropicKey).toHaveBeenCalledWith('sk-ant-abc')
-    expect(input.value).toBe('')
-  })
+    it('disables "Use this key" until something is typed', () => {
+      renderScreen()
+      const use = container.querySelector('[data-testid="library-key-use"]') as HTMLButtonElement
+      expect(use.disabled).toBe(true)
+    })
 
-  it('disables the Anthropic save button until something is typed', () => {
-    renderScreen()
-    const save = container.querySelector('[data-testid="anthropic-key-save"]') as HTMLButtonElement
-    expect(save.disabled).toBe(true)
-  })
+    it('refuses a key that is not 64 hex characters, without calling onUseLibraryKey', () => {
+      const props = renderScreen()
+      const input = container.querySelector('[data-testid="library-key-input"]') as HTMLInputElement
+      act(() => typeInto(input, 'not-a-real-key'))
+      act(() => click(container.querySelector('[data-testid="library-key-use"]')!))
 
-  it('disables the Anthropic clear button when no key is present, enables it when one is', () => {
-    renderScreen({ anthropicKeyPresent: false })
-    expect((container.querySelector('[data-testid="anthropic-key-clear"]') as HTMLButtonElement).disabled).toBe(
-      true,
-    )
-
-    renderScreen({ anthropicKeyPresent: true })
-    expect((container.querySelector('[data-testid="anthropic-key-clear"]') as HTMLButtonElement).disabled).toBe(
-      false,
-    )
-  })
-
-  it('clears the Anthropic key on tap', () => {
-    const props = renderScreen({ anthropicKeyPresent: true })
-    act(() => click(container.querySelector('[data-testid="anthropic-key-clear"]')!))
-    expect(props.onClearAnthropicKey).toHaveBeenCalled()
-  })
-
-  it('saves the ElevenLabs key that was typed, then clears the input', () => {
-    const props = renderScreen()
-    const input = container.querySelector('[data-testid="elevenlabs-key-input"]') as HTMLInputElement
-    act(() => typeInto(input, 'el-key-abc'))
-    act(() => click(container.querySelector('[data-testid="elevenlabs-key-save"]')!))
-
-    expect(props.onSaveElevenLabsKey).toHaveBeenCalledWith('el-key-abc')
-    expect(input.value).toBe('')
-  })
-
-  it('clears the ElevenLabs key on tap', () => {
-    const props = renderScreen({ elevenLabsKeyPresent: true })
-    act(() => click(container.querySelector('[data-testid="elevenlabs-key-clear"]')!))
-    expect(props.onClearElevenLabsKey).toHaveBeenCalled()
-  })
-
-  it('never renders a saved key value anywhere in the DOM', () => {
-    renderScreen({ anthropicKeyPresent: true, elevenLabsKeyPresent: true })
-    // The screen only ever receives booleans for "present" — it has no key
-    // value to leak. Guard the contract: no input carries a pre-filled value.
-    const anthropicInput = container.querySelector('[data-testid="anthropic-key-input"]') as HTMLInputElement
-    const elevenLabsInput = container.querySelector('[data-testid="elevenlabs-key-input"]') as HTMLInputElement
-    expect(anthropicInput.value).toBe('')
-    expect(elevenLabsInput.value).toBe('')
-    expect(anthropicInput.type).toBe('password')
-    expect(elevenLabsInput.type).toBe('password')
-  })
-
-  it('states plainly that a key is never put in a URL, logged, or exported', () => {
-    renderScreen()
-    expect(container.textContent).toMatch(/never/i)
-    expect(container.textContent).toMatch(/backup|export/i)
+      expect(props.onUseLibraryKey).not.toHaveBeenCalled()
+      expect(container.querySelector('[data-testid="library-key-error"]')).not.toBeNull()
+    })
   })
 
   describe('voice picker', () => {
@@ -214,7 +168,7 @@ describe('SettingsScreen', () => {
     })
 
     it('previews a voice using the real phrase text handed to it, not a hardcoded one', async () => {
-      const props = renderScreen({ previewText: 'Où est la gare ?', elevenLabsKeyPresent: true })
+      const props = renderScreen({ previewText: 'Où est la gare ?' })
       await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
 
       expect(props.onPreviewVoice).toHaveBeenCalledTimes(1)
@@ -224,7 +178,7 @@ describe('SettingsScreen', () => {
     })
 
     it('passes a fresh AbortSignal to each preview', async () => {
-      const props = renderScreen({ elevenLabsKeyPresent: true })
+      const props = renderScreen()
       await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
       const [, , signal] = vi.mocked(props.onPreviewVoice).mock.calls[0]!
       expect(signal).toBeInstanceOf(AbortSignal)
@@ -237,7 +191,7 @@ describe('SettingsScreen', () => {
         resolveFirst = resolve
       })
       const onPreviewVoice = vi.fn().mockReturnValueOnce(firstPreview).mockResolvedValue({ ok: true })
-      renderScreen({ onPreviewVoice, elevenLabsKeyPresent: true })
+      renderScreen({ onPreviewVoice })
 
       act(() => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
       const [, , firstSignal] = onPreviewVoice.mock.calls[0]!
@@ -257,7 +211,7 @@ describe('SettingsScreen', () => {
           })
         },
       )
-      renderScreen({ onPreviewVoice, elevenLabsKeyPresent: true })
+      renderScreen({ onPreviewVoice })
       act(() => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
 
       act(() => root.unmount())
@@ -266,7 +220,7 @@ describe('SettingsScreen', () => {
     })
 
     it('shows a plain-language error inline when a preview fails, without blocking the screen', async () => {
-      renderScreen({ onPreviewVoice: vi.fn().mockResolvedValue({ ok: false, reason: 'network' }), elevenLabsKeyPresent: true })
+      renderScreen({ onPreviewVoice: vi.fn().mockResolvedValue({ ok: false, reason: 'network' }) })
       await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
       await flush()
 
@@ -275,11 +229,12 @@ describe('SettingsScreen', () => {
       expect(error!.textContent).not.toMatch(/error|failed/i)
     })
 
-    it('disables preview when no speech key is saved yet, and says why', () => {
-      renderScreen({ elevenLabsKeyPresent: false })
-      const preview = container.querySelector('[data-testid="voice-preview-voice-rachel"]') as HTMLButtonElement
-      expect(preview.disabled).toBe(true)
-      expect(container.querySelector('[data-testid="voice-preview-needs-key"]')).not.toBeNull()
+    it('shows a calm explanation, naming the server, when a preview fails because it is not set up', async () => {
+      renderScreen({ onPreviewVoice: vi.fn().mockResolvedValue({ ok: false, reason: 'unauthorized' }) })
+      await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
+      await flush()
+
+      expect(container.querySelector('[data-testid="voice-preview-error"]')?.textContent).toMatch(/server/i)
     })
 
     it('warns, before committing, that switching voices regenerates every phrase and takes a while — not "cache invalidation"', async () => {
@@ -332,8 +287,7 @@ describe('SettingsScreen', () => {
     it('explains, for someone who has never heard of a backup, why one matters', () => {
       renderScreen()
       const section = container.querySelector('[data-testid="backup-section"]')
-      expect(section?.textContent).toMatch(/phone/i)
-      expect(section?.textContent).toMatch(/gone|lost|clear/i)
+      expect(section?.textContent).toMatch(/sync|backup/i)
     })
 
     it('states that saved audio is not part of the backup and regenerates on its own', () => {

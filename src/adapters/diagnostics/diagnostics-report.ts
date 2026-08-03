@@ -9,15 +9,14 @@ import type { StorageEstimateResult } from './storage-estimate'
 const DEFAULT_RECENT_ERRORS_LIMIT = 10
 
 /**
- * Everything Diagnostics shows, gathered in one place. No phrase content, no
- * key value — only what T039 asks the report to answer: key presence, the
- * pinned voice, Clips ready vs total Phrases, storage, last sync, and the
- * last N captured errors.
+ * Everything Diagnostics shows, gathered in one place. No phrase content —
+ * only what T039 asks the report to answer: the pinned voice, Clips ready
+ * vs total Phrases, storage, last sync, and the last N captured errors.
+ * T041 dropped the two provider-key-presence fields this used to carry: the
+ * device holds no provider key any more to be present or absent.
  */
 export interface DiagnosticsSnapshot {
   readonly build: BuildInfo
-  readonly anthropicKeyPresent: boolean
-  readonly elevenLabsKeyPresent: boolean
   readonly voice: Voice | null
   readonly phrasesTotal: number
   readonly clipsReady: number
@@ -58,8 +57,6 @@ export async function collectDiagnostics(deps: CollectDiagnosticsDeps): Promise<
 
   return {
     build: getBuildInfo(),
-    anthropicKeyPresent: settings.anthropicApiKey !== null,
-    elevenLabsKeyPresent: settings.elevenLabsApiKey !== null,
     voice: settings.voice,
     phrasesTotal: phrases.length,
     clipsReady,
@@ -95,13 +92,11 @@ function formatRecentErrors(entries: readonly LogEntry[]): string {
 /**
  * Formats the snapshot as plain text — the one thing the copy control sends
  * to the clipboard for pasting into a message. Counts only, never phrase
- * text; presence only, never a key value.
+ * text.
  */
 export function formatDiagnosticsReport(snapshot: DiagnosticsSnapshot): string {
   return [
     `Build: ${snapshot.build.sha} (${snapshot.build.builtAt})`,
-    `Handwriting scan key: ${snapshot.anthropicKeyPresent ? 'present' : 'not set'}`,
-    `Speech key: ${snapshot.elevenLabsKeyPresent ? 'present' : 'not set'}`,
     formatVoice(snapshot.voice),
     `Clips ready: ${snapshot.clipsReady} of ${snapshot.phrasesTotal} Phrases`,
     formatStorage(snapshot.storage),
