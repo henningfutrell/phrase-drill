@@ -5,7 +5,11 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  { ignores: ['dist'] },
+  // `.stryker-tmp` holds Stryker's sandbox — a full copy of the repo with the
+  // source deliberately broken (T043). Linting it reports hundreds of errors
+  // about code nobody wrote, and a failed or interrupted mutation run leaves
+  // the directory behind, so this cannot rely on the run cleaning up.
+  { ignores: ['dist', '.stryker-tmp', 'reports'] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ['**/*.{ts,tsx}'],
