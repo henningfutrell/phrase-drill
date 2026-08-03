@@ -22,7 +22,7 @@ export interface VoiceOption {
 export type PreviewOutcome = { ok: true } | { ok: false; reason: 'unauthorized' | 'quota' | 'network' }
 
 const PREVIEW_ERROR_COPY: Record<Exclude<PreviewOutcome, { ok: true }>['reason'], string> = {
-  unauthorized: "That didn't play — check the speech key above.",
+  unauthorized: "That didn't play — the server isn't set up for speech yet. Ask whoever runs it to check.",
   quota: "That didn't play — this month's speech credit may be used up.",
   network: "That didn't play — check the connection and try again.",
 }
@@ -41,29 +41,28 @@ const RESTORE_ERROR_COPY: Record<RestoreRefusal['reason'], string> = {
   invalid: "That doesn't look like a phrase-drill backup. Choose the file that was saved from Export backup.",
 }
 
+const LIBRARY_KEY_PATTERN = /^[0-9a-f]{64}$/
+
 /**
- * Settings — the two API keys, the voice picker, and backup/restore
- * (docs/design.md §3.6, amended by T019 §7 for the ElevenLabs key, by T016
- * for backup/restore, and by T026 for the previewable voice picker — the
- * voice is no longer display-only, and "the user" who picks it is the
- * friend who drills, not whoever set the app up). Purely presentational:
- * every persist decision, every synth call, every file read, and the actual
- * share/download call are the composition root's (App.tsx) — this component
- * only describes the choice and shows what the callbacks resolved to. A
- * key's actual value never reaches this component — only whether one is
- * present — so there is nothing here that could render it.
+ * Settings — Sync (the library key), the voice picker, and backup/restore
+ * (docs/design.md §3.6, amended by T041 to replace the two API key fields
+ * with the library key). Purely presentational: every persist decision,
+ * every synth call, every file read, and the actual share/download call are
+ * the composition root's (App.tsx) — this component only describes the
+ * choice and shows what the callbacks resolved to.
+ *
+ * Unlike the provider keys it replaces, the library key is shown in the
+ * open, not masked: it has to be, since reading and copying it down
+ * somewhere safe is the entire recovery story for a wiped or replaced
+ * phone (T041).
  */
 export function SettingsScreen({
   onBack,
-  anthropicKeyPresent,
-  elevenLabsKeyPresent,
+  libraryKey,
   voice,
   voices,
   previewText,
-  onSaveAnthropicKey,
-  onClearAnthropicKey,
-  onSaveElevenLabsKey,
-  onClearElevenLabsKey,
+  onUseLibraryKey,
   onPreviewVoice,
   onChooseVoice,
   onExportBackup,
@@ -73,15 +72,11 @@ export function SettingsScreen({
   onOpenDiagnostics,
 }: {
   onBack: () => void
-  anthropicKeyPresent: boolean
-  elevenLabsKeyPresent: boolean
+  libraryKey: string
   voice: VoiceInfo | null
   voices: readonly VoiceOption[]
   previewText: string
-  onSaveAnthropicKey: (key: string) => void
-  onClearAnthropicKey: () => void
-  onSaveElevenLabsKey: (key: string) => void
-  onClearElevenLabsKey: () => void
+  onUseLibraryKey: (key: string) => void
   onPreviewVoice: (
     voice: { modelId: string; voiceId: string },
     text: string,
@@ -94,8 +89,9 @@ export function SettingsScreen({
   onCancelRestore: () => void
   onOpenDiagnostics: () => void
 }) {
-  const [anthropicInput, setAnthropicInput] = useState('')
-  const [elevenLabsInput, setElevenLabsInput] = useState('')
+  const [switchKeyInput, setSwitchKeyInput] = useState('')
+  const [switchKeyError, setSwitchKeyError] = useState<string | null>(null)
+  const [copyStatus, setCopyStatus] = useState<string | null>(null)
   const [exportStatus, setExportStatus] = useState<string | null>(null)
   const [restoreError, setRestoreError] = useState<string | null>(null)
   const [confirmingRestore, setConfirmingRestore] = useState(false)
@@ -150,6 +146,26 @@ export function SettingsScreen({
     setConfirmingVoice(null)
   }
 
+  async function handleCopyLibraryKey() {
+    try {
+      await navigator.clipboard.writeText(libraryKey)
+      setCopyStatus('Copied.')
+    } catch {
+      setCopyStatus('Could not copy — select and copy the key by hand.')
+    }
+  }
+
+  function handleUseLibraryKey() {
+    const candidate = switchKeyInput.trim().toLowerCase()
+    if (!LIBRARY_KEY_PATTERN.test(candidate)) {
+      setSwitchKeyError('That doesn’t look like a sync key — it should be 64 letters and numbers, with nothing else.')
+      return
+    }
+    setSwitchKeyError(null)
+    setSwitchKeyInput('')
+    onUseLibraryKey(candidate)
+  }
+
   async function handleExportBackup() {
     const outcome = await onExportBackup()
     if (outcome === 'shared') {
@@ -197,94 +213,56 @@ export function SettingsScreen({
         <span />
       </header>
 
-      <section className="settings-section">
-        <h2 className="settings-section-title">Handwriting scan key</h2>
+      <section className="settings-section" data-testid="sync-section">
+        <h2 className="settings-section-title">Sync</h2>
         <p className="settings-help">
-          Used only to read photos of handwritten phrases. It's scoped to this app's
-          workspace and spend-capped — it can't run up a large bill.
+          This is what makes your phrases yours on the server — write it down somewhere
+          safe. If this phone is ever lost, wiped, or replaced, enter this same key on
+          the new one and your phrases come back.
         </p>
-        <p className={anthropicKeyPresent ? 'settings-status' : 'settings-status settings-status--calm'}>
-          {anthropicKeyPresent
-            ? 'A key is saved.'
-            : "No key yet — that's expected until whoever set up this app adds one. Scanning just waits."}
+        <p className="settings-help">Anyone who has this key can see and change your phrases, so keep it private.</p>
+        <p className="sheet-label" data-testid="library-key-display" style={{ wordBreak: 'break-all' }}>
+          {libraryKey}
         </p>
-        <input
-          type="password"
-          autoComplete="off"
-          data-testid="anthropic-key-input"
-          className="sheet-input"
-          placeholder="Paste key"
-          value={anthropicInput}
-          onChange={(e) => setAnthropicInput(e.target.value)}
-        />
         <div className="settings-actions">
-          <button
-            type="button"
-            data-testid="anthropic-key-clear"
-            className="btn-icon btn-danger"
-            disabled={!anthropicKeyPresent}
-            onClick={onClearAnthropicKey}
-          >
-            Clear
-          </button>
-          <button
-            type="button"
-            data-testid="anthropic-key-save"
-            className="btn-primary"
-            disabled={anthropicInput.trim().length === 0}
-            onClick={() => {
-              onSaveAnthropicKey(anthropicInput.trim())
-              setAnthropicInput('')
-            }}
-          >
-            Save
+          <button type="button" data-testid="library-key-copy" className="btn-icon" onClick={() => void handleCopyLibraryKey()}>
+            Copy
           </button>
         </div>
-      </section>
+        {copyStatus && (
+          <p className="settings-status settings-status--calm" data-testid="library-key-copy-status">
+            {copyStatus}
+          </p>
+        )}
 
-      <section className="settings-section">
-        <h2 className="settings-section-title">Speech key</h2>
-        <p className="settings-help">
-          Used only to turn phrases into spoken audio. It's scoped to text-to-speech
-          and capped with a monthly credit limit.
-        </p>
-        <p className={elevenLabsKeyPresent ? 'settings-status' : 'settings-status settings-status--calm'}>
-          {elevenLabsKeyPresent
-            ? 'A key is saved.'
-            : "No key yet — that's expected until whoever set up this app adds one. Existing audio keeps working; new phrases just wait for theirs."}
-        </p>
+        <p className="settings-help">Setting up a phone that already has a key? Enter it here instead of using this one.</p>
         <input
-          type="password"
+          type="text"
           autoComplete="off"
-          data-testid="elevenlabs-key-input"
+          autoCapitalize="off"
+          autoCorrect="off"
+          data-testid="library-key-input"
           className="sheet-input"
-          placeholder="Paste key"
-          value={elevenLabsInput}
-          onChange={(e) => setElevenLabsInput(e.target.value)}
+          placeholder="Paste sync key"
+          value={switchKeyInput}
+          onChange={(e) => setSwitchKeyInput(e.target.value)}
         />
         <div className="settings-actions">
           <button
             type="button"
-            data-testid="elevenlabs-key-clear"
-            className="btn-icon btn-danger"
-            disabled={!elevenLabsKeyPresent}
-            onClick={onClearElevenLabsKey}
-          >
-            Clear
-          </button>
-          <button
-            type="button"
-            data-testid="elevenlabs-key-save"
+            data-testid="library-key-use"
             className="btn-primary"
-            disabled={elevenLabsInput.trim().length === 0}
-            onClick={() => {
-              onSaveElevenLabsKey(elevenLabsInput.trim())
-              setElevenLabsInput('')
-            }}
+            disabled={switchKeyInput.trim().length === 0}
+            onClick={handleUseLibraryKey}
           >
-            Save
+            Use this key
           </button>
         </div>
+        {switchKeyError && (
+          <p className="settings-status" data-testid="library-key-error">
+            {switchKeyError}
+          </p>
+        )}
       </section>
 
       <section className="settings-section">
@@ -296,11 +274,6 @@ export function SettingsScreen({
         {!voice && (
           <p className="settings-status settings-status--calm" data-testid="voice-display">
             No voice chosen yet — pick one below.
-          </p>
-        )}
-        {!elevenLabsKeyPresent && (
-          <p className="settings-status settings-status--calm" data-testid="voice-preview-needs-key">
-            Add the speech key above first — previewing a voice needs it.
           </p>
         )}
         <ul className="voice-list" data-testid="voice-list">
@@ -324,7 +297,6 @@ export function SettingsScreen({
                     type="button"
                     data-testid={`voice-preview-${entry.voiceId}`}
                     className="btn-icon"
-                    disabled={!elevenLabsKeyPresent}
                     onClick={() => handlePreviewVoice(entry)}
                   >
                     {isPreviewing ? 'Playing…' : 'Preview'}
@@ -353,9 +325,8 @@ export function SettingsScreen({
       <section className="settings-section settings-section--backup" data-testid="backup-section">
         <h2 className="settings-section-title">Backup</h2>
         <p className="settings-help">
-          Your phrases are saved on this phone only, and an iPhone can sometimes clear
-          old app data if it hasn't been opened in a while. Save a backup you can keep
-          or send yourself — then you can always get them back.
+          Your phrases sync to the server automatically, but you can also save a backup
+          file you keep or send yourself, for extra peace of mind.
         </p>
         <p className="settings-help">
           Saved audio isn't part of the backup — it's regenerated automatically the
@@ -415,8 +386,8 @@ export function SettingsScreen({
       </section>
 
       <p className="settings-help settings-privacy-note">
-        Keys stay on this phone. They're never put in a link, never written to a
-        log, and never included in a backup you export.
+        This phone holds no server credentials — only your sync key, which stays on
+        this phone unless you choose to copy it.
       </p>
 
       {confirmingVoice && (

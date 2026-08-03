@@ -1,0 +1,22 @@
+# phrase-drill server (T041). `docker compose up` runs the whole app locally
+# with no cloud account — set the two provider keys in a `.env` file next to
+# this one (git-ignored) or leave them unset to run with speech/scan disabled.
+# The same file deploys unchanged on Coolify: point it at this repo, set the
+# two secrets in Coolify's env UI, attach a volume for /data.
+
+services:
+  phrase-drill:
+    build: .
+    ports:
+      - '8080:8080'
+    environment:
+      PORT: '8080'
+      DB_PATH: '/data/phrase-drill.db'
+      ELEVENLABS_API_KEY: '${ELEVENLABS_API_KEY:-}'
+      ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
+    volumes:
+      - phrase-drill-data:/data
+    restart: unless-stopped
+
+volumes:
+  phrase-drill-data:
