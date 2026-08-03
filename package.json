@@ -10,7 +10,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "format": "prettier --write .",
-    "deploy": "scripts/deploy.sh"
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "idb": "^8.0.3",
