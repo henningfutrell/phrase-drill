@@ -2,9 +2,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
 import { createIndexedDbClipCache, createIndexedDbDeckStore, createIndexedDbSettingsStore } from './adapters/storage'
-import { createElevenLabsSynthClient } from './adapters/audio/eleven-labs-synth-client'
+import { createServerSynthClient } from './adapters/audio/server-synth-client'
 import { createGenerationQueue } from './adapters/audio/generation-queue'
-import { createClaudeScanReader } from './adapters/vision/claude-scan-reader'
+import { createServerScanReader } from './adapters/vision/server-scan-reader'
+import { createLibrarySyncClient } from './adapters/sync/library-sync-client'
 import { createIndexedDbErrorLog, installErrorCapture, withAdapterErrorLogging } from './adapters/diagnostics'
 import './styles.css'
 
@@ -20,14 +21,16 @@ const clipCache = createIndexedDbClipCache()
 // Diagnostics (T039): the ring buffer that backs Diagnostics and the two
 // global error hooks that feed it. Installed here, at the composition root,
 // not scattered through components (AGENTS.md ports-and-adapters, T039).
-const errorLog = createIndexedDbErrorLog({
-  getSecrets: () => settingsStore.load().then((s) => [s.anthropicApiKey, s.elevenLabsApiKey]),
-})
+// T041: the device holds no provider key to redact any more — its one
+// credential is the library key, and that is deliberately shown in the open
+// in Settings (it is the recovery mechanism), so it is not treated as a
+// secret to strip from diagnostics either.
+const errorLog = createIndexedDbErrorLog({ getSecrets: () => Promise.resolve([]) })
 installErrorCapture(errorLog)
 
-const rawSynthClient = createElevenLabsSynthClient({
-  getApiKey: () => settingsStore.load().then((settings) => settings.elevenLabsApiKey),
-})
+const getLibraryKey = () => settingsStore.load().then((settings) => settings.libraryKey)
+
+const rawSynthClient = createServerSynthClient({ getLibraryKey })
 const synthClient = {
   ...rawSynthClient,
   synthesize: withAdapterErrorLogging('synth', rawSynthClient.synthesize.bind(rawSynthClient), errorLog),
@@ -51,13 +54,12 @@ const generationQueue = createGenerationQueue({
     }
   },
 })
-const rawScanReader = createClaudeScanReader({
-  getApiKey: () => settingsStore.load().then((settings) => settings.anthropicApiKey),
-})
+const rawScanReader = createServerScanReader({ getLibraryKey })
 const scanReader = {
   ...rawScanReader,
   read: withAdapterErrorLogging('scan', rawScanReader.read.bind(rawScanReader), errorLog),
 }
+const librarySyncClient = createLibrarySyncClient({ getLibraryKey })
 
 createRoot(rootElement).render(
   <StrictMode>
@@ -69,6 +71,7 @@ createRoot(rootElement).render(
       clipCache={clipCache}
       scanReader={scanReader}
       errorLog={errorLog}
+      librarySyncClient={librarySyncClient}
     />
   </StrictMode>,
 )

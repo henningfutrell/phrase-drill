@@ -24,11 +24,14 @@ const buildSha = readBuildSha()
 const buildTime = new Date().toISOString()
 
 // https://vite.dev/config/
-// GitHub Pages serves this app from https://henningfutrell.github.io/phrase-drill/
-// (gh-pages branch, shared with an unrelated spike/ diagnostic — see
-// scripts/deploy.sh), not from a domain root, so every built asset path and
-// the PWA manifest's identity have to carry this sub-path.
-const base = '/phrase-drill/'
+// T041: this build now ships to two different roots — GitHub Pages under
+// https://henningfutrell.github.io/phrase-drill/ (scripts/deploy.sh) and the
+// Docker/Coolify server (server/static.js) at a domain root. The app has no
+// URL-based routing (App.tsx switches screens by React state, never the
+// path), so a relative base resolves correctly under either: asset and
+// manifest URLs are written relative to index.html's own location, which is
+// the sub-path on Pages and the root in the container.
+const base = './'
 
 export default defineConfig({
   base,

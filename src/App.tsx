@@ -17,8 +17,9 @@ import { backupFilename, parseLibraryFile } from './adapters/storage'
 import type { ErrorLog } from './adapters/diagnostics'
 import { collectDiagnostics, copyText, formatDiagnosticsReport, getBuildInfo, getStorageEstimate } from './adapters/diagnostics'
 import { shareBackupFile } from './adapters/share/web-share'
-import type { SynthClient } from './adapters/audio/eleven-labs-synth-client'
+import type { SynthClient } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
+import type { LibrarySyncClient } from './adapters/sync/library-sync-client'
 import { FALLBACK_PREVIEW_PHRASE, VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
 import { createClipPlayer } from './adapters/audio/clip-player'
 import { computeDrillReadiness } from './adapters/audio/drill-readiness'
@@ -33,8 +34,7 @@ import { SettingsScreen, type ExportOutcome, type PreviewOutcome, type RestoreFi
 import { DiagnosticsScreen } from './ui/DiagnosticsScreen'
 
 const EMPTY_SETTINGS: Settings = {
-  anthropicApiKey: null,
-  elevenLabsApiKey: null,
+  libraryKey: '',
   voice: null,
   backupNudgeDismissed: false,
   lastSyncAt: null,
@@ -101,6 +101,7 @@ function App({
   clipCache,
   scanReader,
   errorLog,
+  librarySyncClient,
 }: {
   deckStore: DeckStore
   settingsStore: SettingsStore
@@ -109,6 +110,7 @@ function App({
   clipCache: ClipCache
   scanReader: ScanReader
   errorLog: ErrorLog
+  librarySyncClient: LibrarySyncClient
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
@@ -143,13 +145,30 @@ function App({
 
   useEffect(() => {
     let cancelled = false
-    void deckStore.loadAll().then((loaded) => {
+    void deckStore.loadAll().then(async (loaded) => {
+      if (cancelled) return
+      // A wiped or replaced phone (T041): nothing local yet, so pull
+      // whatever this library key's server copy holds before showing an
+      // empty Decks screen. `not-found`/`unauthorized`/`network` all leave
+      // her on the ordinary empty state — pulling is a bonus on top of
+      // local storage, never a blocker in front of it.
+      if (loaded.length === 0) {
+        const pulled = await librarySyncClient.pull()
+        if (!cancelled && pulled.ok) {
+          await deckStore.importAll(pulled.library)
+          const reloaded = await deckStore.loadAll()
+          if (!cancelled) {
+            setDecks(reloaded)
+            return
+          }
+        }
+      }
       if (!cancelled) setDecks(loaded)
     })
     return () => {
       cancelled = true
     }
-  }, [deckStore])
+  }, [deckStore, librarySyncClient])
 
   useEffect(() => {
     let cancelled = false
@@ -169,7 +188,27 @@ function App({
       const list = current ?? []
       return list.some((d) => d.id === deck.id) ? list.map((d) => (d.id === deck.id ? deck : d)) : [...list, deck]
     })
-    void deckStore.save(deck)
+    void deckStore.save(deck).then(() => syncToServer())
+  }
+
+  /**
+   * Pushes the whole Library to the server after a local change (T041:
+   * "her library is stored server-side"). Fire-and-forget from the caller's
+   * point of view — a failed push never blocks the local save, which has
+   * already happened by the time this runs; it only updates `lastSyncAt` on
+   * success, so Diagnostics can show how stale the server copy might be.
+   */
+  function syncToServer(): void {
+    void deckStore
+      .exportAll()
+      .then((library) => librarySyncClient.push(library))
+      .then((result) => {
+        if (result.ok) {
+          const timestamp = Date.now()
+          setSettings((current) => ({ ...current, lastSyncAt: timestamp }))
+          void settingsStore.recordSync(timestamp)
+        }
+      })
   }
 
   function handleCreateDeck(name: string) {
@@ -184,7 +223,7 @@ function App({
 
   function handleDeleteDeck(id: DeckId) {
     setDecks((current) => (current ?? []).filter((d) => d.id !== id))
-    void deckStore.remove(id)
+    void deckStore.remove(id).then(() => syncToServer())
     if (selectedDeckId === id) setSelectedDeckId(undefined)
   }
 
@@ -217,6 +256,7 @@ function App({
       setDecks(loaded)
       setSelectedDeckId(undefined)
       setSettingsOpen(false)
+      syncToServer()
     })
   }
 
@@ -340,28 +380,15 @@ function App({
     return (
       <SettingsScreen
         onBack={() => setSettingsOpen(false)}
-        anthropicKeyPresent={settings.anthropicApiKey !== null}
-        elevenLabsKeyPresent={settings.elevenLabsApiKey !== null}
+        libraryKey={settings.libraryKey}
         voice={settings.voice}
         voices={VOICE_CATALOGUE}
         previewText={previewText}
         onPreviewVoice={handlePreviewVoice}
         onChooseVoice={handleChooseVoice}
-        onSaveAnthropicKey={(key) => {
-          setSettings((current) => ({ ...current, anthropicApiKey: key }))
-          void settingsStore.setAnthropicApiKey(key)
-        }}
-        onClearAnthropicKey={() => {
-          setSettings((current) => ({ ...current, anthropicApiKey: null }))
-          void settingsStore.setAnthropicApiKey(null)
-        }}
-        onSaveElevenLabsKey={(key) => {
-          setSettings((current) => ({ ...current, elevenLabsApiKey: key }))
-          void settingsStore.setElevenLabsApiKey(key)
-        }}
-        onClearElevenLabsKey={() => {
-          setSettings((current) => ({ ...current, elevenLabsApiKey: null }))
-          void settingsStore.setElevenLabsApiKey(null)
+        onUseLibraryKey={(key) => {
+          setSettings((current) => ({ ...current, libraryKey: key }))
+          void settingsStore.setLibraryKey(key)
         }}
         onExportBackup={handleExportBackup}
         onRestoreFileChosen={handleRestoreFileChosen}
@@ -422,8 +449,6 @@ function App({
       <ImportScreen
         decks={decks}
         scanReader={scanReader}
-        apiKeyPresent={settings.anthropicApiKey !== null}
-        onOpenSettings={() => setSettingsOpen(true)}
         onSave={handleImportSave}
         onCancel={() => setImportOpen(false)}
         showBackupNudge={!settings.backupNudgeDismissed}

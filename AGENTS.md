@@ -17,22 +17,29 @@ user's phone, not for hypothetical others.
   engines nobody here uses. Test assumptions against Safari's behavior
   (audio element unlock and reuse, IndexedDB quirks, PWA install/offline
   behavior), not Chrome's.
-- **No server.** This is a static PWA: HTML/CSS/JS built once and served as
-  files. All state lives in the browser (IndexedDB via `idb`). Outbound
-  network calls: the Claude vision API for handwriting import, and the
-  ElevenLabs text-to-speech API for Clip generation. Nothing here runs a
-  backend, a database, or an API route of its own. `npm run build` output
-  must be static files, deployable to any static host.
+- **The server holds the keys, she never touches one (T041).** `server/`
+  is a plain-Node HTTP server — no framework, no vendor SDK — that owns both
+  provider credentials (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, env only)
+  and her phrase library (`node:sqlite`). The device never sees a provider
+  key: it authenticates to the server with a device-generated library key
+  and calls same-origin `/api/tts`, `/api/scan`, `/api/library`. One
+  container (`Dockerfile`) serves the built PWA and this API together; see
+  `docs/server.md` for endpoints, env vars, local run, and Coolify deploy.
+  The offline drill is unaffected — the server generates Clips, the device
+  still caches and plays them from cache with no mid-run network dependency.
 
 ## Architecture: ports and adapters
 
 ```
 src/
   domain/            pure domain core
-  adapters/audio/     ClipPlayer (SpeechPort over cached Clips) + ElevenLabs synth client
+  adapters/audio/     ClipPlayer (SpeechPort over cached Clips) + server synth client
   adapters/storage/   IndexedDB (via idb) — decks, settings, the clip cache
-  adapters/vision/     Claude vision API (handwriting import)
+  adapters/vision/     server scan-reader client (handwriting import)
+  adapters/sync/       library sync client (push/pull against /api/library)
   App.tsx, main.tsx    composition root: wires adapters into domain, renders screens
+server/
+  index.js, app.js, db.js, providers/, ...   the HTTP server (docs/server.md)
 ```
 
 - `domain/` imports nothing from `adapters/*`, `react`, `idb`, the DOM, or any
