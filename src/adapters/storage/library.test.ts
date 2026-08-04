@@ -5,6 +5,7 @@ import {
   buildLibrary,
   migrateLibraryDecks,
   migrateLibraryMixes,
+  migrateLibraryTombstones,
   normalizeLibrary,
   parseLibraryFile,
   withVoice,
@@ -187,6 +188,148 @@ describe('parseLibraryFile', () => {
   })
 })
 
+/**
+ * T070, from the T068 audit. `library.decks.map(migrateDeckRecord)` was the
+ * ONLY place `schemaVersion` was checked, and `[].map` runs zero migrations —
+ * so an envelope from a newer build with no decks in it normalized silently
+ * down to the current version instead of being refused, and a valid-shaped
+ * empty file went on to `importAll`, whose first three statements clear all
+ * three object stores.
+ */
+describe('parseLibraryFile — an envelope this build must not accept (T070)', () => {
+  const decks = [{ id: 'd1', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 }]
+  const file = (parts: Record<string, unknown>): string =>
+    JSON.stringify({ format: LIBRARY_FORMAT, schemaVersion: CURRENT_SCHEMA_VERSION, exportedAt: 1, decks, ...parts })
+
+  it('refuses a backup written by a newer build, rather than reading it as an old one', () => {
+    expect(parseLibraryFile(file({ schemaVersion: CURRENT_SCHEMA_VERSION + 1 }))).toEqual({
+      ok: false,
+      reason: 'needs-update',
+    })
+  })
+
+  it('refuses a newer build\'s backup even when it carries no decks at all — the empty-array bypass', () => {
+    expect(parseLibraryFile(file({ schemaVersion: 99, decks: [] }))).toEqual({ ok: false, reason: 'needs-update' })
+  })
+
+  it('accepts a backup at exactly this build\'s schema version', () => {
+    expect(parseLibraryFile(file({})).ok).toBe(true)
+  })
+
+  it('refuses a schema version that was never written — zero, negative, or fractional', () => {
+    expect(parseLibraryFile(file({ schemaVersion: 0 }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ schemaVersion: -1 }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ schemaVersion: 1.5 }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ schemaVersion: Number.NaN }))).toEqual({ ok: false, reason: 'invalid' })
+  })
+
+  it('refuses a file that would replace everything with nothing', () => {
+    expect(parseLibraryFile(file({ decks: [], mixes: [], tombstones: [] }))).toEqual({ ok: false, reason: 'empty' })
+    expect(parseLibraryFile(file({ decks: [] }))).toEqual({ ok: false, reason: 'empty' })
+  })
+
+  it('accepts an empty deck list that still carries something she made', () => {
+    const withMix = { decks: [], mixes: [{ id: 'm1', name: 'Mornings', deckIds: [], createdAt: 1, updatedAt: 1 }] }
+    expect(parseLibraryFile(file(withMix)).ok).toBe(true)
+    expect(parseLibraryFile(file({ decks: [], tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 2 }] })).ok).toBe(true)
+  })
+
+  it('refuses a deck that is not a deck record', () => {
+    expect(parseLibraryFile(file({ decks: [null] }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ decks: [{ id: 'd1', name: 'Home', phrases: [] }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+    expect(parseLibraryFile(file({ decks: [{ ...decks[0], id: 7 }] }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ decks: [{ ...decks[0], name: null }] }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ decks: [{ ...decks[0], phrases: 'none' }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+    expect(parseLibraryFile(file({ decks: [{ ...decks[0], updatedAt: 'later' }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+  })
+
+  it('refuses a phrase that is not a phrase record', () => {
+    const withPhrase = (phrase: unknown) => file({ decks: [{ ...decks[0], phrases: [phrase] }] })
+    expect(parseLibraryFile(withPhrase({ id: 'p1', french: 'Bonjour', english: 'Hello' })).ok).toBe(true)
+    expect(parseLibraryFile(withPhrase(null))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(withPhrase({ id: 'p1', french: 'Bonjour' }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(withPhrase({ id: 'p1', french: 1, english: 'Hello' }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+  })
+
+  it('refuses a mix that is not a mix record', () => {
+    expect(parseLibraryFile(file({ mixes: [null] }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ mixes: [{ id: 'm1', name: 'Mornings', deckIds: [1], createdAt: 1, updatedAt: 1 }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+    expect(parseLibraryFile(file({ mixes: [{ id: 'm1', name: 'Mornings', createdAt: 1, updatedAt: 1 }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+  })
+
+  it('refuses a tombstone that is not a tombstone record', () => {
+    expect(parseLibraryFile(file({ tombstones: [null] }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ tombstones: [{ id: 'd1', kind: 'phrase', deletedAt: 2 }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+    expect(parseLibraryFile(file({ tombstones: [{ id: 'd1', kind: 'deck' }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+    expect(parseLibraryFile(file({ tombstones: [{ id: 'd1', kind: 'mix', deletedAt: 2 }] })).ok).toBe(true)
+  })
+})
+
+describe('normalizeLibrary and the migration helpers — the version guard runs on every envelope (T070)', () => {
+  const fromTheFuture = (parts: Partial<Library>): Library => ({
+    format: LIBRARY_FORMAT,
+    schemaVersion: CURRENT_SCHEMA_VERSION + 1,
+    exportedAt: 1,
+    decks: [],
+    ...parts,
+  })
+
+  it('refuses a library from a newer build with no decks, instead of stamping it down to this version', () => {
+    expect(() => normalizeLibrary(fromTheFuture({}))).toThrow(/newer/)
+  })
+
+  it('refuses a newer build\'s decks, mixes and tombstones by the same guard', () => {
+    expect(() => migrateLibraryDecks(fromTheFuture({}))).toThrow(/newer/)
+    expect(() => migrateLibraryMixes(fromTheFuture({}))).toThrow(/newer/)
+    expect(() => migrateLibraryTombstones(fromTheFuture({}))).toThrow(/newer/)
+  })
+
+  it('refuses a schema version that was never written', () => {
+    const impossible: Library = { ...fromTheFuture({}), schemaVersion: 0 }
+    expect(() => normalizeLibrary(impossible)).toThrow(/schema version/)
+    expect(() => migrateLibraryDecks(impossible)).toThrow(/schema version/)
+    expect(() => migrateLibraryMixes(impossible)).toThrow(/schema version/)
+    expect(() => migrateLibraryTombstones(impossible)).toThrow(/schema version/)
+  })
+
+  it('still normalizes an empty library at a version this build wrote', () => {
+    const empty: Library = { format: LIBRARY_FORMAT, schemaVersion: 1, exportedAt: 3, decks: [] }
+
+    expect(normalizeLibrary(empty)).toEqual({
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 3,
+      decks: [],
+      mixes: [],
+      tombstones: [],
+    })
+  })
+})
+
 describe('backupFilename', () => {
   it('names the file with the app name and the export date, so it is identifiable months later', () => {
     expect(backupFilename(new Date('2026-08-02T14:23:00Z'))).toBe('phrase-drill-backup-2026-08-02.json')
@@ -241,13 +384,27 @@ describe('the pinned voice on the envelope (T067)', () => {
     expect(normalizeLibrary(wrong).voice).toBeUndefined()
   })
 
+  /**
+   * A restorable file, i.e. one holding something to restore. `base` is empty,
+   * and since T070 an envelope with no Decks, Mixes *or* Tombstones is refused
+   * as `empty` rather than parsed — restore clears all three stores first, so
+   * a truncated file would otherwise cost her everything she still has. What
+   * these two tests pin is the VOICE surviving the round trip, so they carry a
+   * Deck to get past that guard; they are not a statement that an empty file
+   * should parse.
+   */
+  const restorable: Library = {
+    ...base,
+    decks: [{ id: 'd1', name: 'Marché', createdAt: 1, updatedAt: 2, phrases: [] }],
+  }
+
   it('accepts a backup file that carries a voice', () => {
-    const result = parseLibraryFile(JSON.stringify({ ...base, voice: VOICE }))
-    expect(result).toEqual({ ok: true, library: { ...base, voice: VOICE } })
+    const result = parseLibraryFile(JSON.stringify({ ...restorable, voice: VOICE }))
+    expect(result).toEqual({ ok: true, library: { ...restorable, voice: VOICE } })
   })
 
   it('accepts an older backup file with no voice field — absent means "no voice recorded", never "invalid file"', () => {
-    const result = parseLibraryFile(JSON.stringify(base))
+    const result = parseLibraryFile(JSON.stringify(restorable))
     expect(result.ok).toBe(true)
   })
 
