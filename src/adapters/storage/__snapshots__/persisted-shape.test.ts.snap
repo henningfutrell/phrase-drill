@@ -15,3 +15,15 @@ exports[`persisted DeckRecord/PhraseRecord shape > pins the exact field names an
   "updatedAt": "number",
 }
 `;
+
+exports[`persisted MixRecord shape > pins the exact field names and types written to IndexedDB and to the export file 1`] = `
+{
+  "createdAt": "number",
+  "deckIds": [
+    "string",
+  ],
+  "id": "string",
+  "name": "string",
+  "updatedAt": "number",
+}
+`;

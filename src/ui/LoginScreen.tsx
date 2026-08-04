@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import type { LoginResult } from '../adapters/auth/session-auth'
+import '../styles/tokens.css'
+import './LoginScreen.css'
 
 const ERROR_COPY = "That didn't work — check the username and password and try again."
 
@@ -28,32 +30,42 @@ export function LoginScreen({ onLogin }: { onLogin: (username: string, password:
   }
 
   return (
-    <form onSubmit={handleSubmit}>
-      <h1>Log in</h1>
-      <label>
-        Username
-        <input
-          data-testid="login-username"
-          type="text"
-          autoComplete="username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-        />
-      </label>
-      <label>
-        Password
-        <input
-          data-testid="login-password"
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-      </label>
-      {error ? <p data-testid="login-error">{ERROR_COPY}</p> : null}
-      <button data-testid="login-submit" type="submit" disabled={submitting}>
-        Log in
-      </button>
-    </form>
+    <main className="login-screen lace-veil">
+      <form className="login-card" onSubmit={handleSubmit}>
+        <div className="login-crest">
+          <h1 className="login-title">Log in</h1>
+        </div>
+        <label className="login-field">
+          <span className="login-label">Username</span>
+          <input
+            className="login-input"
+            data-testid="login-username"
+            type="text"
+            autoComplete="username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+        </label>
+        <label className="login-field">
+          <span className="login-label">Password</span>
+          <input
+            className="login-input"
+            data-testid="login-password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        {error ? (
+          <p className="login-error" data-testid="login-error">
+            {ERROR_COPY}
+          </p>
+        ) : null}
+        <button className="btn-primary login-submit" data-testid="login-submit" type="submit" disabled={submitting}>
+          Log in
+        </button>
+      </form>
+    </main>
   )
 }

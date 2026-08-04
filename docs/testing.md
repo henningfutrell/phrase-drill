@@ -68,6 +68,7 @@ argument for lowering has to be made explicitly in the commit message.
 |---|---|---|---|
 | 2026-08-02 | 82 | 82.74% | the baseline the gate arrived at |
 | 2026-08-03 | 95 | 100.00% | T044/T045 killed every survivor |
+| 2026-08-03 | 95 | 100.00% | T060 added `library-merge.ts`; 63 new mutants, all killed |
 
 It is deliberately **not 100**, even though the domain measures 100.00% over
 three runs. Four to five of the 151 mutants are killed by *timeout*, and a

@@ -1,15 +1,19 @@
 import type { Language } from '../../domain'
 
 /**
- * The pinned voice, as read from settings (`SettingsStore.Voice`, minus the
- * `provider` field this module has no use for — it always speaks through
- * this server's `/api/tts`, which is itself ElevenLabs-backed today).
+ * The pinned voice, as read from settings (`SettingsStore.Voice`).
  * Passed in by the caller rather than read from settings here: the caller
- * (the clip cache, later) already needs the voice to build its
- * content-address, so this module stays a pure "given these bytes, hit the
- * endpoint" seam with no settings access of its own.
+ * (the clip cache) already needs the voice to build its content-address, so
+ * this module stays a pure "given these bytes, hit the endpoint" seam with
+ * no settings access of its own.
+ *
+ * `provider` is carried again as of T063. It used to be dropped here — the
+ * ElevenLabs call has no use for it — but the server now derives the shared
+ * Clip store's content address from the same five fields the device does,
+ * and `provider` is one of them.
  */
 export interface SynthVoice {
+  readonly provider: string
   readonly modelId: string
   readonly voiceId: string
 }
@@ -51,15 +55,17 @@ export interface ServerSynthClientDeps {
  * `generation-queue.ts`, `drill-readiness.ts`, `clip-player.ts` are all
  * untouched).
  *
- * `lang` is accepted for interface symmetry with the vision adapter — the
- * server-side ElevenLabs call still doesn't need it (see the provider's own
- * comment for why).
+ * `lang` goes on the wire as of T063. The ElevenLabs call still does not
+ * need it, but the server derives the shared Clip store's content address
+ * from `provider|modelId|voiceId|lang|text` — the exact material
+ * `clip-cache.ts` uses — and cannot name the clip this device is asking for
+ * without every field of it.
  */
 export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClient {
   const fetchImpl = deps.fetchImpl ?? fetch
 
   return {
-    async synthesize(text, _lang, voice, signal) {
+    async synthesize(text, lang, voice, signal) {
       const accessToken = await deps.getAccessToken()
 
       let response: Response
@@ -71,7 +77,7 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
             'content-type': 'application/json',
             authorization: `Bearer ${accessToken}`,
           },
-          body: JSON.stringify({ text, voiceId: voice.voiceId, modelId: voice.modelId }),
+          body: JSON.stringify({ text, voiceId: voice.voiceId, modelId: voice.modelId, provider: voice.provider, lang }),
         })
       } catch (err) {
         return Promise.reject(networkError(describe(err)))
