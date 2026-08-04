@@ -927,3 +927,139 @@ describe('createSyncEngine — a server copy the server itself cannot read (T089
     expect(h.scheduler.pending).toEqual([])
   })
 })
+
+/**
+ * The repair licensed by T089 needs something to repair WITH (T094).
+ *
+ * `server-copy-unreadable` was handled exactly like `not-found`: `remote`
+ * stays undefined and what goes up is whatever this device holds — including
+ * nothing at all. A fresh install, a wiped phone or a reinstall pulls the 500
+ * on its FIRST launch sync, pushes an empty library, and replaces the row.
+ *
+ * T089's claim was that "nothing readable is discarded". That is a true
+ * statement about `mergeLibraries` and it is NOT the statement that matters:
+ * a row can fail the server's `isLibraryEnvelope` check on `format`,
+ * `schemaVersion` or the shape of `mixes`/`tombstones`/`voice` while still
+ * carrying every Deck she has. The new-phone case is precisely the case where
+ * this device has the least to offer and the row has the most to lose.
+ *
+ * So the licence is conditional on this device holding a record of hers.
+ * Empty means no Deck and no Mix — a pinned voice is a preference, not her
+ * handwriting, and it must not buy the right to overwrite Decks.
+ */
+describe('createSyncEngine — an empty device may not repair a poisoned row (T094)', () => {
+  it('refuses to push an empty library over a row the server reports as unreadable', async () => {
+    const server = createFakeServer()
+    const h = createHarness({ local: library([]), server })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    expect(server.pushes).toEqual([])
+  })
+
+  it('keeps trying, so a row a human repairs is picked up without her doing anything', async () => {
+    const server = createFakeServer()
+    const h = createHarness({ local: library([]), server })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    // 'waiting' says her phrases are still here and this will be retried,
+    // which is exactly true: nothing of hers is on this phone to lose, and the
+    // moment the row is readable again the pull brings her library down.
+    expect(h.engine.snapshot().state).toBe('waiting')
+    expect(h.scheduler.pending).not.toEqual([])
+    expect(h.engine.snapshot().lastSyncAt).toBeNull()
+  })
+
+  it('repairs the row the instant this phone holds one Deck — the way forward for a device that was empty', async () => {
+    const server = createFakeServer()
+    const h = createHarness({ local: library([]), server })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+    expect(server.pushes).toEqual([])
+
+    // She adds a phrase, or restores from a backup file. Either way this phone
+    // now holds something, and the same round-trip repairs the row.
+    h.setLocal(library([deck('d1', 'Home')]))
+    h.engine.syncNow()
+    await settle()
+
+    expect(server.pushes).toHaveLength(1)
+    expect(server.pushes[0]!.decks.map((d) => d.name)).toEqual(['Home'])
+  })
+
+  it('counts a saved Mix as something to repair with — a Mix is hers too', async () => {
+    const server = createFakeServer()
+    const h = createHarness({
+      local: { ...library([]), mixes: [{ id: 'm1', name: 'Morning', deckIds: [], createdAt: 1, updatedAt: 1 }] },
+      server,
+    })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    expect(server.pushes).toHaveLength(1)
+  })
+
+  it('does not count a pinned voice — a preference must not buy the right to overwrite Decks', async () => {
+    const server = createFakeServer()
+    const h = createHarness({
+      local: { ...library([]), voice: { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' } },
+      server,
+    })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    expect(server.pushes).toEqual([])
+  })
+
+  it('does not count a Tombstone — a device holding only deletions has no phrase to put back', async () => {
+    const server = createFakeServer()
+    const h = createHarness({
+      local: { ...library([]), tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 500 }] },
+      server,
+    })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    expect(server.pushes).toEqual([])
+  })
+
+  it('leaves the T089 case untouched: a phone with her library still repairs the row on its own', async () => {
+    const server = createFakeServer()
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    expect(server.pushes).toHaveLength(1)
+    expect(h.engine.snapshot().state).toBe('idle')
+    expect(h.scheduler.pending).toEqual([])
+  })
+
+  it('still pushes an empty library when the server holds nothing at all — the guard is only about a row that exists', async () => {
+    const server = createFakeServer()
+    const h = createHarness({ local: library([]), server })
+
+    h.engine.start()
+    await settle()
+
+    // `not-found` is nobody has ever pushed. There is no row, so there is
+    // nothing an empty push can replace, and refusing here would leave a first
+    // sync that never completes.
+    expect(server.pushes).toHaveLength(1)
+    expect(h.engine.snapshot().state).toBe('idle')
+  })
+})
