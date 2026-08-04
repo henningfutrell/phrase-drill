@@ -513,6 +513,25 @@ already-deployed database on its next restart with no manual step:
   octet_length(bytes) WHERE byte_size IS NULL`. The backfill matches every
   pre-T071 row on the first boot and nothing on every boot after it.
 
+**Verifying the SQL before it reaches her.** Every other server test runs
+against `db.test.js`'s `fakePool`, which proves this code issues the SQL it
+means to and proves nothing about whether Postgres accepts it — `app.test.js`
+uses the same fake, so it is not independent evidence either. The dialect
+(`ANY($1::bigint[])`, `octet_length`, `ADD COLUMN IF NOT EXISTS`, the
+`byte_size` backfill) is verified by `server/db.postgres.test.js` against a
+live server, including the real upgrade path: a `clips` table created without
+`byte_size`, with rows already in it, then migrated. It is opt-in and skips
+when unset, because an unavailable database is a missing environment, not a
+broken change:
+
+```sh
+docker compose up -d postgres
+# a scratch database this may DROP tables in — never the real one
+SMOKE_DATABASE_URL=postgres://user:pass@host:5432/scratch npm test
+```
+
+Run it after any change to `server/db.js`'s SQL.
+
 **How a future schema change is applied to a running deployment:** this
 server has no migration runner (`node-pg-migrate`, `Flyway`, etc.) — adding
 one is future work if `init()`'s `IF NOT EXISTS` approach stops being enough

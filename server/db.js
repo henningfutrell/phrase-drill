@@ -16,9 +16,14 @@ const { Pool } = pg
  * `createLibraryStore` takes an already-constructed pool (or, in tests, a
  * fake with the same `query`/`end` shape) rather than a connection string,
  * so the SQL and its mapping to `{data, updatedAt}` can be pinned in a unit
- * test with no live database — see `db.test.js`'s `fakePool`. The real
- * driver, a real Postgres, and this SQL agreeing is what `server/app.test.js`
- * plus the live `docker compose` verification prove.
+ * test with no live database — see `db.test.js`'s `fakePool`.
+ *
+ * A fake proves this code calls the SQL it means to. It cannot prove Postgres
+ * accepts that SQL, and `app.test.js` cannot either — it uses the same fake,
+ * so citing it here was circular. `db.postgres.test.js` is the one that runs
+ * against a live server, opt-in via `SMOKE_DATABASE_URL`, and it is where the
+ * dialect (`ANY($1::bigint[])`, `octet_length`, the `byte_size` backfill) is
+ * actually verified.
  */
 export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, versionMaxBytes } = {}) {
   const intervalMs = snapshotIntervalMs ?? LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS
