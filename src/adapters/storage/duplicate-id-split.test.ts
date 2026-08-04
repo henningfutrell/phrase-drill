@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DeckRecord, Library, MixRecord } from '../../domain'
-import { LIBRARY_FORMAT } from '../../domain'
+import type { DeckRecord, Library, MixRecord, Tombstone } from '../../domain'
+import { LIBRARY_FORMAT, mergeLibraries } from '../../domain'
 import { resetFakeIdb } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 import { createIndexedDbMixStore } from './indexed-db-mix-store'
@@ -42,14 +42,14 @@ function mixRecord(id: string, name: string, deckIds: string[] = ['d1']): MixRec
   return { id, name, deckIds, createdAt: 1_000, updatedAt: 2_000 }
 }
 
-function library(parts: { decks?: DeckRecord[]; mixes?: MixRecord[] }): Library {
+function library(parts: { decks?: DeckRecord[]; mixes?: MixRecord[]; tombstones?: Tombstone[] }): Library {
   return {
     format: LIBRARY_FORMAT,
     schemaVersion: CURRENT_SCHEMA_VERSION,
     exportedAt: 5_000,
     decks: parts.decks ?? [],
     mixes: parts.mixes ?? [],
-    tombstones: [],
+    tombstones: parts.tombstones ?? [],
   }
 }
 
@@ -194,6 +194,136 @@ describe('two records under one id survive the store (T090)', () => {
 
       expect(result.changed).toBe(false)
       expect((await store.loadAll()).map((deck) => deck.id)).toEqual(['d1'])
+    })
+  })
+})
+
+/**
+ * The split must not land on an id a Tombstone claims (T093).
+ *
+ * T090's split skips a candidate the library's own Decks or Mixes already
+ * hold. It does not look at the Tombstones — and it runs AFTER
+ * `mergeLibraries` has filtered them against the surviving ids, so a Tombstone
+ * for `${id}-2` is still live at the instant the split mints that exact name.
+ *
+ * That library is written to disk, pushed, and written into the Sync Baseline.
+ * On the NEXT merge the split record is unchanged from the baseline, so
+ * `rewritten` is false, `isDeleted` fires on the Tombstone's clock, and the
+ * record — with every Phrase in it — is deleted silently. One round shows only
+ * a surprising id; it takes two to see the Deck disappear.
+ *
+ * This is reachable from T090's own design, not from a contrived file: the
+ * split leaves her two Decks to "merge or delete herself, in one tap", and
+ * deleting the split one writes a Tombstone for `${id}-2`. A duplicate of the
+ * original arriving again re-mints that name.
+ *
+ * The fix seeds the split's taken ids with the Tombstones of the matching
+ * `kind`, so `${id}-2` is skipped exactly as an id in use is. Kind, because
+ * that is what `mergeLibraries` namespaces deletion by (`key(kind, id)`): a
+ * Deck's Tombstone can never delete a Mix, so it must never block a Mix's
+ * split either.
+ */
+describe('a split never lands on an id a Tombstone claims (T093)', () => {
+  beforeEach(() => {
+    resetFakeIdb()
+    vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
+  })
+
+  const deckTombstone: Tombstone = { id: 'd1-2', kind: 'deck', deletedAt: 9_000 }
+  const mixTombstone: Tombstone = { id: 'm1-2', kind: 'mix', deletedAt: 9_000 }
+
+  const home = () => deckRecord('d1', 'Home', [phrase('p1', 'Bonjour', 'Hello')])
+  const work = () => deckRecord('d1', 'Work', [phrase('p2', 'Merci', 'Thank you')])
+
+  describe('updateAll — the write-back of the merged library', () => {
+    it('skips a candidate id a live Deck Tombstone names', async () => {
+      const store = createIndexedDbDeckStore()
+
+      const result = await store.updateAll(() =>
+        library({ decks: [home(), work()], tombstones: [deckTombstone] }),
+      )
+
+      expect(result.library.decks.map((deck) => deck.id)).toEqual(['d1', 'd1-3'])
+      expect(result.library.decks.map((deck) => deck.name)).toEqual(['Home', 'Work'])
+    })
+
+    it('keeps the split Deck through a SECOND round-trip, instead of its own Tombstone deleting it', async () => {
+      const store = createIndexedDbDeckStore()
+      // She split a duplicate of `d1` once before and deleted the copy: a live
+      // Tombstone for `d1-2`, which is what T090's design produces.
+      await store.importAll(library({ decks: [home()], tombstones: [deckTombstone] }))
+
+      // A duplicate of `d1` arrives from the server again.
+      const remote = library({ decks: [home(), work()], tombstones: [deckTombstone] })
+      const first = await store.updateAll((stored) => mergeLibraries(stored, remote, undefined))
+
+      // The push succeeded, so the server holds `first.library` and so does the
+      // Sync Baseline. The next round-trip merges against both.
+      const second = await store.updateAll((stored) => mergeLibraries(stored, first.library, first.library))
+
+      expect(second.library.decks.map((deck) => deck.name)).toEqual(['Home', 'Work'])
+      expect((await store.loadAll()).flatMap((deck) => deck.phrases.map((p) => p.french))).toEqual([
+        'Bonjour',
+        'Merci',
+      ])
+    })
+
+    it('skips a candidate id a live Mix Tombstone names, and keeps the Mix through a second round-trip', async () => {
+      const deckStore = createIndexedDbDeckStore()
+      const mixStore = createIndexedDbMixStore()
+      await deckStore.importAll(
+        library({ decks: [home()], mixes: [mixRecord('m1', 'Morning')], tombstones: [mixTombstone] }),
+      )
+
+      const remote = library({
+        decks: [home()],
+        mixes: [mixRecord('m1', 'Morning'), mixRecord('m1', 'Evening')],
+        tombstones: [mixTombstone],
+      })
+      const first = await deckStore.updateAll((stored) => mergeLibraries(stored, remote, undefined))
+      expect(first.library.mixes?.map((mix) => mix.id)).toEqual(['m1', 'm1-3'])
+
+      const second = await deckStore.updateAll((stored) => mergeLibraries(stored, first.library, first.library))
+
+      expect(second.library.mixes?.map((mix) => mix.name)).toEqual(['Morning', 'Evening'])
+      expect((await mixStore.loadAll()).map((mix) => mix.name)).toEqual(['Morning', 'Evening'])
+    })
+
+    it('is not blocked by a Tombstone of the OTHER kind — deletion is namespaced by kind', async () => {
+      const store = createIndexedDbDeckStore()
+
+      const result = await store.updateAll(() =>
+        library({ decks: [home(), work()], tombstones: [{ id: 'd1-2', kind: 'mix', deletedAt: 9_000 }] }),
+      )
+
+      expect(result.library.decks.map((deck) => deck.id)).toEqual(['d1', 'd1-2'])
+    })
+  })
+
+  describe('importAll — a restore file that carries its own Tombstones', () => {
+    it('skips a candidate id a Tombstone in the same file names', async () => {
+      const store = createIndexedDbDeckStore()
+
+      await store.importAll(library({ decks: [home(), work()], tombstones: [deckTombstone] }))
+
+      const stored = await store.loadAll()
+      expect(stored.map((deck) => deck.id)).toEqual(['d1', 'd1-3'])
+      expect(stored.map((deck) => deck.name)).toEqual(['Home', 'Work'])
+    })
+
+    it('skips a candidate id a Mix Tombstone in the same file names', async () => {
+      const deckStore = createIndexedDbDeckStore()
+      const mixStore = createIndexedDbMixStore()
+
+      await deckStore.importAll(
+        library({
+          decks: [home()],
+          mixes: [mixRecord('m1', 'Morning'), mixRecord('m1', 'Evening')],
+          tombstones: [mixTombstone],
+        }),
+      )
+
+      expect((await mixStore.loadAll()).map((mix) => mix.id)).toEqual(['m1', 'm1-3'])
     })
   })
 })

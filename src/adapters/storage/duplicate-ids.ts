@@ -1,4 +1,4 @@
-import type { DeckRecord, Library, MixRecord } from '../../domain'
+import type { DeckRecord, Library, MixRecord, Tombstone } from '../../domain'
 
 /**
  * Give every Deck and every Mix in a library an id of its own, splitting a
@@ -48,8 +48,9 @@ import type { DeckRecord, Library, MixRecord } from '../../domain'
  *
  * ## The new id
  *
- * `${id}-2`, `${id}-3`, … skipping any candidate the library already holds.
- * Two properties matter and both are load-bearing:
+ * `${id}-2`, `${id}-3`, … skipping any candidate the library already holds
+ * **or has a Tombstone for** (T093). Three properties matter and all three are
+ * load-bearing:
  *
  * - **Deterministic.** The same library splits the same way every time, so the
  *   split converges. A fresh uuid per pass would mint another Deck on every
@@ -57,6 +58,42 @@ import type { DeckRecord, Library, MixRecord } from '../../domain'
  * - **Never a collision.** A candidate already in use is skipped, so splitting
  *   can never itself overwrite a record — which would be the defect again,
  *   caused by its own fix.
+ * - **Never a name a Tombstone claims.** This was missing, and it lost a whole
+ *   Deck (T093). A Tombstone for `${id}-2` is exactly what this module's own
+ *   design produces: she is left two Decks to "merge or delete herself, in one
+ *   tap", and deleting the split one writes a Tombstone under the split id. If
+ *   a duplicate of `id` then arrives again, the split re-mints `${id}-2`.
+ *
+ *   The split runs AFTER `mergeLibraries` has filtered Tombstones against the
+ *   surviving ids, so nothing held `${id}-2` at the moment of the filter and
+ *   the Tombstone was kept. The split then names a record `${id}-2`, and that
+ *   library is written to disk, pushed, and written into the Sync Baseline. On
+ *   the NEXT merge the record is unchanged from the baseline, so `rewritten`
+ *   is false, `isDeleted` fires on the Tombstone's clock, and the record —
+ *   with every Phrase in it — is deleted silently. One round-trip shows only a
+ *   surprising id; the second shows the Deck go.
+ *
+ *   Skipping the name costs one candidate and nothing else. The Tombstone is
+ *   left where it is: it names a record that does not exist, which is inert,
+ *   and dropping it here would mean this module deciding a deletion — the
+ *   merge's job, from an input it does not have.
+ *
+ *   **Matched by `kind`**, because `kind` is what `mergeLibraries` namespaces
+ *   deletion by (`key(kind, id)`): a Deck's Tombstone can never delete a Mix,
+ *   so it must never block a Mix's split either. The `tombstones` store is
+ *   keyed on `id` alone, so two Tombstones of different `kind` under one id
+ *   still collapse there — a pre-existing, documented shortcoming (see the
+ *   note below and `docs/sync.md`), not one this widens.
+ *
+ * **Moving the split into `mergeLibraries` instead was considered and
+ * rejected.** It would put the filter after the final ids, which fixes the
+ * write-back — and nothing else. `importAll` never calls the merge, so the
+ * restore path (a hand-edited file carrying both the duplicate and its own
+ * Tombstones) would stay broken while looking fixed. It would also move a
+ * store concern — ids collapsing under `{ keyPath: 'id' }` — into the pure
+ * domain, which by `AGENTS.md` may not know what IndexedDB does with a key.
+ * Seeding the candidates here fixes both call sites, in the one module that
+ * exists because of the store's key.
  *
  * Derived from the id it duplicated, so the two are recognisably one id that
  * was split rather than two unrelated Decks.
@@ -82,21 +119,32 @@ import type { DeckRecord, Library, MixRecord } from '../../domain'
  * Pure: no I/O, no clock, and the input is not mutated.
  */
 export function splitDuplicateIds(library: Library): Library {
+  const tombstones = library.tombstones ?? []
   return {
     ...library,
-    decks: splitIds<DeckRecord>(library.decks),
-    mixes: splitIds<MixRecord>(library.mixes ?? []),
+    decks: splitIds<DeckRecord>(library.decks, claimedBy('deck', tombstones)),
+    mixes: splitIds<MixRecord>(library.mixes ?? [], claimedBy('mix', tombstones)),
   }
+}
+
+/** The ids this library's Tombstones of one kind name — see "The new id". */
+function claimedBy(kind: Tombstone['kind'], tombstones: readonly Tombstone[]): Set<string> {
+  const claimed = new Set<string>()
+  for (const tombstone of tombstones) if (tombstone.kind === kind) claimed.add(tombstone.id)
+  return claimed
 }
 
 /**
  * Every record, in order, with the second and later holder of any id moved to
  * one of its own. The first holder keeps the id: something has to, and keeping
  * the first is what makes an ordinary library — where nothing is duplicated —
- * pass through untouched.
+ * pass through untouched. That holds even where a Tombstone names its id: a
+ * record that is already there is not renamed to dodge a deletion, because
+ * whether that deletion applies is `mergeLibraries`' judgement, not this
+ * module's. Only a NEW name has to avoid a claimed one.
  */
-function splitIds<T extends { readonly id: string }>(records: readonly T[]): T[] {
-  const taken = new Set(records.map((record) => record.id))
+function splitIds<T extends { readonly id: string }>(records: readonly T[], claimed: ReadonlySet<string>): T[] {
+  const taken = new Set([...records.map((record) => record.id), ...claimed])
   const seen = new Set<string>()
 
   return records.map((record) => {
@@ -111,7 +159,10 @@ function splitIds<T extends { readonly id: string }>(records: readonly T[]): T[]
   })
 }
 
-/** The first `${id}-n`, from 2 up, that nothing in this library already holds. */
+/**
+ * The first `${id}-n`, from 2 up, that nothing in this library already holds
+ * and no Tombstone of the same kind claims.
+ */
 function nextFreeId(id: string, taken: ReadonlySet<string>): string {
   let n = 2
   while (taken.has(`${id}-${n}`)) n += 1
