@@ -15,7 +15,8 @@ import type {
   Translator,
 } from './domain'
 import { LIBRARY_FORMAT } from './domain'
-import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore, Voice } from './adapters/storage'
+import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore } from './adapters/storage'
+import type { Voice } from './domain'
 import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry } from './adapters/diagnostics'

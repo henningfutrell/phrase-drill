@@ -28,6 +28,8 @@ export type {
   Translator,
 } from './ports'
 export { LIBRARY_FORMAT } from './ports'
+export type { Voice } from './voice'
+export { isVoice } from './voice'
 export { mergeLibraries } from './library-merge'
 export type { Mix, MixId } from './mix'
 export { createMix, renameMix, setMixDecks, resolveMixDecks, resolveMixPhrases } from './mix'

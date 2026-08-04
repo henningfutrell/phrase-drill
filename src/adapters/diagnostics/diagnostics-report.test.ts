@@ -35,6 +35,7 @@ function fakeSettingsStore(overrides: Partial<Settings> = {}): SettingsStore {
       return settings
     },
     async setVoice() {},
+    async adoptVoice() {},
     async recordSync() {},
     async recordExport() {},
   }

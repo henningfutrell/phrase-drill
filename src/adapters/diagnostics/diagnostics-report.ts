@@ -1,5 +1,7 @@
 import type { DeckStore } from '../../domain'
-import type { ClipCache, SettingsStore, Voice } from '../storage'
+import type { Voice } from '../../domain'
+import type { ClipCache, SettingsStore } from '../storage'
+import { knownVoices } from '../audio/voice-catalogue'
 import type { BuildInfo } from './build-info'
 import type { ErrorLog, LogEntry } from './error-log'
 import type { StorageEstimateResult } from './storage-estimate'
@@ -53,7 +55,12 @@ export async function collectDiagnostics(deps: CollectDiagnosticsDeps): Promise<
   ])
 
   const phrases = decks.flatMap((d) => d.phrases)
-  const clipsReady = settings.voice ? (await clipCache.readyPhraseIds(phrases, settings.voice)).size : 0
+  // Over every voice a Clip could be in, not only the pinned one (T067):
+  // this number has to be the one the drill acts on, or a report reads
+  // "0 of 200 ready" about a library that drills perfectly.
+  const clipsReady = settings.voice
+    ? (await clipCache.readyPhraseIds(phrases, knownVoices(settings.voice))).size
+    : 0
 
   return {
     build: getBuildInfo(),
