@@ -1,37 +1,35 @@
 #!/usr/bin/env node
 /**
- * Logical backup (T054): `pg_dump` the database named by `DATABASE_URL`,
- * gzip it, ship it to `BACKUP_DEST` — off this platform, never a second
- * disk on the same host — and prune anything older than
- * `BACKUP_RETENTION_DAYS`. See `docs/backup.md` for the full runbook,
- * including why Render's 3-day point-in-time recovery does not cover the
- * failure this exists for ("she deleted a deck five weeks ago").
+ * MANUAL logical export (T054, re-scoped T065).
+ *
+ * WHAT THIS IS: an on-demand export a human runs to pull a copy of her
+ * phrase library off the platform and onto a machine they control.
+ * `pg_dump` the database named by `DATABASE_URL`, gzip it, write it into
+ * the directory named by `BACKUP_DEST`, and prune anything there older than
+ * `BACKUP_RETENTION_DAYS`. You run it; nothing runs it for you.
+ *
+ * WHAT THIS IS NOT: the scheduled off-site backup. That is Render's
+ * managed Postgres, whose own backups are the primary mechanism — which is
+ * why `render.yaml` pays for `basic-256mb` instead of the free tier that
+ * has no backups at all. This script does not replace it, is not
+ * scheduled, and writing it to a directory on the Render container would
+ * be worthless: that filesystem evaporates on the next redeploy. Point
+ * `BACKUP_DEST` at a machine you own. See `docs/backup.md`.
  *
  * Every step fails loudly: a non-zero exit and a logged `error`, never a
- * swallowed exception. A backup job that fails silently is worse than none.
+ * swallowed exception. An export that fails silently is worse than none.
  *
  * Env:
  *   DATABASE_URL          required. Same variable the server itself reads.
- *   BACKUP_DEST            required. `s3://bucket[/prefix]` or a local
- *                          directory path (the latter is for the restore
- *                          drill and local testing — see docs/backup.md;
- *                          production always uses `s3://`).
- *   BACKUP_S3_ENDPOINT     required when BACKUP_DEST is `s3://` and the
- *                          bucket lives on an S3-compatible provider other
- *                          than AWS itself (e.g. Backblaze B2). Passed to
- *                          `aws s3` as `--endpoint-url`.
- *   BACKUP_S3_REGION       required alongside BACKUP_S3_ENDPOINT for
- *                          providers whose S3-compatible API needs an
- *                          explicit region (Backblaze B2 does; plain AWS S3
- *                          does not need this set). Passed as `--region`.
+ *   BACKUP_DEST            required. A local directory path, created if it
+ *                          does not exist. Not a URI — there is no bucket
+ *                          destination, and a `<scheme>://` value is
+ *                          refused rather than taken literally.
  *   BACKUP_RETENTION_DAYS  optional, default 180 — see docs/backup.md for
  *                          the reasoning.
- *   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY — read by the `aws` CLI
- *                          itself; this script never touches them directly
- *                          beyond redacting the secret out of its own logs.
  *
- * Requires `pg_dump` and, for an `s3://` destination, the `aws` CLI on
- * PATH — see docs/backup.md for what to install where this runs.
+ * Requires `pg_dump` on PATH — see docs/backup.md for what to install
+ * where this runs.
  */
 import { spawn } from 'node:child_process'
 import { createGzip } from 'node:zlib'
@@ -67,53 +65,22 @@ export function selectExpiredBackups(names, retentionDays, now = new Date()) {
   })
 }
 
-export function parseDestination(dest) {
-  if (dest.startsWith('s3://')) {
-    const rest = dest.slice('s3://'.length)
-    const slash = rest.indexOf('/')
-    if (slash === -1) return { kind: 's3', bucket: rest, prefix: '' }
-    return { kind: 's3', bucket: rest.slice(0, slash), prefix: rest.slice(slash + 1) }
-  }
-  return { kind: 'local', dir: dest }
-}
-
-function s3Key(dest, filename) {
-  return dest.prefix ? `${dest.prefix}/${filename}` : filename
-}
-
-function s3Uri(dest, filename) {
-  return `s3://${dest.bucket}/${s3Key(dest, filename)}`
-}
+const URI_SCHEME = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//
 
 /**
- * Pure and exported so the region/endpoint forwarding is testable without a
- * real `aws` invocation. `env` defaults to `process.env` for every real call
- * site; tests pass a plain object instead.
+ * The destination is a directory on a machine a human controls, and nothing
+ * else. A `<scheme>://` value is refused rather than taken as a literal
+ * directory name: `s3://bucket` used to mean something here, and silently
+ * creating `./s3:/bucket` instead would look like a successful export.
  */
-export function awsArgs(extra, env = process.env) {
-  let args = extra
-  if (env.BACKUP_S3_ENDPOINT) args = [...args, '--endpoint-url', env.BACKUP_S3_ENDPOINT]
-  // Backblaze B2's S3-compatible API (the recommended destination, see
-  // docs/backup.md — chosen because, unlike Cloudflare R2, its free tier
-  // needs no card on file) requires an explicit region alongside the
-  // endpoint; plain AWS S3 infers it and never needs this set.
-  if (env.BACKUP_S3_REGION) args = [...args, '--region', env.BACKUP_S3_REGION]
-  return args
-}
-
-function run(command, args, { env } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env: env ?? process.env, stdio: ['ignore', 'ignore', 'pipe'] })
-    let stderr = ''
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(`${command} exited ${code}: ${stderr.trim()}`))
-    })
-  })
+export function resolveDestinationDir(dest) {
+  const scheme = URI_SCHEME.exec(dest)
+  if (scheme) {
+    throw new Error(
+      `BACKUP_DEST must be a local directory path, not "${scheme[1]}://..." — this script writes to a directory on the machine that runs it (docs/backup.md)`,
+    )
+  }
+  return dest
 }
 
 async function dumpAndCompress({ databaseUrl, outFile }) {
@@ -159,53 +126,24 @@ async function dumpAndCompress({ databaseUrl, outFile }) {
   })
 }
 
-async function upload({ dest, localFile, filename, logger }) {
-  if (dest.kind === 's3') {
-    await run('aws', awsArgs(['s3', 'cp', localFile, s3Uri(dest, filename)]))
-  } else {
-    await mkdir(dest.dir, { recursive: true })
-    await copyFile(localFile, path.join(dest.dir, filename))
-  }
-  logger.info('backup: uploaded', { destination: dest.kind === 's3' ? s3Uri(dest, filename) : path.join(dest.dir, filename) })
+async function writeToDestination({ destDir, localFile, filename, logger }) {
+  await mkdir(destDir, { recursive: true })
+  const destination = path.join(destDir, filename)
+  await copyFile(localFile, destination)
+  logger.info('backup: written', { destination })
 }
 
-async function listExisting(dest) {
-  if (dest.kind === 's3') {
-    let out = ''
-    await new Promise((resolve, reject) => {
-      const child = spawn('aws', awsArgs(['s3', 'ls', `s3://${dest.bucket}/${dest.prefix ? dest.prefix + '/' : ''}`]), {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-      child.stdout.on('data', (c) => {
-        out += c.toString()
-      })
-      child.on('error', reject)
-      child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`aws s3 ls exited ${code}`))))
-    })
-    // `aws s3 ls` prints one line per object: "<date> <time> <size> <name>"
-    return out
-      .split('\n')
-      .map((line) => line.trim().split(/\s+/).pop())
-      .filter((name) => name && NAME_PATTERN.test(name))
-  }
-  const entries = await readdir(dest.dir).catch((err) => (err.code === 'ENOENT' ? [] : Promise.reject(err)))
+async function listExisting(destDir) {
+  const entries = await readdir(destDir).catch((err) => (err.code === 'ENOENT' ? [] : Promise.reject(err)))
   return entries.filter((name) => NAME_PATTERN.test(name))
 }
 
-async function deleteBackup(dest, name, logger) {
-  if (dest.kind === 's3') {
-    await run('aws', awsArgs(['s3', 'rm', s3Uri(dest, name)]))
-  } else {
-    await unlink(path.join(dest.dir, name))
-  }
-  logger.info('backup: pruned expired backup', { name })
-}
-
-async function applyRetention({ dest, retentionDays, logger }) {
-  const names = await listExisting(dest)
+async function applyRetention({ destDir, retentionDays, logger }) {
+  const names = await listExisting(destDir)
   const expired = selectExpiredBackups(names, retentionDays)
   for (const name of expired) {
-    await deleteBackup(dest, name, logger)
+    await unlink(path.join(destDir, name))
+    logger.info('backup: pruned expired backup', { name })
   }
   return expired
 }
@@ -216,25 +154,25 @@ export async function main() {
   const retentionDays = Number(process.env.BACKUP_RETENTION_DAYS ?? DEFAULT_RETENTION_DAYS)
 
   if (!databaseUrl) throw new Error('DATABASE_URL is required')
-  if (!destRaw) throw new Error('BACKUP_DEST is required (s3://bucket[/prefix] or a local directory)')
+  if (!destRaw) throw new Error('BACKUP_DEST is required (a local directory path)')
   if (!Number.isFinite(retentionDays) || retentionDays <= 0) throw new Error('BACKUP_RETENTION_DAYS must be a positive number')
 
   const { password } = parsePgUrl(databaseUrl)
-  const logger = createLogger({ secrets: [password, process.env.AWS_SECRET_ACCESS_KEY].filter(Boolean) })
+  const logger = createLogger({ secrets: [password].filter(Boolean) })
 
-  const dest = parseDestination(destRaw)
+  const destDir = resolveDestinationDir(destRaw)
   const filename = backupFileName()
   const tmpFile = path.join(os.tmpdir(), `phrase-drill-backup-${process.pid}-${Date.now()}.sql.gz`)
 
-  logger.info('backup: starting', { filename, destinationKind: dest.kind })
+  logger.info('backup: starting', { filename, destDir })
   try {
     await dumpAndCompress({ databaseUrl, outFile: tmpFile })
     const { size } = await stat(tmpFile)
     logger.info('backup: dump complete', { bytes: size })
 
-    await upload({ dest, localFile: tmpFile, filename, logger })
+    await writeToDestination({ destDir, localFile: tmpFile, filename, logger })
 
-    const pruned = await applyRetention({ dest, retentionDays, logger })
+    const pruned = await applyRetention({ destDir, retentionDays, logger })
     logger.info('backup: done', { filename, prunedCount: pruned.length })
   } catch (err) {
     logger.error('backup: failed', { error: err instanceof Error ? err.message : String(err) })
