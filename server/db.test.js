@@ -10,7 +10,9 @@ import {
   LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS,
   LIBRARY_VERSION_MAX_COUNT,
   LIBRARY_VERSION_MAX_BYTES,
+  LIBRARY_VERSION_RECENT_COUNT,
   DEFAULT_CLIP_STORE_MAX_BYTES,
+  clipStoreMaxBytesFrom,
 } from './db.js'
 import { fakeLibraryPool as fakePool, fakeClipPool } from './pool.test-support.js'
 
@@ -129,17 +131,39 @@ describe('createLibraryStore — version history (T071)', () => {
     expect(typeof versions[0].id).toBe('number')
   })
 
-  it('does not archive again within the snapshot interval, so a flood of pushes cannot flush the history', async () => {
+  it('a flood of pushes cannot flush the history — an interval collapses to the state it started in (T082)', async () => {
+    // T071's property, and it still holds. What moved is where the throttle
+    // is applied: every replaced version is archived, and RETENTION thins the
+    // aged rows to one per interval. Before T082 the throttle was on the
+    // write, which meant an hour of ordinary editing (the client debounces at
+    // 2 s) archived exactly one state — the oldest — and left everything she
+    // typed afterwards recoverable from nowhere.
+    const { store } = await newStore()
+    await store.put(KEY, '{"v":0}', 0, { now: 0 })
+    for (let i = 1; i <= 200; i += 1) {
+      await store.put(KEY, `{"v":${i}}`, i, { now: i })
+    }
+    // One more, an interval later, so the flood is fully aged.
+    await store.put(KEY, '{"v":999}', 999, { now: LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS * 2 })
+
+    const versions = await store.versions(KEY)
+    // The state before the flood started — the thing worth recovering — survives.
+    expect(versions.map((v) => v.data)).toContain('{"v":0}')
+    // And the flood did not consume the retention window.
+    expect(versions.length).toBeLessThan(LIBRARY_VERSION_RECENT_COUNT + 5)
+  })
+
+  it('keeps the newest LIBRARY_VERSION_RECENT_COUNT replaced versions however fast the pushes come (T082)', async () => {
     const { store } = await newStore()
     await store.put(KEY, '{"v":0}', 0, { now: 0 })
     for (let i = 1; i <= 200; i += 1) {
       await store.put(KEY, `{"v":${i}}`, i, { now: i })
     }
 
-    const versions = await store.versions(KEY)
-    expect(versions.length).toBe(1)
-    // The one kept is the state before the flood started — the thing worth recovering.
-    expect(versions[0].data).toBe('{"v":0}')
+    const kept = (await store.versions(KEY)).map((v) => v.data)
+    for (let i = 200 - LIBRARY_VERSION_RECENT_COUNT; i < 200; i += 1) {
+      expect(kept).toContain(`{"v":${i}}`)
+    }
   })
 
   it('takes a fresh snapshot once the interval has passed', async () => {
@@ -208,6 +232,9 @@ describe('createLibraryStore — version history (T071)', () => {
     expect(LIBRARY_VERSION_MAX_BYTES).toBe(32 * 1024 * 1024)
     expect(LIBRARY_VERSION_MAX_COUNT).toBe(72)
     expect(LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS).toBe(60 * 60 * 1000)
+    // T082: the newest N are exempt from interval thinning, so the version a
+    // wipe replaced is always still there even mid-interval.
+    expect(LIBRARY_VERSION_RECENT_COUNT).toBe(8)
   })
 
   it('keeps each key’s history to itself', async () => {
@@ -396,6 +423,66 @@ describe('createClipStore — the growth bound (T071)', () => {
     // more than either device can hold (200 MB ceiling, T036) — and leaves
     // ~65% of the disk for `libraries`, `library_versions`, WAL and overhead.
     expect(DEFAULT_CLIP_STORE_MAX_BYTES).toBe(300 * 1024 * 1024)
+  })
+})
+
+/**
+ * T082, from the T080 audit. `CLIP_STORE_MAX_BYTES` reached `createClipStore`
+ * through a bare `Number(...)`, which has two bad answers for a typo in a
+ * deploy dashboard field:
+ *
+ *   `NaN`  — every comparison against it is false, so the store is unbounded.
+ *            `clips` then fills the 1 GB instance and the write that starts
+ *            failing is `libraryStore.put`: her phrases stop reaching the
+ *            server while the sync line still reads "waiting".
+ *   `''`   — `Number('')` is 0, so every put immediately evicts everything and
+ *            the drill has no audio to play offline.
+ *
+ * Neither is refused at boot: this process holds the only off-device copy of
+ * her library, and reads of it are exactly what she would need if a deploy
+ * were misconfigured. Fall back to the documented default, loudly.
+ */
+describe('clipStoreMaxBytesFrom (T082)', () => {
+  function recordingLogger() {
+    const errors = []
+    return { errors, info() {}, warn() {}, error: (message, fields) => errors.push({ message, fields }) }
+  }
+
+  it('takes a well-formed override', () => {
+    const logger = recordingLogger()
+    expect(clipStoreMaxBytesFrom('52428800', logger)).toBe(52_428_800)
+    expect(logger.errors).toEqual([])
+  })
+
+  it('defaults when the variable is unset', () => {
+    const logger = recordingLogger()
+    expect(clipStoreMaxBytesFrom(undefined, logger)).toBe(DEFAULT_CLIP_STORE_MAX_BYTES)
+    expect(logger.errors).toEqual([])
+  })
+
+  it.each([
+    ['a typo', '300MB'],
+    ['empty', ''],
+    ['whitespace', '   '],
+    ['zero', '0'],
+    ['negative', '-1'],
+    ['a fraction', '1.5'],
+    ['Infinity', 'Infinity'],
+    ['far below one clip', '100'],
+  ])('falls back to the default, loudly, for %s', (_name, raw) => {
+    const logger = recordingLogger()
+    expect(clipStoreMaxBytesFrom(raw, logger)).toBe(DEFAULT_CLIP_STORE_MAX_BYTES)
+    expect(logger.errors.length).toBe(1)
+    expect(logger.errors[0].message).toMatch(/CLIP_STORE_MAX_BYTES/)
+  })
+
+  it('never returns a value the store cannot bound itself with', () => {
+    const logger = recordingLogger()
+    for (const raw of [undefined, '', 'abc', '0', '-5', 'NaN', 'Infinity', '1e999']) {
+      const value = clipStoreMaxBytesFrom(raw, logger)
+      expect(Number.isInteger(value)).toBe(true)
+      expect(value).toBeGreaterThan(0)
+    }
   })
 })
 
