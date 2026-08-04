@@ -7,6 +7,8 @@ const TTS_MAX_TEXT_CHARS = 2_000
 const SCAN_MAX_BODY_BYTES = 6 * 1024 * 1024 // one downsized photo (device caps ~1600px/JPEG q0.85)
 const LIBRARY_MAX_BODY_BYTES = 8 * 1024 * 1024 // ~6.5x the modelled 10,000-phrase export (docs/scale.md §4)
 const LOGIN_MAX_BODY_BYTES = 2_000 // a username and password, not a document
+const TRANSLATE_MAX_BODY_BYTES = 4_000 // one phrase plus a deck name, not a document
+const TRANSLATE_MAX_TEXT_CHARS = 500
 const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
@@ -24,6 +26,7 @@ export function createApp({
   scanLimiter,
   libraryLimiter,
   loginLimiter,
+  translateLimiter,
   distDir,
   logger,
   sessionAuth,
@@ -138,6 +141,43 @@ export function createApp({
     }
   }
 
+  async function handleTranslate(req, res, key) {
+    if (!translateLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
+
+    let body
+    try {
+      body = await readBody(req, { maxBytes: TRANSLATE_MAX_BODY_BYTES })
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) return sendJson(res, 413, { error: 'payload-too-large' })
+      throw err
+    }
+
+    let parsed
+    try {
+      parsed = JSON.parse(body.toString('utf8'))
+    } catch {
+      return sendJson(res, 400, { error: 'invalid-json' })
+    }
+
+    const { text, direction, deckName } = parsed ?? {}
+    if (
+      typeof text !== 'string' ||
+      text.length === 0 ||
+      text.length > TRANSLATE_MAX_TEXT_CHARS ||
+      (direction !== 'en-to-fr' && direction !== 'fr-to-en') ||
+      typeof deckName !== 'string'
+    ) {
+      return sendJson(res, 400, { error: 'invalid-request' })
+    }
+
+    try {
+      const candidates = await anthropic.translate({ text, direction, deckName })
+      sendJson(res, 200, { candidates })
+    } catch (err) {
+      sendJson(res, statusForProviderError(err), { error: err.kind ?? 'network' })
+    }
+  }
+
   async function handleLibraryGet(req, res, key) {
     if (!libraryLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
     const row = await libraryStore.get(key)
@@ -212,6 +252,7 @@ export function createApp({
 
         if (url.pathname === '/api/tts' && req.method === 'POST') return await handleTts(req, res, key)
         if (url.pathname === '/api/scan' && req.method === 'POST') return await handleScan(req, res, key)
+        if (url.pathname === '/api/translate' && req.method === 'POST') return await handleTranslate(req, res, key)
         if (url.pathname === '/api/library' && req.method === 'GET') return await handleLibraryGet(req, res, key)
         if (url.pathname === '/api/library' && req.method === 'PUT') return await handleLibraryPut(req, res, key)
 

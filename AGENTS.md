@@ -40,6 +40,7 @@ src/
   adapters/audio/     ClipPlayer (SpeechPort over cached Clips) + server synth client
   adapters/storage/   IndexedDB (via idb) — decks, settings, the clip cache
   adapters/vision/     server scan-reader client (handwriting import)
+  adapters/translation/ server translator client (auto-translate on Add)
   adapters/sync/       library sync client (push/pull against /api/library)
   App.tsx, main.tsx    composition root: wires adapters into domain, renders screens
 server/

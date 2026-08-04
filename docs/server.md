@@ -44,6 +44,7 @@ deleted the moment it's found, not left to expire on its own schedule.
 | POST   | `/api/logout`  | Deletes the session row for the bearer token, if any. Always `204`. | — | none |
 | POST   | `/api/tts`     | Synthesize speech for one phrase (`{text, voiceId, modelId}` → audio/mpeg). | 8 KB       | 60 / 60s per session |
 | POST   | `/api/scan`    | Read handwritten phrases from an uploaded photo (image bytes → `{phrases}`). | 6 MB       | 10 / 60s per session |
+| POST   | `/api/translate` | Propose one or more Phrase Candidates translating one phrase (`{text, direction, deckName}` → `{candidates}`). | 4 KB | 30 / 60s per session |
 | GET    | `/api/library` | Fetch the stored library JSON for this user.          | —          | 30 / 60s per session |
 | PUT    | `/api/library` | Replace the stored library JSON for this user.        | 8 MB       | 30 / 60s per session |
 | \*     | anything else under `/api/` | `404 not-found`.                        | —          | —                  |
