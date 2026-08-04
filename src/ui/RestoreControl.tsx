@@ -2,13 +2,21 @@ import { useRef, useState } from 'react'
 
 /** Why a chosen restore file was refused — mirrors `ParseLibraryResult`'s
  * `reason` without this presentational component importing the adapter type. */
-export type RestoreRefusal = { ok: false; reason: 'not-json' | 'wrong-format' | 'invalid' }
+export type RestoreRefusal = {
+  ok: false
+  reason: 'not-json' | 'wrong-format' | 'invalid' | 'needs-update' | 'empty'
+}
 export type RestoreFileResult = { ok: true } | RestoreRefusal
 
 const RESTORE_ERROR_COPY: Record<RestoreRefusal['reason'], string> = {
   'not-json': "That file wasn't able to be read as a backup — it may be damaged. Try exporting a fresh one.",
   'wrong-format': "That doesn't look like a phrase-drill backup. Choose the file that was saved from Export backup.",
   invalid: "That doesn't look like a phrase-drill backup. Choose the file that was saved from Export backup.",
+  // Both of these are refusals of a file that would otherwise have cleared
+  // every Deck she has (T070). Each says what was wrong with the FILE, so it
+  // never reads as something being wrong with her phrases.
+  'needs-update': 'That backup was saved by a newer version of this app. Update the app on this phone first — nothing on it has been changed.',
+  empty: "That backup file has nothing in it — no decks and no phrases. Restoring it would have replaced everything on this phone with nothing, so it wasn't used.",
 }
 
 /**

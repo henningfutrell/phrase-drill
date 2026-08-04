@@ -13,13 +13,27 @@ export type { Library }
  * plain-language explanation in the UI (never a bare "invalid file"). */
 export type ParseLibraryResult =
   | { ok: true; library: Library }
-  | { ok: false; reason: 'not-json' | 'wrong-format' | 'invalid' }
+  | { ok: false; reason: 'not-json' | 'wrong-format' | 'invalid' | 'needs-update' | 'empty' }
 
 /**
  * Validate a restore file before anything touches storage (docs/design.md
  * §3.6 — restore warns, then replaces; it never merges, and it never runs
  * against a file that isn't actually a backup). Pure and total: whatever
  * garbage is handed in, this returns a result, it never throws.
+ *
+ * Restore is the one path that CLEARS all three object stores before writing
+ * (`importAll`), so every refusal here is a wipe that did not happen (T070):
+ *
+ * - **`needs-update`** — an envelope from a newer build. It cannot be read
+ *   down to this schema; accepting it would write a shape this build does not
+ *   understand over the one it does.
+ * - **`empty`** — a file with no Decks, no Mixes and no Tombstones in it. It
+ *   carries nothing, so restoring it can only destroy: if she genuinely has
+ *   none, refusing costs her nothing at all, and if the file was truncated or
+ *   hand-edited, refusing costs her everything she still has. That asymmetry
+ *   is the whole argument.
+ * - **`invalid`** — anything whose records are not records. `decks: [null]` is
+ *   shaped like a library and is not one.
  */
 export function parseLibraryFile(raw: string): ParseLibraryResult {
   let parsed: unknown
@@ -40,6 +54,16 @@ export function parseLibraryFile(raw: string): ParseLibraryResult {
   if (typeof candidate.schemaVersion !== 'number' || !Array.isArray(candidate.decks)) {
     return { ok: false, reason: 'invalid' }
   }
+  // Before anything is read out of it: a file this build cannot understand is
+  // refused whether or not it has decks in it. `decks.map(migrateDeckRecord)`
+  // used to be the only version check in the app, and an empty array runs zero
+  // migrations, so a newer build's envelope normalized silently DOWN (T070).
+  if (candidate.schemaVersion > CURRENT_SCHEMA_VERSION) {
+    return { ok: false, reason: 'needs-update' }
+  }
+  if (!Number.isInteger(candidate.schemaVersion) || candidate.schemaVersion < 1) {
+    return { ok: false, reason: 'invalid' }
+  }
   // `mixes` arrived at schema v4 (T059). Absent is normal — every backup
   // written before then has no such field — but present-and-not-an-array is
   // a corrupt file, not an old one.
@@ -53,7 +77,67 @@ export function parseLibraryFile(raw: string): ParseLibraryResult {
     return { ok: false, reason: 'invalid' }
   }
 
+  const mixes = (candidate.mixes ?? []) as unknown[]
+  const tombstones = (candidate.tombstones ?? []) as unknown[]
+  if (
+    !candidate.decks.every(isDeckRecord) ||
+    !mixes.every(isMixRecord) ||
+    !tombstones.every(isTombstone)
+  ) {
+    return { ok: false, reason: 'invalid' }
+  }
+  if (candidate.decks.length === 0 && mixes.length === 0 && tombstones.length === 0) {
+    return { ok: false, reason: 'empty' }
+  }
+
   return { ok: true, library: candidate as unknown as Library }
+}
+
+/** Every field a record must carry, checked before it can replace her library. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isDeckRecord(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.createdAt === 'number' &&
+    typeof value.updatedAt === 'number' &&
+    Array.isArray(value.phrases) &&
+    value.phrases.every(isPhraseRecord)
+  )
+}
+
+function isPhraseRecord(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.french === 'string' &&
+    typeof value.english === 'string'
+  )
+}
+
+function isMixRecord(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.createdAt === 'number' &&
+    typeof value.updatedAt === 'number' &&
+    Array.isArray(value.deckIds) &&
+    value.deckIds.every((id) => typeof id === 'string')
+  )
+}
+
+function isTombstone(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    (value.kind === 'deck' || value.kind === 'mix') &&
+    typeof value.deletedAt === 'number'
+  )
 }
 
 /**
@@ -109,6 +193,7 @@ export function buildLibrary(
  * made the change. No migration here stamps a clock.
  */
 export function normalizeLibrary(library: Library): Library {
+  assertReadableSchemaVersion(library.schemaVersion)
   return {
     format: LIBRARY_FORMAT,
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -125,7 +210,30 @@ export function normalizeLibrary(library: Library): Library {
  * in `normalizeLibrary` above.
  */
 export function migrateLibraryTombstones(library: Library): Tombstone[] {
+  assertReadableSchemaVersion(library.schemaVersion)
   return [...(library.tombstones ?? [])]
+}
+
+/**
+ * The version guard, on the envelope rather than on its contents (T070).
+ *
+ * It used to live only inside `migrateDeckRecord`, once per deck — so a
+ * library with no decks ran no guard at all, and `{schemaVersion: 99,
+ * decks: []}` came back stamped as current. An envelope from a newer build
+ * must be REFUSED, never read down: this build does not know what changed, and
+ * the one thing it must not do is write its guess over her library. Throwing
+ * is what the sync engine already turns into `needs-update` — "update the app
+ * on this phone", never a lost library.
+ */
+function assertReadableSchemaVersion(schemaVersion: number): void {
+  if (schemaVersion > CURRENT_SCHEMA_VERSION) {
+    throw new Error(
+      `library schema version ${schemaVersion} is newer than supported version ${CURRENT_SCHEMA_VERSION}`,
+    )
+  }
+  if (!Number.isInteger(schemaVersion) || schemaVersion < 1) {
+    throw new Error(`library schema version ${schemaVersion} was never written by this app`)
+  }
 }
 
 /**
@@ -134,6 +242,7 @@ export function migrateLibraryTombstones(library: Library): Tombstone[] {
  * migration codebase serves both paths.
  */
 export function migrateLibraryDecks(library: Library): DeckRecord[] {
+  assertReadableSchemaVersion(library.schemaVersion)
   return library.decks.map((record) => migrateDeckRecord(record, library.schemaVersion))
 }
 
@@ -148,5 +257,6 @@ export function migrateLibraryDecks(library: Library): DeckRecord[] {
  * rejected before anything is written.
  */
 export function migrateLibraryMixes(library: Library): MixRecord[] {
+  assertReadableSchemaVersion(library.schemaVersion)
   return [...(library.mixes ?? [])]
 }

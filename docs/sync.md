@@ -58,15 +58,15 @@ did not complete.
   kept unconditionally; the same id on both sides resolves by `updatedAt`.
 - **Tombstones** (T060) make a deletion travel as data, so a delete sticks
   instead of being pushed back by whichever device still holds the record.
-- **Three-way per Phrase** (T034), when a **Sync Baseline** exists.
+- **Three-way per Phrase** (T034), against the **Sync Baseline**.
 
 The baseline is the last snapshot this device and the server agreed on. With
 it, "these two Decks differ" splits into the three answers that matter:
 
 | Case                        | Result                                                                 |
 | --------------------------- | ------------------------------------------------------------------------ |
-| Only one side changed       | That side wins whole, deletions included.                                |
-| Both changed                | Merge per Phrase by id: additions from both sides are kept; a deletion applies only to a Phrase the other side left exactly as the baseline had it — **an edit outranks a delete**. |
+| Only one side changed       | That side's name and dates win whole. Its **Phrases** still go through the merge below. |
+| Both changed                | Merge per Phrase by id: additions from both sides are kept; a deletion applies only to a Phrase **this device** no longer holds and the baseline says it once did — **an edit outranks a delete**. |
 | The same Phrase edited on both | The later Deck's text wins (a tie keeps local).                       |
 
 **That last row is the only place a keystroke can still be lost**, and it is
@@ -75,9 +75,52 @@ inventing a second copy of a phrase would corrupt the drill she is running.
 Everything else — different Phrases of the same Deck, an add against a delete,
 a rename against an edit — is preserved on both sides.
 
-**With no baseline** (the first sync ever, or after IndexedDB eviction) every
-Deck falls back to whole-record last-write-wins, exactly as T060 behaved. A
-missing baseline degrades the merge; it never breaks it.
+### A Phrase is removed only when something records the deletion (T070)
+
+The audit in T068 found the merge reading "in the baseline, unchanged here,
+absent there" as *the other side deleted it*. That inference holds only if the
+other side descends from the baseline, and **the server is not guaranteed to**:
+restoring the `pg_dump` (the documented recovery procedure — `docs/backup.md`),
+an older device winning a concurrent push, or any hand repair of
+`libraries.data` moves it backwards. Every Phrase added since that point, on a
+Deck edited on either side, was then dropped from IndexedDB *and* from the
+server in one round-trip, with no Tombstone. The recovery procedure was the
+attack.
+
+So: **the other side's absence is never a deletion.** Nothing writes a Phrase
+Tombstone, and the one record of a Phrase deletion this build has is this
+device's own saved Deck — it held the Phrase at the last agreed state and does
+not now. The cost is that a Phrase deleted on the *other* device comes back
+here until this device deletes it too: one tap, against handwritten phrases
+that exist nowhere else.
+
+Two Phrases sharing an id are both kept, never folded into one. No write path
+enforces uniqueness, so a duplicate id is already a defect — answering it by
+dropping one of her phrases would make it a loss.
+
+**With no baseline** (the first sync ever, or after IndexedDB eviction) a Deck
+held by both sides keeps the later record's name and dates and the **union** of
+its Phrases. A missing baseline degrades the merge; it never deletes through
+it.
+
+### Clocks (T070)
+
+`updatedAt` and `deletedAt` come from two unsynchronized wall clocks, and
+Tombstones are never garbage-collected, so one phone that has been off, in
+airplane mode, or had its date set by hand could poison a record permanently.
+There is no logical clock here and adding one would change what is on her disk.
+What the merge has instead is the baseline, which is causal rather than
+chronological: **a Tombstone deletes only a record that is unchanged from the
+last state both sides agreed on** — anything rewritten since was written after
+that agreement, whatever a clock says, so the deleting side cannot have seen
+it. The Tombstone is then dropped, so this resolves once instead of flapping.
+The same baseline test decides a Mix conflict before `updatedAt` is consulted.
+
+What is left of the clock: with no baseline at all, it is the only ordering
+there is, and a Deck can still lose to a skewed Tombstone for exactly one
+round-trip. And where both sides genuinely changed a Deck or a Mix, the later
+`updatedAt` picks the surviving **name** or Deck selection. Neither can lose a
+Phrase any more.
 
 The baseline is per-device, never sent anywhere, and lives in the `settings`
 object store under the `syncBaseline` key
@@ -116,6 +159,10 @@ local change made in either state does not paint over the message.
   is nowhere to put the loser.
 - **Mixes are still whole-record.** A Mix conflict loses one side's Deck
   selection — a list of ids she can re-make in seconds, not text she wrote.
+- **A Phrase deleted on the other device comes back here** until this device
+  deletes it too (T070). The fix is a Phrase-level deletion record, which is a
+  change to the persisted `Library` envelope and to every write path — not a
+  merge change.
 - **No conflict is surfaced to her.** The merge is silent because every
   outcome it can produce keeps her phrases; the one lossy case above is not
   reported. Reporting it would need a place to show it and a decision for her
