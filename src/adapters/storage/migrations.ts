@@ -29,8 +29,14 @@ export type PhraseRecordV1 = PhraseRecord
  * as data and sync can merge two devices instead of overwriting one with
  * the other. Deck records are untouched — see `DECK_MIGRATIONS[4]` below —
  * and an existing database gains one empty store and nothing else.
+ *
+ * v5 -> v6 (T036): the `clipMeta` store was added — a size index over the
+ * clip cache, so the cache can be bounded and evicted without loading the
+ * audio it is measuring. Deck records are untouched — see
+ * `DECK_MIGRATIONS[5]` below — and the new store is backfilled from whatever
+ * Clips are already cached, so an upgrading phone keeps its audio.
  */
-export const CURRENT_SCHEMA_VERSION = 5
+export const CURRENT_SCHEMA_VERSION = 6
 
 /** One step of a migration chain: a pure transform from a version-n record to version-(n+1). */
 export type RecordMigration = (record: never) => unknown
@@ -104,12 +110,26 @@ const v3ToV4: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigr
 const v4ToV5: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
 
 /**
+ * v5 -> v6: the `clipMeta` store landed beside `clips`. It indexes derived,
+ * regenerable audio and holds nothing of a Deck's, so no deck record gains,
+ * loses or changes a field — identity, like every step before it.
+ */
+const v5ToV6: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
+
+/**
  * Exported so `DECK_MIGRATIONS.length` can be checked against
  * `CURRENT_SCHEMA_VERSION` directly (persisted-shape.test.ts) — the two
  * must move together, and that test is what turns a mismatch into a build
  * failure instead of a runtime throw on the user's device.
  */
-export const DECK_MIGRATIONS: readonly RecordMigration[] = [neverExisted, v1ToV2, v2ToV3, v3ToV4, v4ToV5]
+export const DECK_MIGRATIONS: readonly RecordMigration[] = [
+  neverExisted,
+  v1ToV2,
+  v2ToV3,
+  v3ToV4,
+  v4ToV5,
+  v5ToV6,
+]
 
 /**
  * Bring a deck record from `fromVersion` up to the current schema. The same
