@@ -247,6 +247,14 @@ repairable — the `PUT` path above was already open, and until T089 nothing
 ever walked through it, because a pull that failed skips the push and the
 intact library on her phone could never go back up.
 
+**The device's side of the contract is narrower than the string (T094).**
+Unreadable to this server is not the same as empty: a row can fail
+`isLibraryEnvelope` on `format`, `schemaVersion`, or the shape of
+`mixes`/`tombstones`/`voice` and still hold every Deck she has. So a phone that
+holds no Deck and no Mix — a fresh install, a wiped phone, a reinstall — reads
+this verdict and **declines** to push over the row, retrying instead. Nothing
+changes on this side; the log line stays the signal a human acts on.
+
 So this string is load-bearing. Answering `404` here instead was considered
 and refused (T082, upheld T089): `404` means "no server copy", the device
 already has a meaning for it, and conflating the two throws away the one loud
