@@ -73,46 +73,7 @@ describe('DecksScreen', () => {
     expect(container.textContent).toContain('Nothing here yet')
   })
 
-  it('shows the backup nudge on the empty state when showBackupNudge is true', () => {
-    const onDismissBackupNudge = vi.fn()
-    act(() => {
-      root.render(
-        <DecksScreen
-          decks={[]}
-          onCreateDeck={vi.fn()}
-          onRenameDeck={vi.fn()}
-          onDeleteDeck={vi.fn()}
-          onOpenDeck={vi.fn()}
-          showBackupNudge
-          onDismissBackupNudge={onDismissBackupNudge}
-        />,
-      )
-    })
-    const nudge = container.querySelector('[data-testid="backup-nudge"]')
-    expect(nudge).not.toBeNull()
-    expect(nudge?.textContent).toContain('back up your phrases in Settings')
-
-    click(container.querySelector('[data-testid="dismiss-backup-nudge"]')!)
-    expect(onDismissBackupNudge).toHaveBeenCalledTimes(1)
-  })
-
-  it('omits the backup nudge once dismissed (showBackupNudge false)', () => {
-    act(() => {
-      root.render(
-        <DecksScreen
-          decks={[]}
-          onCreateDeck={vi.fn()}
-          onRenameDeck={vi.fn()}
-          onDeleteDeck={vi.fn()}
-          onOpenDeck={vi.fn()}
-          showBackupNudge={false}
-        />,
-      )
-    })
-    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
-  })
-
-  it('omits the backup nudge once there are Decks, even if not yet dismissed', () => {
+  it('states the backup age on the home screen whenever there is anything to lose', () => {
     act(() => {
       root.render(
         <DecksScreen
@@ -121,11 +82,84 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
-          showBackupNudge
+          backupAge={{ level: 'aging', days: 11 }}
+          onExportBackup={vi.fn().mockResolvedValue({ kind: 'shared' })}
         />,
       )
     })
-    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
+    const indicator = container.querySelector('[data-testid="backup-status"]')
+    expect(indicator).not.toBeNull()
+    expect(indicator!.textContent).toContain('11 days ago')
+  })
+
+  it('states the age quietly rather than hiding it when the backup is fresh', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 3)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          backupAge={{ level: 'fresh', days: 0 }}
+          onExportBackup={vi.fn().mockResolvedValue({ kind: 'shared' })}
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain(
+      'Backed up today',
+    )
+  })
+
+  it('says nothing about backups while there is nothing to back up', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          backupAge={{ level: 'never', days: 0 }}
+          onExportBackup={vi.fn().mockResolvedValue({ kind: 'shared' })}
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
+  })
+
+  it('offers Restore on the empty state — the screen a wiped or replaced phone actually opens on', () => {
+    const onRestoreFileChosen = vi.fn().mockResolvedValue({ ok: true })
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          onRestoreFileChosen={onRestoreFileChosen}
+          onConfirmRestore={vi.fn()}
+          onCancelRestore={vi.fn()}
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="restore-backup"]')).not.toBeNull()
+  })
+
+  it('keeps Restore off the empty state when the caller wired no restore path', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="restore-backup"]')).toBeNull()
   })
 
   it('renders a Mix decks link that calls onOpenMix when provided', () => {

@@ -58,4 +58,30 @@ describe('shareBackupFile', () => {
     expect(result).toBe('unsupported')
     vi.unstubAllGlobals()
   })
+
+  it('calls share() synchronously, before yielding to the microtask queue', async () => {
+    // WebKit expires transient activation across an await
+    // (webkit.org/blog/13862/the-user-activation-api/), so nothing in this
+    // adapter may sit between the caller's click handler and share().
+    const share = vi.fn().mockResolvedValue(undefined)
+    const canShare = vi.fn().mockReturnValue(true)
+
+    const pending = shareBackupFile(makeFile(), { canShare, share })
+
+    expect(share).toHaveBeenCalledTimes(1)
+    await pending
+  })
+
+  it('shares the file alone, with no title, text or url alongside it', async () => {
+    // WebKit 251500/316518: a files payload mixed with other members is where
+    // iOS share failures cluster.
+    const share = vi.fn().mockResolvedValue(undefined)
+    const canShare = vi.fn().mockReturnValue(true)
+    const file = makeFile()
+
+    await shareBackupFile(file, { canShare, share })
+
+    expect(share).toHaveBeenCalledWith({ files: [file] })
+    expect(Object.keys(share.mock.calls[0]![0]!)).toEqual(['files'])
+  })
 })

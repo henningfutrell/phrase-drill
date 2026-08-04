@@ -25,8 +25,8 @@ function fakeDeckStore(decks: readonly Deck[]): DeckStore {
 function fakeSettingsStore(overrides: Partial<Settings> = {}): SettingsStore {
   const settings: Settings = {
     voice: null,
-    backupNudgeDismissed: false,
     lastSyncAt: null,
+    lastExportAt: null,
     ...overrides,
   }
   return {
@@ -34,8 +34,8 @@ function fakeSettingsStore(overrides: Partial<Settings> = {}): SettingsStore {
       return settings
     },
     async setVoice() {},
-    async dismissBackupNudge() {},
     async recordSync() {},
+    async recordExport() {},
   }
 }
 
