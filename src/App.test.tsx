@@ -1087,6 +1087,25 @@ describe('App wired to the backup age (T031)', () => {
     expect(indicator.dataset.level).toBe('overdue')
   })
 
+  it('counts the sync that just succeeded, without waiting for a reload (T097)', async () => {
+    // The bug this pins: the age was read from `settings`, which App loads
+    // ONCE at mount and never re-reads. The engine's successful sync writes
+    // `lastSyncAt` to the settings store and emits it on the snapshot, and
+    // neither reached the number on screen — so a phone that had just synced
+    // was told "Not backed up yet. Everything here is only on this phone.
+    // Nothing has reached the server or a file yet.", in the screen's one rose
+    // button. Every word of that was false, and it was the first thing the one
+    // person who uses this app saw.
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: null, lastExportAt: null }))
+
+    expect(syncLine()).toBe('Synced just now')
+    await openSettings()
+    const indicator = container.querySelector('[data-testid="backup-status"]') as HTMLElement
+    expect(indicator.textContent, 'a sync that just succeeded IS a backup').not.toContain('Not backed up yet')
+    expect(indicator.dataset.level).not.toBe('never')
+  })
+
   it('says nothing has ever been backed up when neither has ever happened', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
     await renderApp(store, createFakeSettingsStore({ lastSyncAt: null, lastExportAt: null }))
