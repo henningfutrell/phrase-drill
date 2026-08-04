@@ -1,11 +1,45 @@
-import type { IDBPDatabase } from 'idb'
 import type { Deck, DeckId, DeckStore, Library } from '../../domain'
-import { DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE, openDatabase } from './database'
+import {
+  DECKS_STORE,
+  MIXES_STORE,
+  TOMBSTONES_STORE,
+  createDatabaseConnection,
+  runTransaction,
+} from './database'
 import { buildLibrary, migrateLibraryDecks, migrateLibraryMixes, migrateLibraryTombstones } from './library'
 import { sameLibraryContent } from './library-identity'
 import { fromRecord, toRecord } from './mapping'
 import type { DeckRecord, MixRecord, Tombstone } from './migrations'
 import { requestPersistence } from './persistence'
+
+/** The three object stores the whole `Library` envelope is written across. */
+interface LibraryStores {
+  readonly deckStore: { clear(): Promise<void>; put(value: DeckRecord): Promise<unknown> }
+  readonly mixStore: { clear(): Promise<void>; put(value: MixRecord): Promise<unknown> }
+  readonly tombstoneStore: { clear(): Promise<void>; put(value: Tombstone): Promise<unknown> }
+}
+
+/**
+ * Replace the whole of her library — Decks, Mixes and Tombstones — on the
+ * caller's transaction. Shared by `updateAll` and `importAll`, which write the
+ * same three stores in the same order for the same reason: the envelope is one
+ * fact, so a replacement that left the Mixes behind would leave her library in
+ * a state she never had. The caller owns the transaction and, through
+ * `runTransaction`, the rollback.
+ */
+async function replaceAll(
+  { deckStore, mixStore, tombstoneStore }: LibraryStores,
+  decks: readonly DeckRecord[],
+  mixes: readonly MixRecord[],
+  tombstones: readonly Tombstone[],
+): Promise<void> {
+  await deckStore.clear()
+  await mixStore.clear()
+  await tombstoneStore.clear()
+  for (const record of decks) await deckStore.put(record)
+  for (const record of mixes) await mixStore.put(record)
+  for (const record of tombstones) await tombstoneStore.put(record)
+}
 
 /**
  * The IndexedDB implementation of `DeckStore`, via `idb`. Every Deck write is
@@ -35,35 +69,21 @@ import { requestPersistence } from './persistence'
  */
 export function createIndexedDbDeckStore(): DeckStore {
   let persistenceRequested = false
-  let dbPromise: Promise<IDBPDatabase> | undefined
 
   /**
    * One connection per store instance, opened lazily and reused — not one per
    * call. Each `createIndexedDbDeckStore()` call (the composition root makes
-   * exactly one) owns its own connection for its lifetime. **A failed open is
-   * forgotten again (T087, the clip cache's T085 rule applied here.)**
+   * exactly one) owns its own connection for its lifetime, and gives it up
+   * both when an open is refused (T087) and when the browser closes it
+   * underneath the app (T077). `createDatabaseConnection` owns why.
    *
-   * A rejected promise is still a settled promise, so a plain `??=` remembers
-   * a refusal as firmly as it remembers a handle: one transient failure — iOS
-   * closing the connection under memory pressure, a `versionchange` from
-   * another surface — was replayed by every later call, and nothing ever tried
-   * again. This is the store her Phrases are written to and every write here
-   * is optimistic (`App.tsx` `persistLocally`), so that was a session in which
-   * nothing she typed could be saved while the screen kept showing it saved.
-   *
-   * Forgetting the slot is a retry, not a loop: nothing here opens on its own.
-   * The next call the app makes opens again, and a database that is
-   * persistently refusing rejects once per call, exactly as it does now —
-   * still reaching `persistLocally` and the T069 notice, or the T083 launch
-   * screen. One refusal costs one re-open; it does not buy silence.
+   * What is at stake in this store is her work. Every write here is optimistic
+   * (`App.tsx` `persistLocally`): the screen changes first and the store is
+   * written after, so a store holding a handle it should have given up refuses
+   * every write for the rest of the session while the screen keeps showing
+   * them saved.
    */
-  function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase().catch((error: unknown) => {
-      dbPromise = undefined
-      throw error
-    })
-    return dbPromise
-  }
+  const getDatabase = createDatabaseConnection()
 
   async function ensurePersistenceRequested(): Promise<void> {
     if (persistenceRequested) return
@@ -105,32 +125,22 @@ export function createIndexedDbDeckStore(): DeckStore {
      * Phrase it brought) or after this one writes (and re-reads what she
      * saved). There is no third outcome.
      *
-     * `apply` refusing aborts the transaction rather than writing a guess.
+     * `apply` refusing aborts the transaction rather than writing a guess —
+     * as does a refused write, which is `runTransaction`'s other half (T077).
      */
     async update(id: DeckId, apply: (stored: Deck | undefined) => Deck): Promise<Deck> {
       await ensurePersistenceRequested()
       const db = await getDatabase()
       const tx = db.transaction(DECKS_STORE, 'readwrite')
       const store = tx.objectStore(DECKS_STORE)
-      const existing = (await store.get(id)) as DeckRecord | undefined
 
-      let next: Deck
-      let record: DeckRecord
-      try {
-        next = apply(existing ? fromRecord(existing) : undefined)
+      return runTransaction(tx, async () => {
+        const existing = (await store.get(id)) as DeckRecord | undefined
+        const next = apply(existing ? fromRecord(existing) : undefined)
         const now = Date.now()
-        record = toRecord(next, { createdAt: existing?.createdAt ?? now, updatedAt: now })
-      } catch (error) {
-        // `done` rejects on an abort; nothing awaits it on this path, so it is
-        // read here rather than left to surface as an unhandled rejection.
-        void tx.done.catch(() => {})
-        tx.abort()
-        throw error
-      }
-
-      await store.put(record)
-      await tx.done
-      return next
+        await store.put(toRecord(next, { createdAt: existing?.createdAt ?? now, updatedAt: now }))
+        return next
+      })
     },
 
     /**
@@ -143,11 +153,12 @@ export function createIndexedDbDeckStore(): DeckStore {
     async remove(id: DeckId): Promise<void> {
       const db = await getDatabase()
       const tx = db.transaction([DECKS_STORE, TOMBSTONES_STORE], 'readwrite')
-      await tx.objectStore(DECKS_STORE).delete(id)
-      await tx
-        .objectStore(TOMBSTONES_STORE)
-        .put({ id, kind: 'deck', deletedAt: Date.now() } satisfies Tombstone)
-      await tx.done
+      await runTransaction(tx, async () => {
+        await tx.objectStore(DECKS_STORE).delete(id)
+        await tx
+          .objectStore(TOMBSTONES_STORE)
+          .put({ id, kind: 'deck', deletedAt: Date.now() } satisfies Tombstone)
+      })
     },
 
     async exportAll(): Promise<Library> {
@@ -167,7 +178,8 @@ export function createIndexedDbDeckStore(): DeckStore {
      * outcome, and no snapshot old enough to compute her work away.
      *
      * A refusal from `update` — an envelope this build cannot read — aborts
-     * the transaction rather than writing a guess.
+     * the transaction rather than writing a guess, and so does a refused
+     * write: `runTransaction` (T077) makes those the same path.
      */
     async updateAll(
       update: (stored: Library) => Library,
@@ -178,49 +190,26 @@ export function createIndexedDbDeckStore(): DeckStore {
       const mixStore = tx.objectStore(MIXES_STORE)
       const tombstoneStore = tx.objectStore(TOMBSTONES_STORE)
 
-      const stored = buildLibrary(
-        (await deckStore.getAll()) as DeckRecord[],
-        (await mixStore.getAll()) as MixRecord[],
-        (await tombstoneStore.getAll()) as Tombstone[],
-        Date.now(),
-      )
+      return runTransaction(tx, async () => {
+        const stored = buildLibrary(
+          (await deckStore.getAll()) as DeckRecord[],
+          (await mixStore.getAll()) as MixRecord[],
+          (await tombstoneStore.getAll()) as Tombstone[],
+          Date.now(),
+        )
 
-      let next: Library
-      let migratedDecks: DeckRecord[]
-      let migratedMixes: MixRecord[]
-      let migratedTombstones: Tombstone[]
-      try {
-        next = update(stored)
-        migratedDecks = migrateLibraryDecks(next)
-        migratedMixes = migrateLibraryMixes(next)
-        migratedTombstones = migrateLibraryTombstones(next)
-      } catch (error) {
-        // `done` rejects on an abort; nothing awaits it on this path, so it is
-        // read here rather than left to surface as an unhandled rejection.
-        void tx.done.catch(() => {})
-        tx.abort()
-        throw error
-      }
+        const next = update(stored)
+        const migratedDecks = migrateLibraryDecks(next)
+        const migratedMixes = migrateLibraryMixes(next)
+        const migratedTombstones = migrateLibraryTombstones(next)
 
-      if (sameLibraryContent(stored, next)) {
-        await tx.done
-        return { library: next, changed: false }
-      }
+        if (sameLibraryContent(stored, next)) {
+          return { library: next, changed: false }
+        }
 
-      await deckStore.clear()
-      await mixStore.clear()
-      await tombstoneStore.clear()
-      for (const record of migratedDecks) {
-        await deckStore.put(record)
-      }
-      for (const record of migratedMixes) {
-        await mixStore.put(record)
-      }
-      for (const record of migratedTombstones) {
-        await tombstoneStore.put(record)
-      }
-      await tx.done
-      return { library: next, changed: true }
+        await replaceAll({ deckStore, mixStore, tombstoneStore }, migratedDecks, migratedMixes, migratedTombstones)
+        return { library: next, changed: true }
+      })
     },
 
     async importAll(library: Library): Promise<void> {
@@ -229,22 +218,15 @@ export function createIndexedDbDeckStore(): DeckStore {
       const migratedTombstones = migrateLibraryTombstones(library)
       const db = await getDatabase()
       const tx = db.transaction([DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
-      const deckStore = tx.objectStore(DECKS_STORE)
-      const mixStore = tx.objectStore(MIXES_STORE)
-      const tombstoneStore = tx.objectStore(TOMBSTONES_STORE)
-      await deckStore.clear()
-      await mixStore.clear()
-      await tombstoneStore.clear()
-      for (const record of migratedDecks) {
-        await deckStore.put(record)
+      const stores = {
+        deckStore: tx.objectStore(DECKS_STORE),
+        mixStore: tx.objectStore(MIXES_STORE),
+        tombstoneStore: tx.objectStore(TOMBSTONES_STORE),
       }
-      for (const record of migratedMixes) {
-        await mixStore.put(record)
-      }
-      for (const record of migratedTombstones) {
-        await tombstoneStore.put(record)
-      }
-      await tx.done
+
+      await runTransaction(tx, () =>
+        replaceAll(stores, migratedDecks, migratedMixes, migratedTombstones),
+      )
     },
   }
 }

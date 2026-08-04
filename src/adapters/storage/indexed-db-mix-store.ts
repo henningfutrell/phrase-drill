@@ -1,6 +1,5 @@
-import type { IDBPDatabase } from 'idb'
 import type { Mix, MixId, MixStore } from '../../domain'
-import { MIXES_STORE, TOMBSTONES_STORE, openDatabase } from './database'
+import { MIXES_STORE, TOMBSTONES_STORE, createDatabaseConnection, runTransaction } from './database'
 import { fromMixRecord, toMixRecord } from './mapping'
 import type { MixRecord, Tombstone } from './migrations'
 
@@ -11,19 +10,11 @@ import type { MixRecord, Tombstone } from './migrations'
  * touches its source Decks" a structural fact rather than a promise.
  */
 export function createIndexedDbMixStore(): MixStore {
-  let dbPromise: Promise<IDBPDatabase> | undefined
-
   // One connection per store instance, opened lazily and reused — the same
   // shape the deck store uses, against the same database and version, down to
-  // forgetting a failed open so one refusal is not replayed for the rest of
-  // the session (T087; see `indexed-db-deck-store.ts` for why).
-  function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase().catch((error: unknown) => {
-      dbPromise = undefined
-      throw error
-    })
-    return dbPromise
-  }
+  // giving the handle up again when an open is refused (T087) or the browser
+  // closes the connection (T077). `createDatabaseConnection` owns why.
+  const getDatabase = createDatabaseConnection()
 
   return {
     async loadAll(): Promise<Mix[]> {
@@ -49,11 +40,12 @@ export function createIndexedDbMixStore(): MixStore {
     async remove(id: MixId): Promise<void> {
       const db = await getDatabase()
       const tx = db.transaction([MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
-      await tx.objectStore(MIXES_STORE).delete(id)
-      await tx
-        .objectStore(TOMBSTONES_STORE)
-        .put({ id, kind: 'mix', deletedAt: Date.now() } satisfies Tombstone)
-      await tx.done
+      await runTransaction(tx, async () => {
+        await tx.objectStore(MIXES_STORE).delete(id)
+        await tx
+          .objectStore(TOMBSTONES_STORE)
+          .put({ id, kind: 'mix', deletedAt: Date.now() } satisfies Tombstone)
+      })
     },
   }
 }
