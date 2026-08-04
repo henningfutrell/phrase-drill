@@ -24,6 +24,15 @@ const SALT_BYTES = 16
 const TOKEN_BYTES = 32
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 
+/**
+ * A fixed, valid-format hash nobody's real password will ever match, verified
+ * against on every login for a username that doesn't exist. Its only job is
+ * to make `scryptSync` run once per login attempt no matter what — see
+ * `login` below for why. `hashPassword` is a hoisted function declaration,
+ * so calling it here (above its own textual definition) is safe.
+ */
+const DUMMY_PASSWORD_HASH = hashPassword(randomBytes(32).toString('hex'))
+
 /** `scrypt:<N>:<r>:<p>:<salt-base64>:<hash-base64>` — self-describing, so a future cost bump doesn't break existing rows. */
 export function hashPassword(password) {
   const salt = randomBytes(SALT_BYTES)
@@ -71,12 +80,22 @@ export function hashToken(token) {
  * against fakes (`session-auth.test.js`) and `server/db.js`'s
  * `createAuthStore` is what proves the real SQL against a live Postgres.
  */
-export function createSessionAuth({ userStore, sessionStore, now = () => Date.now() }) {
+export function createSessionAuth({ userStore, sessionStore, now = () => Date.now(), verifyPassword: verifyPasswordFn = verifyPassword }) {
   return {
-    /** `null` for any invalid credentials — same shape for "no such user" and "wrong password," deliberately, so a caller can't distinguish them (no user-enumeration signal). */
+    /**
+     * `null` for any invalid credentials — same response shape for "no such
+     * user" and "wrong password," and comparable timing too: an unknown
+     * username still runs one scrypt verification, against
+     * `DUMMY_PASSWORD_HASH`, so a network observer can't use response time
+     * to tell "no such user" from "wrong password" either. The rate limiter
+     * in front of this endpoint (`server/app.js`, 5 attempts/60s per
+     * username) is the primary control against guessing either way — this
+     * only closes a side channel, it doesn't replace that limit.
+     */
     async login(username, password) {
       const user = await userStore.getByUsername(username)
-      if (!user || !verifyPassword(password, user.passwordHash)) return null
+      const passwordOk = verifyPasswordFn(password, user ? user.passwordHash : DUMMY_PASSWORD_HASH)
+      if (!user || !passwordOk) return null
 
       const { token, tokenHash } = generateSessionToken()
       const createdAt = now()
