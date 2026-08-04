@@ -22,7 +22,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { Clip } from './clip-cache'
 import { createIndexedDbClipCache } from './clip-cache'
-import { CLIPS_STORE, CLIP_META_STORE, openDatabase } from './database'
+import { CLIPS_STORE, CLIP_META_STORE, databaseTrouble, openDatabase, type DatabaseTrouble } from './database'
 import {
   idbOperations,
   idbTransactions,
@@ -72,12 +72,21 @@ describe('evicting a Clip is one transaction (T078)', () => {
     // second one never happens.
     terminateOnCommitOfNext('delete', CLIPS_STORE)
 
+    const reported: DatabaseTrouble[] = []
+    const unsubscribe = databaseTrouble.subscribe((trouble) => reported.push(trouble))
+
     // The sweep may or may not survive its own connection being closed; that
     // is not the claim. The claim is what is on the disk afterwards.
     await createIndexedDbClipCache({ maxBytes: CEILING })
       .usage()
       .catch(() => undefined)
     await settleIdb()
+    unsubscribe()
+
+    // The interruption really fired. Without this the test could pass one day
+    // because eviction became atomic and the next because the kill silently
+    // stopped triggering, and the two are indistinguishable from the stores.
+    expect(reported).toContain('terminated')
 
     // Read back through a fresh connection — the only view iOS and the next
     // launch have. The audio and the row went together, or neither went.
