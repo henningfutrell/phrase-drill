@@ -203,7 +203,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     | { ok: true }
     | {
         ok: false
-        reason: 'network' | 'unauthorized' | 'stale-client' | 'unreadable' | 'device-storage' | 'superseded'
+        reason:
+          | 'network'
+          | 'unauthorized'
+          | 'stale-client'
+          | 'unreadable'
+          | 'device-storage'
+          | 'superseded'
+          | 'nothing-to-repair-with'
       }
   > {
     // Everything below is computed from the library this device holds NOW. A
@@ -240,13 +247,16 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     //   unreachable, and pushing over that is how stale data overwrites good
     //   data. The client keeps the two apart at the wire (status 500 AND this
     //   server's own `library-unreadable` code); everything else is `network`.
-    // - Nothing readable is discarded. A row that is not an envelope has no
-    //   records in it to merge, so `remote` stays undefined below and the push
-    //   carries this device's library — which is the only readable copy there
-    //   is.
+    // - Nothing MERGEABLE is discarded. A row that is not an envelope has no
+    //   records this build can read out of it, so `remote` stays undefined
+    //   below and the push carries this device's library. That is a statement
+    //   about the merge and NOT the statement "nothing of hers is discarded" —
+    //   see `repairingUnreadableRow` below for the difference and what it
+    //   costs.
     // - The bytes survive anyway: `libraryStore.put` archives every version it
     //   replaces (T071/T082), so the poisoned row goes into the history rather
-    //   than being dropped on the floor.
+    //   than being dropped on the floor. Recovering from there needs `psql`,
+    //   which she cannot run, so it is a backstop and never the plan.
     // - The server had already decided this row is replaceable —
     //   `storedSchemaVersion` reads an unreadable row as 0 precisely so it can
     //   never lock a client out of syncing (T082). This device was the only
@@ -260,6 +270,19 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     if (!pulled.ok && pulled.reason !== 'not-found' && pulled.reason !== 'server-copy-unreadable') {
       return { ok: false, reason: pulled.reason }
     }
+    // ...and the two are NOT the same reason where it counts (T094). Under
+    // `not-found` there is no row: an empty push replaces nothing. Under
+    // `server-copy-unreadable` there IS a row, and the only thing known about
+    // it is that this server's `isLibraryEnvelope` refused it — on `format`,
+    // on `schemaVersion`, or on the shape of `mixes`/`tombstones`/`voice`. A
+    // row can fail every one of those while still holding every Deck she has.
+    //
+    // So the repair is licensed only for a device that has something to repair
+    // WITH. Otherwise a fresh install, a wiped phone, or a reinstall pulls the
+    // 500 on its FIRST launch sync and replaces the row with nothing — and the
+    // new-phone case is exactly the case where this device has least to offer
+    // and the row has most to lose.
+    const repairingUnreadableRow = !pulled.ok && pulled.reason === 'server-copy-unreadable'
 
     let remote: Library | undefined
     try {
@@ -296,6 +319,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     let outgoing: Library
     let refused = false
     let superseded = false
+    let nothingToRepairWith = false
     try {
       const written = await deps.updateLocal((stored) => {
         // Checked here, inside the write, because this is the one instant at
@@ -309,6 +333,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         }
         try {
           const local = normalizeLibrary(stored)
+          // Judged HERE, and not from a snapshot read earlier, for the same
+          // reason the merge is: this is the one instant at which what this
+          // device holds is known. A save she made while the pull was in
+          // flight is a Deck this round-trip may repair with (T074/T094).
+          if (repairingUnreadableRow && holdsNothingOfHers(local)) {
+            nothingToRepairWith = true
+            return stored
+          }
           return remote ? mergeLibraries(local, remote, baseline) : local
         } catch (error) {
           // Normalization or the merge refusing is an envelope this build
@@ -320,6 +352,12 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         }
       })
       if (superseded) return { ok: false, reason: 'superseded' }
+      // Nothing was written above, so there is nothing to push, no baseline to
+      // move and no sync time to claim. Retried like any other passing
+      // condition, which is what it is: the row is repaired the moment either
+      // side changes — she adds a Deck or restores from a file here, or a
+      // human repairs the row there and the next pull simply succeeds.
+      if (nothingToRepairWith) return { ok: false, reason: 'nothing-to-repair-with' }
       outgoing = written.library
       if (written.changed) emit({ libraryRevision: snapshot.libraryRevision + 1 })
     } catch {
@@ -397,10 +435,12 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // Retrying the same build gets the same answer.
         emit({ state: 'needs-update' })
       } else {
-        // 'network', 'device-storage' and 'superseded': all three are
-        // conditions that pass. Say her work is safe here, and try again — a
-        // superseded round-trip is a restore that has just landed and not yet
-        // been anywhere, which is exactly what 'waiting' means.
+        // 'network', 'device-storage', 'superseded' and
+        // 'nothing-to-repair-with': all four are conditions that pass. Say her
+        // work is safe here, and try again — a superseded round-trip is a
+        // restore that has just landed and not yet been anywhere, which is
+        // exactly what 'waiting' means, and a device with nothing to repair a
+        // poisoned row with has nothing on it to lose either.
         emit({ state: 'waiting' })
         scheduleRetry()
       }
@@ -557,6 +597,29 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
  */
 function nothingIsAgreed(): Library {
   return buildLibrary([], [], [], 0)
+}
+
+/**
+ * Does this device hold any record of hers? (T094)
+ *
+ * Asked of one thing only: whether this device may push over a server row the
+ * server itself reports as unreadable. Everywhere else an empty library is an
+ * ordinary value and pushes normally.
+ *
+ * **A Deck or a Mix, and nothing else counts.** Those are the two aggregates
+ * that are hers (T059). A Deck with no Phrases in it still counts — she made
+ * it, and a rule that weighed Phrases would have to pick a threshold, and any
+ * threshold above zero can discard a library that is genuinely small. Zero is
+ * the only line that is not a guess.
+ *
+ * A pinned voice does not count: it is a preference the merge already treats
+ * as disposable (T067), and it must not buy the right to overwrite Decks. Nor
+ * does a Tombstone: it records what is gone, so a device holding only
+ * Tombstones has no phrase to put back and pushing it would turn a poisoned
+ * row into a deletion.
+ */
+function holdsNothingOfHers(library: Library): boolean {
+  return library.decks.length === 0 && (library.mixes?.length ?? 0) === 0
 }
 
 function browserScheduler(): Scheduler {

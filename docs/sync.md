@@ -39,8 +39,10 @@ requests**. There is no heartbeat.
 1. **Pull.** If the pull fails for any reason other than `not-found` or
    `server-copy-unreadable`, stop — without the server copy this device cannot
    know what a push would overwrite. Her change stays on the phone and goes up
-   next time. Those two exceptions are the same fact in two forms: there is
-   nothing readable on the server to overwrite (T089, below).
+   next time. Those two exceptions are close but not identical: under
+   `not-found` there is no row at all, and under `server-copy-unreadable` there
+   is a row this build cannot merge with — which licenses a push only from a
+   device that holds a Deck or a Mix (T089 and T094, below).
 2. **Read the baseline.** Written by this engine and by nothing else, so it
    races with nobody.
 3. **Merge and write it back locally, as one indivisible step, before
@@ -551,7 +553,7 @@ second licenses a push:
 | ----------------- | ------------ | ----- |
 | `network` | this device could not reach, or could not read, what may be a perfectly good server copy | **no** — this is how stale data overwrites good data |
 | `not-found` | nobody has ever pushed under this key | yes |
-| `server-copy-unreadable` | the server parsed its own row and it is not a library envelope | yes |
+| `server-copy-unreadable` | the server parsed its own row and it is not a library envelope | yes — **only if this device holds a Deck or a Mix** (T094) |
 
 `server-copy-unreadable` is produced by `library-sync-client.ts` from **status
 500 AND** a JSON body of `{"error":"library-unreadable"}`. Both halves are
@@ -561,16 +563,69 @@ a proxy or the platform edge answers with an HTML page, and 502/503 are not
 this server speaking at all. Every one of those is `network`, and `network`
 does not push.
 
-**Why the push is safe.** A row that is not an envelope holds no records to
-merge, so `remote` is undefined and the merge is skipped exactly as it is for
-`not-found`: what goes up is this device's library, which is the only readable
-copy there is. Nothing readable is discarded. The unreadable bytes are not
-dropped either — `libraryStore.put` archives every version it replaces
-(T071/T082), so the poisoned row lands in `library_versions` for whoever wants
-to look at it. And the server had already decided such a row is replaceable:
-`storedSchemaVersion` reads it as `0` precisely so it cannot lock a client out
-of syncing (T082). The device was the only part of the system not acting on
-that decision.
+**Why the push is safe.** A row that is not an envelope holds no records this
+build can merge, so `remote` is undefined and the merge is skipped exactly as it
+is for `not-found`: what goes up is this device's library, which is the only
+readable copy there is. The unreadable bytes are not dropped either —
+`libraryStore.put` archives every version it replaces (T071/T082), so the
+poisoned row lands in `library_versions`. And the server had already decided
+such a row is replaceable: `storedSchemaVersion` reads it as `0` precisely so it
+cannot lock a client out of syncing (T082). The device was the only part of the
+system not acting on that decision.
+
+### The repair needs something to repair with (T094)
+
+The paragraph above said "nothing readable is discarded", and it was reasoning
+about `mergeLibraries` while sounding like a claim about her phrases. They are
+not the same claim. A row can fail this server's `isLibraryEnvelope` check on
+`format`, on `schemaVersion`, or on the shape of `mixes`/`tombstones`/`voice`
+and still carry **every Deck she has**. Unreadable to this build is not empty.
+
+`server-copy-unreadable` was handled exactly like `not-found`, so `remote`
+stayed undefined and what went up was whatever this device held — **including
+nothing at all**. A fresh install, a wiped phone, or a reinstall pulls the 500
+on its *first* launch sync, pushes an empty library, and replaces the row. That
+is the case where this device has the least to offer and the row has the most to
+lose, and `library_versions` is only a backstop there: recovering from it needs
+`psql`, which she cannot run.
+
+**So the licence is conditional.** The push over an unreadable row happens only
+when this device holds at least one **Deck or Mix**:
+
+- **A Deck with no Phrases still counts.** She made it. Any threshold above zero
+  is a guess that can discard a library that is genuinely small; zero is the only
+  line that is not a guess.
+- **A pinned voice does not count.** It is a preference the merge already treats
+  as disposable (T067) and must not buy the right to overwrite Decks.
+- **A Tombstone does not count.** It records what is gone, so a device holding
+  only Tombstones has no phrase to put back, and pushing it would convert a
+  poisoned row into a deletion.
+- **`not-found` is unaffected.** No row exists, so an empty push replaces
+  nothing, and refusing there would leave a first-ever sync that never completes.
+- The judgement is made **inside `updateLocal`**, against what is stored at the
+  instant of the write, for the same reason the merge is (T074): a save she made
+  while the pull was in flight is a Deck this round-trip may repair with.
+
+**What T089 was built for is unchanged.** A phone holding her library still
+repairs a poisoned row by itself, in one round-trip, with nothing asked of her
+and no retry left pending.
+
+**What happens to a device that is legitimately empty.** The round-trip returns
+`nothing-to-repair-with`, which the engine treats like every other passing
+condition: state `waiting`, retried with the usual backoff, **no sync time
+claimed and no baseline moved**. Nothing is written anywhere. That is acceptable
+because such a device has nothing to lose and nothing to upload — an empty push
+would have gained her nothing and cost her the row. It has two ways forward and
+needs neither explained to her: the moment she adds a Deck or restores from a
+backup file, the very next round-trip repairs the row; and if a human repairs
+the row instead, the retry's pull simply succeeds and her library comes down.
+The line reads `Saved on this phone · will sync when back online · not synced
+yet` in the meantime, which is true.
+
+**The residual this leaves.** A poisoned row plus a lost phone plus no backup
+file is still unrecoverable without `psql` — T094 does not fix that, it only
+stops the app itself being the thing that overwrites the row. The signal a human
+needs is where T089 put it: the error-level log line on the 500.
 
 **Nothing is asked of her.** It repairs itself on the next round-trip and says
 nothing new — the sync line goes `syncing` → `idle` like any other round-trip.
