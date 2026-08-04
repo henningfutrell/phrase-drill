@@ -64,8 +64,9 @@ import type { DeckRecord, Library, MixRecord, PhraseRecord, Tombstone } from './
  * conflict on it changes what the next new Phrase is generated in and
  * nothing else.
  *
- * With **no baseline** — the first sync ever, or a device whose baseline was
- * evicted — a Deck held by both sides keeps the later record's name and dates
+ * With **no baseline** — the first sync ever, a device whose baseline was
+ * evicted, or one written under a schema version this build does not read
+ * (T081) — a Deck held by both sides keeps the later record's name and dates
  * and the union of its Phrases. A missing baseline degrades the merge; it
  * never deletes through it.
  *
@@ -87,18 +88,34 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
       `cannot merge libraries at different schema version: ${local.schemaVersion} and ${remote.schemaVersion}`,
     )
   }
-  if (base && base.schemaVersion !== local.schemaVersion) {
-    throw new Error(
-      `cannot merge libraries at different schema version: ${local.schemaVersion} and ${base.schemaVersion}`,
-    )
-  }
+  // A baseline at another schema version is one this build cannot compare
+  // against, and that is all it is (T081). Refusing it used to be fatal:
+  // nothing migrates the baseline — it is written under whatever schema was
+  // current at the time and read back raw — so an app update that bumps the
+  // schema leaves one behind, this threw on the first round-trip after it, the
+  // engine read the throw as an envelope it cannot understand, and parked at
+  // `needs-update`, which by design never retries. Sync then stopped for good
+  // on a phone whose app was already current.
+  //
+  // The baseline is derived, regenerable bookkeeping, and losing it is
+  // supposed to cost the next merge its precision and nothing else
+  // (docs/glossary.md). So an unusable one is treated as one that is not
+  // there, and the next accepted push writes a fresh one at the current
+  // version — one round-trip of degraded precision, never a Phrase.
+  //
+  // Only the VERSION is judged. An EMPTY baseline at the current version is
+  // still a baseline, and it says the opposite thing: absent is "nothing can
+  // be shown", under which a Tombstone wins on its clock alone, while empty is
+  // "we agreed on nothing", under which every record here outranks a Tombstone
+  // — which is what makes a restore from file stick (T072).
+  const agreed = base?.schemaVersion === local.schemaVersion ? base : undefined
 
   const tombstones = mergeTombstones(local.tombstones ?? [], remote.tombstones ?? [])
-  const decks = mergeDecks(local.decks, remote.decks, base?.decks)
-  const mixes = mergeMixes(local.mixes ?? [], remote.mixes ?? [], base?.mixes)
+  const decks = mergeDecks(local.decks, remote.decks, agreed?.decks)
+  const mixes = mergeMixes(local.mixes ?? [], remote.mixes ?? [], agreed?.mixes)
 
-  const baseDecks = byId(base?.decks)
-  const baseMixes = byId(base?.mixes)
+  const baseDecks = byId(agreed?.decks)
+  const baseMixes = byId(agreed?.mixes)
 
   const survivingDecks = decks.filter(
     (deck) => !isDeleted(deck, tombstones.get(key('deck', deck.id)), rewritten(deck, baseDecks, sameDeckContent)),
