@@ -204,3 +204,38 @@ describe('DeckDetailScreen — Phrase Candidates (T057 scope addition)', () => {
     expect(container.querySelector('[data-testid="phrase-french-input"]')).not.toBeNull()
   })
 })
+
+describe('DeckDetailScreen — the backup age follows her here only once it is urgent', () => {
+  it('shows nothing about backups while the backup is fresh — the home screen already said so', () => {
+    renderScreen(threePhraseDeck, {
+      backupAge: { level: 'fresh', days: 2 },
+      onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }),
+    })
+    expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
+  })
+
+  it('carries the indicator onto the screen where she adds phrases once it is aging', () => {
+    renderScreen(threePhraseDeck, {
+      backupAge: { level: 'aging', days: 14 },
+      onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }),
+    })
+    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain(
+      '14 days ago',
+    )
+  })
+
+  it('carries it here when overdue too', () => {
+    renderScreen(threePhraseDeck, {
+      backupAge: { level: 'overdue', days: 61 },
+      onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }),
+    })
+    expect(
+      (container.querySelector('[data-testid="backup-status"]') as HTMLElement).dataset.level,
+    ).toBe('overdue')
+  })
+
+  it('shows nothing when the caller passes no age at all', () => {
+    renderScreen(threePhraseDeck)
+    expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
+  })
+})

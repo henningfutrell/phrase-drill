@@ -26,8 +26,9 @@ describe('createIndexedDbSettingsStore', () => {
 
     expect(settings).not.toHaveProperty('libraryKey')
     expect(settings.voice).toBeNull()
-    expect(settings.backupNudgeDismissed).toBe(false)
     expect(settings.lastSyncAt).toBeNull()
+    expect(settings.lastExportAt).toBeNull()
+    expect(settings).not.toHaveProperty('backupNudgeDismissed')
   })
 
   it('reports no sync as ever having happened until one is recorded', async () => {
@@ -53,46 +54,71 @@ describe('createIndexedDbSettingsStore', () => {
     expect((await store.load()).lastSyncAt).toBe(2_000)
   })
 
-  it('reports the backup nudge as not dismissed until dismissed', async () => {
+  it('reports no export as ever having happened until one is recorded', async () => {
     const store = createIndexedDbSettingsStore()
 
-    expect((await store.load()).backupNudgeDismissed).toBe(false)
+    expect((await store.load()).lastExportAt).toBeNull()
+  })
+
+  it('records and reloads the timestamp of the last file she exported herself', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    await store.recordExport(1_700_000_000_000)
+
+    expect((await store.load()).lastExportAt).toBe(1_700_000_000_000)
+  })
+
+  it('replaces the last-export timestamp with a newer one rather than keeping the old one alongside it', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    await store.recordExport(1_000)
+    await store.recordExport(2_000)
+
+    expect((await store.load()).lastExportAt).toBe(2_000)
+  })
+
+  it('keeps the sync time and the export time apart — one is not allowed to stand in for the other', async () => {
+    const store = createIndexedDbSettingsStore()
+
+    await store.recordSync(1_000)
+    await store.recordExport(2_000)
+
+    const settings = await store.load()
+    expect(settings.lastSyncAt).toBe(1_000)
+    expect(settings.lastExportAt).toBe(2_000)
   })
 
   it('reads a key an older build never wrote as its documented default, not undefined or a throw — including ignoring a pre-T043 stored library key', async () => {
-    // Simulates a store written before `backupNudgeDismissed` existed, and
-    // before T043 deleted the library-key identity model: an old,
-    // never-cleaned-up `libraryKey` entry is present but must simply be
-    // ignored — `load()` must still resolve, and resolve to the documented
-    // defaults for the fields it does read, not `undefined` or a throw.
+    // Simulates a store written before `lastExportAt` existed, and before
+    // T043 deleted the library-key identity model: an old, never-cleaned-up
+    // `libraryKey` entry is present, and so is the retired
+    // `backupNudgeDismissed` flag. Both must simply be ignored — `load()`
+    // must still resolve, and resolve to the documented defaults for the
+    // fields it does read, not `undefined` or a throw. Her Decks are not
+    // touched by any of this: these are UI flags in the `settings` store,
+    // never drill data.
     const db = await idbModule.openDB(DB_NAME, CURRENT_SCHEMA_VERSION, {
       upgrade(rawDb: { createObjectStore(name: string): unknown }) {
         rawDb.createObjectStore(SETTINGS_STORE)
       },
     })
     await db.put(SETTINGS_STORE, 'a'.repeat(64), 'libraryKey')
+    await db.put(SETTINGS_STORE, true, 'backupNudgeDismissed')
 
     const store = createIndexedDbSettingsStore()
     const settings = await store.load()
 
-    expect(settings.backupNudgeDismissed).toBe(false)
+    expect(settings.lastExportAt).toBeNull()
     expect(settings).not.toHaveProperty('libraryKey')
+    expect(settings).not.toHaveProperty('backupNudgeDismissed')
   })
 
-  it('dismisses the backup nudge permanently', async () => {
+  it('keeps the export time across reloads, independent of the pinned voice', async () => {
     const store = createIndexedDbSettingsStore()
-
-    await store.dismissBackupNudge()
-
-    expect((await store.load()).backupNudgeDismissed).toBe(true)
-  })
-
-  it('keeps the backup nudge dismissed across reloads, independent of the pinned voice', async () => {
-    const store = createIndexedDbSettingsStore()
-    await store.dismissBackupNudge()
+    await store.recordExport(4_242)
     await store.setVoice({ provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' })
 
-    expect((await store.load()).backupNudgeDismissed).toBe(true)
+    expect((await store.load()).lastExportAt).toBe(4_242)
   })
 
   it('saves and reloads the pinned voice', async () => {

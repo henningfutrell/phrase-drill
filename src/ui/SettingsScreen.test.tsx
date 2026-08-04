@@ -51,7 +51,8 @@ function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> =
     previewText: 'Bonjour, comment ça va ?',
     onPreviewVoice: vi.fn().mockResolvedValue({ ok: true }),
     onChooseVoice: vi.fn(),
-    onExportBackup: vi.fn().mockResolvedValue('shared'),
+    onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }),
+    backupAge: { level: 'fresh' as const, days: 0 },
     onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: true }),
     onConfirmRestore: vi.fn().mockResolvedValue(undefined),
     onCancelRestore: vi.fn(),
@@ -248,28 +249,40 @@ describe('SettingsScreen', () => {
 
     it('exports through onExportBackup when the export button is tapped', async () => {
       const props = renderScreen()
-      await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+      await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
       expect(props.onExportBackup).toHaveBeenCalled()
     })
 
     it('confirms once the export has gone through the share sheet', async () => {
-      renderScreen({ onExportBackup: vi.fn().mockResolvedValue('shared') })
-      await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
-      expect(container.querySelector('[data-testid="export-status"]')?.textContent).toMatch(/shar/i)
+      renderScreen({ onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }) })
+      await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
+      expect(container.querySelector('[data-testid="backup-status-result"]')?.textContent).toMatch(/shar/i)
     })
 
     it('tells her where to look when the share sheet is not available and it fell back to a download', async () => {
-      renderScreen({ onExportBackup: vi.fn().mockResolvedValue('downloaded') })
-      await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
-      expect(container.querySelector('[data-testid="export-status"]')?.textContent).toMatch(
+      renderScreen({ onExportBackup: vi.fn().mockResolvedValue({ kind: 'downloaded' }) })
+      await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
+      expect(container.querySelector('[data-testid="backup-status-result"]')?.textContent).toMatch(
         /download|files/i,
       )
     })
 
     it('says nothing alarming when she cancels out of the share sheet', async () => {
-      renderScreen({ onExportBackup: vi.fn().mockResolvedValue('cancelled') })
-      await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+      renderScreen({ onExportBackup: vi.fn().mockResolvedValue({ kind: 'cancelled' }) })
+      await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
       expect(container.textContent).not.toMatch(/error|failed/i)
+    })
+
+    it('puts Backup first on the screen — before Voice, before Diagnostics', () => {
+      renderScreen()
+      const sections = [...container.querySelectorAll('[data-testid$="-section"]')]
+      expect((sections[0] as HTMLElement).dataset.testid).toBe('backup-section')
+    })
+
+    it('states the backup age here as well, not only on the home screen', async () => {
+      renderScreen({ backupAge: { level: 'overdue', days: 52 } })
+      const section = container.querySelector('[data-testid="backup-section"]')!
+      expect(section.textContent).toContain('52 days ago')
     })
 
     it('opens the file picker when "Restore from backup" is tapped', () => {
