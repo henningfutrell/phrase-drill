@@ -14,15 +14,17 @@ export type {
   ClockPort,
   PhraseRecord,
   DeckRecord,
+  MixRecord,
   Library,
   DeckStore,
+  MixStore,
   DraftPhrase,
   ScanError,
   ScanReader,
 } from './ports'
 export { LIBRARY_FORMAT } from './ports'
-export type { Mix } from './mix'
-export { createMix } from './mix'
+export type { Mix, MixId } from './mix'
+export { createMix, renameMix, setMixDecks, resolveMixDecks, resolveMixPhrases } from './mix'
 export type { RandomSource } from './shuffle'
 export { shuffle } from './shuffle'
 export type { Step, Utterance, Pause } from './cadence'

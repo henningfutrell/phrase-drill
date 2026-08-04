@@ -17,6 +17,13 @@ export const CLIPS_STORE = 'clips'
  * oldest-to-newest and the oldest trimmed first.
  */
 export const ERRORS_STORE = 'errors'
+/**
+ * Saved Mixes (T059 — `indexed-db-mix-store.ts` owns the record shape).
+ * Keyed by the Mix's own id. A Mix names its Decks by id and lives in its
+ * own store: deleting a Mix cannot reach the `decks` store, and deleting a
+ * Deck cannot reach this one.
+ */
+export const MIXES_STORE = 'mixes'
 
 /**
  * Opens the one IndexedDB database this app uses. All stores are declared
@@ -55,6 +62,12 @@ export function openDatabase(): Promise<IDBPDatabase> {
       if (!db.objectStoreNames.contains(ERRORS_STORE)) {
         // v2 -> v3, additive: every other store passes through untouched.
         db.createObjectStore(ERRORS_STORE, { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains(MIXES_STORE)) {
+        // v3 -> v4, additive: saved Mixes land in their own store, so every
+        // existing Deck and Phrase passes through untouched (the branches
+        // above).
+        db.createObjectStore(MIXES_STORE, { keyPath: 'id' })
       }
     },
   })
