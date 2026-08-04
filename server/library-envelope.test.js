@@ -121,7 +121,6 @@ describe('/api/library — the server never stores an envelope it will later ref
 
   afterEach(async () => {
     await new Promise((resolve) => server.close(resolve))
-    await libraryStore.close()
     rmSync(distDir, { recursive: true, force: true })
   })
 

@@ -13,6 +13,7 @@ import {
   LIBRARY_VERSION_RECENT_COUNT,
   DEFAULT_CLIP_STORE_MAX_BYTES,
   clipStoreMaxBytesFrom,
+  createPool,
 } from './db.js'
 import { fakeLibraryPool as fakePool, fakeClipPool } from './pool.test-support.js'
 
@@ -76,15 +77,6 @@ describe('createLibraryStore (Postgres)', () => {
     expect((await store.get('sub-b')).data).toBe('{"v":"b"}')
   })
 
-  it('closes by ending the pool', async () => {
-    const pool = fakePool()
-    const end = vi.spyOn(pool, 'end')
-    const store = createLibraryStore(pool)
-
-    await store.close()
-
-    expect(end).toHaveBeenCalledTimes(1)
-  })
 })
 
 /**
@@ -310,14 +302,6 @@ describe('createClipStore (Postgres, T063)', () => {
     expect((await store.get('abc123')).durationMs).toBe(250)
   })
 
-  it('closes by ending the pool', async () => {
-    const pool = fakeClipPool()
-    const end = vi.spyOn(pool, 'end')
-
-    await createClipStore(pool).close()
-
-    expect(end).toHaveBeenCalledTimes(1)
-  })
 })
 
 /**
@@ -707,5 +691,63 @@ describe('sslConfigFor (T053: Render deploy)', () => {
 
   it('returns undefined for a missing/undefined connection string', () => {
     expect(sslConfigFor(undefined)).toBeUndefined()
+  })
+})
+
+/**
+ * T088. `pg` emits `error` on the POOL when an idle client's connection dies —
+ * a Postgres failover, a restart, an idle-connection reset by a middlebox. In
+ * Node an `'error'` event with no listener is rethrown and terminates the
+ * process, so before this the routine case took the whole app down, possibly
+ * while she was mid-push. This process holds the only off-device copy of her
+ * library; staying up through a database blip is the whole point.
+ */
+describe('createPool — a dead idle connection must not kill the process (T088)', () => {
+  const URL_WITH_PASSWORD = 'postgres://phrase_drill:s3cr3t-pw@db.example:5432/phrase_drill'
+
+  it('handles the pool error event instead of letting Node rethrow it', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const pool = createPool(URL_WITH_PASSWORD, { logger })
+
+    expect(pool.listenerCount('error')).toBe(1)
+    // With no listener this line throws and, in production, ends the process.
+    expect(() => pool.emit('error', Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' }))).not.toThrow()
+
+    expect(logger.error).toHaveBeenCalledWith('database pool error — the client was discarded, the pool continues', {
+      error: 'terminating connection due to administrator command',
+      code: '57P01',
+    })
+
+    await pool.end()
+  })
+
+  it('logs a pool error with no code without inventing one', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const pool = createPool(URL_WITH_PASSWORD, { logger })
+
+    pool.emit('error', new Error('read ECONNRESET'))
+
+    expect(logger.error).toHaveBeenCalledWith('database pool error — the client was discarded, the pool continues', {
+      error: 'read ECONNRESET',
+      code: null,
+    })
+
+    await pool.end()
+  })
+
+  it('redacts the database password even when the caller passes no logger', async () => {
+    // docs/server.md "Provable: no key can leak". A pool built by a script
+    // (scripts/useradd.mjs, scripts/restore-drill.mjs) has no configured
+    // logger, and a driver error message can carry the connection string.
+    const written = []
+    const pool = createPool(URL_WITH_PASSWORD, { write: (line) => written.push(line) })
+
+    pool.emit('error', new Error(`connection to ${URL_WITH_PASSWORD} failed`))
+
+    expect(written.length).toBe(1)
+    expect(written[0]).not.toContain('s3cr3t-pw')
+    expect(written[0]).toContain('[REDACTED]')
+
+    await pool.end()
   })
 })

@@ -8,6 +8,7 @@ import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
 import { createAnthropicProvider } from './providers/anthropic-client.js'
+import { createShutdown } from './shutdown.js'
 
 /**
  * Wires every real dependency from the environment (T041 "secrets come from
@@ -23,7 +24,6 @@ import { createAnthropicProvider } from './providers/anthropic-client.js'
  * landing are two different races) before the table is guaranteed to exist.
  */
 export async function buildServer(env = process.env) {
-  const port = Number(env.PORT ?? 8080)
   const databaseUrl = env.DATABASE_URL ?? 'postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill'
   const distDir = env.DIST_DIR ?? fileURLToPath(new URL('../dist', import.meta.url))
   const elevenLabsApiKey = env.ELEVENLABS_API_KEY || null
@@ -33,7 +33,13 @@ export async function buildServer(env = process.env) {
   if (!elevenLabsApiKey) logger.warn('ELEVENLABS_API_KEY is not set — speech generation will return not-configured')
   if (!anthropicApiKey) logger.warn('ANTHROPIC_API_KEY is not set — scan reading will return not-configured')
 
-  const pool = createPool(databaseUrl)
+  // T088: `port` is parsed, not `Number(...)`d — see `portFrom`.
+  const port = portFrom(env.PORT, logger)
+
+  // T088: the pool gets this process's redacting logger, so the `error` event
+  // `createPool` now listens for is reported through the same redaction every
+  // other line goes through.
+  const pool = createPool(databaseUrl, { logger })
   await waitForDatabase(pool)
   const libraryStore = createLibraryStore(pool)
   await libraryStore.init()
@@ -99,11 +105,50 @@ export async function buildServer(env = process.env) {
   })
 
   const server = createServer(handleRequest)
-  return { server, port, logger, libraryStore, authStore, clipStore }
+  // `pool` is returned because its lifetime is this function's, not any
+  // store's (T088, see `createPool`): one owner builds it and one owner ends
+  // it, on the way out.
+  return { server, port, logger, pool, libraryStore, authStore, clipStore }
 }
+
+/**
+ * Reads `PORT` into a port `listen` can be trusted with (T088).
+ *
+ * It used to be a bare `Number(env.PORT ?? 8080)`, left in place by T082 on
+ * the reasoning that a bad port fails loudly at `listen`. That is true for the
+ * NaN half (`'abc'` → `options.port should be >= 0 and < 65536`) and false for
+ * the half that a deploy dashboard actually produces: `Number('')` is `0`, and
+ * `listen(0)` is not an error — it is the documented way to ask the OS for a
+ * RANDOM FREE PORT. A cleared `PORT` field therefore gives a process that
+ * boots, logs `server listening`, and answers nothing on the port the platform
+ * routes to, with no line in the log saying so. The only off-device copy of
+ * her library is then unreachable and healthy-looking.
+ *
+ * It falls back rather than refusing to boot, for the same reason
+ * `clipStoreMaxBytesFrom` does: a misconfigured deploy that still serves
+ * `GET /api/library` on the documented default is worth more than one that
+ * does not start. The fallback is logged at error level, once, at boot.
+ */
+export function portFrom(raw, logger) {
+  if (raw === undefined || raw === null) return DEFAULT_PORT
+  const value = Number(raw)
+  // `0` is excluded deliberately: it is the random-port request, never a port
+  // anything can route to.
+  if (Number.isInteger(value) && value > 0 && value < 65536) return value
+  logger.error('PORT is not a usable TCP port — using the default', { provided: String(raw), using: DEFAULT_PORT })
+  return DEFAULT_PORT
+}
+
+/** Matches `docs/server.md` and `docker-compose.yml`; Render sets `PORT` itself. */
+export const DEFAULT_PORT = 8080
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`
 if (isMain) {
-  const { server, port, logger } = await buildServer()
+  const { server, port, logger, pool } = await buildServer()
+  // T088: without this, Render's SIGTERM on every deploy and restart killed
+  // the process outright, cutting any push in flight.
+  const shutdown = createShutdown({ server, pool, logger })
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT', () => shutdown('SIGINT'))
   server.listen(port, () => logger.info('server listening', { port }))
 }

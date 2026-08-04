@@ -534,7 +534,7 @@ These are deliberate stopping points, not gaps someone forgot to close:
 
 | Var                    | Default                                                     | Meaning                                           |
 | ----------------------- | ------------------------------------------------------------ | -------------------------------------------------- |
-| `PORT`                  | `8080`                                                        | HTTP port.                                          |
+| `PORT`                  | `8080`                                                        | HTTP port. Parsed, not coerced (T088): anything that is not a whole number in 1–65535 — including an empty or cleared value, which `Number('')` reads as `0` and `listen(0)` turns into a RANDOM free port — logs an error and falls back to `8080`. |
 | `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `library_versions`, `users`, `sessions`, `clips`. |
 | `CLIP_STORE_MAX_BYTES`  | `314572800` (300 MB)                                          | Ceiling on the shared Clip store; crossing it evicts oldest-first to 90%. Raise it with the database plan, never above what leaves `libraries` room. |
 | `DIST_DIR`               | `../dist` (relative to `server/`)                             | Built PWA to serve statically.               |
@@ -551,6 +551,31 @@ documents every variable this stack reads, with safe local-only defaults;
 `docker-compose.yml`'s own defaults (`phrase_drill`/`phrase_drill`) are for
 `docker compose up` on a laptop, never for anything reachable off
 `localhost`.
+
+## Staying up, and going down on purpose (T088)
+
+This process holds the only off-device copy of her library, so the ways it can
+END are worth as much attention as the ways it can be wrong. Three were
+reachable in ordinary operation; all three are closed:
+
+- **A database blip no longer kills the app.** `pg` re-emits an idle client's
+  failure on the pool, and Node terminates a process on an `'error'` event with
+  no listener — so a Postgres failover, a restart, or a middlebox resetting an
+  idle connection took the whole server down, possibly mid-push. `createPool`
+  (`server/db.js`) listens and logs. That is all it does on purpose: `pg` has
+  already discarded the bad client, and the next query opens a fresh
+  connection, so reconnection logic here would only duplicate the pool.
+- **SIGTERM drains instead of cutting.** Render sends SIGTERM on every deploy
+  and restart. `server/shutdown.js` stops accepting new connections, lets the
+  in-flight requests finish (a `PUT /api/library` among them), closes the idle
+  keep-alive sockets that would otherwise stall the drain, then ends the pool —
+  once. A request that will not finish inside 10 s is forced shut and the
+  process exits `1`, which is still a shutdown this code chose rather than the
+  platform's SIGKILL.
+- **The pool has one owner.** `buildServer` builds it and the shutdown ends it.
+  The stores are handed a pool and share it; none of them ends it. (They each
+  used to expose `close()` calling `pool.end()` on that one shared pool, so
+  closing any one of them ended the connections the other two still held.)
 
 ## Schema: creation and change
 

@@ -1,4 +1,5 @@
 import pg from 'pg'
+import { createLogger } from './logger.js'
 
 const { Pool } = pg
 
@@ -248,10 +249,6 @@ export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, 
       )
       return rows.map((row) => ({ id: Number(row.id), data: row.data, updatedAt: Number(row.updatedAt), archivedAt: Number(row.archivedAt) }))
     },
-
-    async close() {
-      await pool.end()
-    },
   }
 }
 
@@ -405,10 +402,6 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
 
     /** Live size of the store, for the eviction loop and for anyone asking how close the ceiling is. */
     totalBytes,
-
-    async close() {
-      await pool.end()
-    },
   }
 }
 
@@ -536,10 +529,6 @@ export function createAuthStore(pool) {
         await pool.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash])
       },
     },
-
-    async close() {
-      await pool.end()
-    },
   }
 }
 
@@ -583,6 +572,14 @@ export function sslConfigFor(connectionString) {
  * Constructs the real `pg` pool used in production; tests inject their own
  * fake instead.
  *
+ * **Its lifetime belongs to whoever built it (T088).** The three stores in
+ * this module are HANDED a pool and share it; none of them ends it. Each used
+ * to expose a `close()` that called `pool.end()` on that one shared pool, so
+ * closing any one store silently ended the connections the other two still
+ * held — and in the server nothing ever called it, so the pool was never
+ * closed at all. One owner now: `server/index.js` builds it and
+ * `server/shutdown.js` ends it, once, on the way out.
+ *
  * `connectionTimeoutMillis` is not optional (T055). Without it, `pg` inherits
  * the OS TCP connect timeout, so a host that silently drops packets — a wrong
  * hostname, a firewall, the wrong network — hangs for over a minute per
@@ -590,10 +587,39 @@ export function sslConfigFor(connectionString) {
  * turns a misconfiguration into an apparently frozen process, which is
  * exactly how `scripts/useradd.mjs` was reported. Fail fast; the retry loop
  * above is what provides the patience.
+ *
+ * **The `error` listener is not optional either (T088).** `pg` attaches an
+ * idle listener to every pooled client and re-emits its failures on the POOL
+ * (`pg-pool/index.js` `makeIdleListener`), so a Postgres failover, a restart,
+ * or a middlebox resetting an idle connection surfaces here. Node rethrows an
+ * `'error'` event that has no listener, which ENDS THE PROCESS — so before
+ * this, a routine database blip took the app down, possibly while she was
+ * mid-push. This process holds the only off-device copy of her library.
+ *
+ * **Logging is all the handler does, and that is the whole fix.** `pg` has
+ * already destroyed the bad client and removed it from the pool by the time
+ * this fires (`_remove` runs before the `emit`), and the next `query`/`connect`
+ * opens a fresh connection. Reconnection machinery added here would duplicate
+ * what the pool does and would be the second thing to get wrong.
+ *
+ * The message and the driver's SQLSTATE go through the redacting logger, never
+ * `console.error`, because a driver error can quote the connection string —
+ * docs/server.md "Provable: no key can leak". A caller with no logger of its
+ * own (`scripts/useradd.mjs`, `scripts/restore-drill.mjs`) gets one that
+ * redacts this connection string's password, so the safe path is the default
+ * rather than something each script has to remember.
  */
-export function createPool(connectionString, { connectionTimeoutMillis = 5000 } = {}) {
+export function createPool(connectionString, { connectionTimeoutMillis = 5000, logger, write } = {}) {
   const ssl = sslConfigFor(connectionString)
-  return new Pool(ssl ? { connectionString, ssl, connectionTimeoutMillis } : { connectionString, connectionTimeoutMillis })
+  const pool = new Pool(ssl ? { connectionString, ssl, connectionTimeoutMillis } : { connectionString, connectionTimeoutMillis })
+  const log = logger ?? createLogger({ secrets: [extractPassword(connectionString)], write })
+  pool.on('error', (err) => {
+    log.error('database pool error — the client was discarded, the pool continues', {
+      error: err instanceof Error ? err.message : String(err),
+      code: typeof err?.code === 'string' ? err.code : null,
+    })
+  })
+  return pool
 }
 
 /**
