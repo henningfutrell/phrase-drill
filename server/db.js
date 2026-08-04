@@ -170,10 +170,21 @@ export function sslConfigFor(connectionString) {
   return undefined
 }
 
-/** Constructs the real `pg` pool used in production; tests inject their own fake instead. */
-export function createPool(connectionString) {
+/**
+ * Constructs the real `pg` pool used in production; tests inject their own
+ * fake instead.
+ *
+ * `connectionTimeoutMillis` is not optional (T055). Without it, `pg` inherits
+ * the OS TCP connect timeout, so a host that silently drops packets — a wrong
+ * hostname, a firewall, the wrong network — hangs for over a minute per
+ * attempt with no output. Combined with `waitForDatabase`'s retry loop that
+ * turns a misconfiguration into an apparently frozen process, which is
+ * exactly how `scripts/useradd.mjs` was reported. Fail fast; the retry loop
+ * above is what provides the patience.
+ */
+export function createPool(connectionString, { connectionTimeoutMillis = 5000 } = {}) {
   const ssl = sslConfigFor(connectionString)
-  return ssl ? new Pool({ connectionString, ssl }) : new Pool({ connectionString })
+  return new Pool(ssl ? { connectionString, ssl, connectionTimeoutMillis } : { connectionString, connectionTimeoutMillis })
 }
 
 /**
