@@ -1,17 +1,23 @@
 import type { IDBPDatabase } from 'idb'
 import type { Deck, DeckId, DeckStore, Library } from '../../domain'
-import { DECKS_STORE, openDatabase } from './database'
-import { buildLibrary, migrateLibraryDecks } from './library'
+import { DECKS_STORE, MIXES_STORE, openDatabase } from './database'
+import { buildLibrary, migrateLibraryDecks, migrateLibraryMixes } from './library'
 import { fromRecord, toRecord } from './mapping'
-import type { DeckRecord } from './migrations'
+import type { DeckRecord, MixRecord } from './migrations'
 import { requestPersistence } from './persistence'
 
 /**
- * The IndexedDB implementation of `DeckStore`, via `idb`. Every write is a
- * whole-aggregate put to the `decks` store; no operation here ever opens a
- * transaction spanning more than one store. `exportAll` reads only the
- * `decks` store, so it structurally cannot carry anything from `settings`
- * (the API key) — there is nothing to redact because nothing is read.
+ * The IndexedDB implementation of `DeckStore`, via `idb`. Every Deck write
+ * is a whole-aggregate put to the `decks` store.
+ *
+ * `exportAll`/`importAll` are the exception, and deliberately so: the
+ * `Library` envelope is the whole of her data, which since T059 means
+ * Decks *and* saved Mixes. They read and write both stores — `importAll`
+ * inside one transaction spanning the two, because a restore that replaced
+ * the Decks and then failed before the Mixes would leave her library in a
+ * state she never had. Neither ever reads `settings`, so an export
+ * structurally cannot carry a credential; there is nothing to redact
+ * because nothing is read.
  */
 export function createIndexedDbDeckStore(): DeckStore {
   let persistenceRequested = false
@@ -63,17 +69,25 @@ export function createIndexedDbDeckStore(): DeckStore {
 
     async exportAll(): Promise<Library> {
       const db = await getDatabase()
-      const records = (await db.getAll(DECKS_STORE)) as DeckRecord[]
-      return buildLibrary(records, Date.now())
+      const decks = (await db.getAll(DECKS_STORE)) as DeckRecord[]
+      const mixes = (await db.getAll(MIXES_STORE)) as MixRecord[]
+      return buildLibrary(decks, mixes, Date.now())
     },
 
     async importAll(library: Library): Promise<void> {
-      const migrated = migrateLibraryDecks(library)
+      const migratedDecks = migrateLibraryDecks(library)
+      const migratedMixes = migrateLibraryMixes(library)
       const db = await getDatabase()
-      const tx = db.transaction(DECKS_STORE, 'readwrite')
-      await tx.store.clear()
-      for (const record of migrated) {
-        await tx.store.put(record)
+      const tx = db.transaction([DECKS_STORE, MIXES_STORE], 'readwrite')
+      const deckStore = tx.objectStore(DECKS_STORE)
+      const mixStore = tx.objectStore(MIXES_STORE)
+      await deckStore.clear()
+      await mixStore.clear()
+      for (const record of migratedDecks) {
+        await deckStore.put(record)
+      }
+      for (const record of migratedMixes) {
+        await mixStore.put(record)
       }
       await tx.done
     },

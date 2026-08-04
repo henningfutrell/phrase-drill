@@ -8,7 +8,7 @@ vi.mock('idb', async () => {
 
 // Imported after the mock is registered, per Vitest's hoisting contract.
 const idbModule = await import('idb')
-const { openDatabase, DB_NAME, DECKS_STORE, SETTINGS_STORE, CLIPS_STORE, ERRORS_STORE } = await import('./database')
+const { openDatabase, DB_NAME, DECKS_STORE, SETTINGS_STORE, CLIPS_STORE, ERRORS_STORE, MIXES_STORE } = await import('./database')
 
 /**
  * Fixture: a v1 database, as it would sit on a real device today — no
@@ -67,13 +67,14 @@ describe('openDatabase v1 -> v2 migration', () => {
     expect(await db.get(CLIPS_STORE, 'abc123')).toEqual(clip)
   })
 
-  it('creates a fresh database with all four stores when there is nothing to migrate from', async () => {
+  it('creates a fresh database with every store when there is nothing to migrate from', async () => {
     const db = await openDatabase()
 
     expect(db.objectStoreNames.contains(DECKS_STORE)).toBe(true)
     expect(db.objectStoreNames.contains(SETTINGS_STORE)).toBe(true)
     expect(db.objectStoreNames.contains(CLIPS_STORE)).toBe(true)
     expect(db.objectStoreNames.contains(ERRORS_STORE)).toBe(true)
+    expect(db.objectStoreNames.contains(MIXES_STORE)).toBe(true)
   })
 })
 
@@ -119,5 +120,101 @@ describe('openDatabase v2 -> v3 migration', () => {
     await db.put(ERRORS_STORE, entry)
 
     expect(await db.get(ERRORS_STORE, 1)).toEqual(entry)
+  })
+})
+
+describe('openDatabase v3 -> v4 migration (T059: saved Mixes)', () => {
+  beforeEach(() => {
+    resetFakeIdb()
+  })
+
+  /**
+   * Fixture: a v3 database as it sits on her phone today — decks, settings,
+   * clips and errors already written, no `mixes` store. This is the exact
+   * state the upgrade has to survive without losing a single Phrase.
+   */
+  async function seedV3Database(): Promise<void> {
+    const v3db = await idbModule.openDB(DB_NAME, 3, {
+      upgrade(db) {
+        db.createObjectStore(DECKS_STORE, { keyPath: 'id' })
+        db.createObjectStore(SETTINGS_STORE)
+        db.createObjectStore(CLIPS_STORE, { keyPath: 'hash' })
+        db.createObjectStore(ERRORS_STORE, { keyPath: 'id' })
+      },
+    })
+    await v3db.put(DECKS_STORE, {
+      id: 'home',
+      name: 'Home',
+      phrases: [
+        { id: 'p1', french: 'Bonjour', english: 'Hello' },
+        { id: 'p2', french: 'Merci', english: 'Thank you' },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    await v3db.put(DECKS_STORE, {
+      id: 'work',
+      name: 'Work',
+      phrases: [{ id: 'p3', french: 'Réunion', english: 'Meeting' }],
+      createdAt: 3,
+      updatedAt: 4,
+    })
+    await v3db.put(SETTINGS_STORE, { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }, 'voice')
+    await v3db.put(CLIPS_STORE, { hash: 'abc', bytes: new ArrayBuffer(2), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+  }
+
+  it('adds the mixes store on top of a real v3 database, with every Deck and Phrase intact', async () => {
+    await seedV3Database()
+
+    const db = await openDatabase()
+
+    expect(db.objectStoreNames.contains(MIXES_STORE)).toBe(true)
+    expect(await db.getAll(MIXES_STORE)).toEqual([])
+    expect(await db.get(DECKS_STORE, 'home')).toEqual({
+      id: 'home',
+      name: 'Home',
+      phrases: [
+        { id: 'p1', french: 'Bonjour', english: 'Hello' },
+        { id: 'p2', french: 'Merci', english: 'Thank you' },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    expect(await db.get(DECKS_STORE, 'work')).toMatchObject({ name: 'Work' })
+    expect((await db.getAll(DECKS_STORE)).length).toBe(2)
+  })
+
+  it('leaves settings and the clip cache untouched across the upgrade', async () => {
+    await seedV3Database()
+
+    const db = await openDatabase()
+
+    expect(await db.get(SETTINGS_STORE, 'voice')).toEqual({ provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' })
+    expect(await db.get(CLIPS_STORE, 'abc')).toMatchObject({ hash: 'abc', mime: 'audio/mpeg' })
+  })
+
+  it('lets a Mix be written and read once the migration has run', async () => {
+    await seedV3Database()
+
+    const db = await openDatabase()
+    const mix = { id: 'm1', name: 'Mornings', deckIds: ['home', 'work'], createdAt: 5, updatedAt: 5 }
+    await db.put(MIXES_STORE, mix)
+
+    expect(await db.get(MIXES_STORE, 'm1')).toEqual(mix)
+  })
+
+  it('carries a v1 database all the way to v4 in one open, decks intact', async () => {
+    await seedV1Database()
+
+    const db = await openDatabase()
+
+    expect(await db.get(DECKS_STORE, 'home')).toEqual({
+      id: 'home',
+      name: 'Home',
+      phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    expect(db.objectStoreNames.contains(MIXES_STORE)).toBe(true)
   })
 })

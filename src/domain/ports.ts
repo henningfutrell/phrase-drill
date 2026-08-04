@@ -6,6 +6,7 @@
  */
 
 import type { Deck, DeckId } from './deck'
+import type { Mix, MixId } from './mix'
 
 /** Closed on purpose — widening it later is a type change, not a data migration. */
 export type Language = 'fr-FR' | 'en-US'
@@ -52,18 +53,39 @@ export interface DeckRecord {
   readonly updatedAt: number
 }
 
+/**
+ * A saved Mix as it sits on disk: the domain shape plus the same
+ * bookkeeping a DeckRecord carries. Deck *ids* only — a Mix that copied
+ * Phrases would go stale the moment a Deck was edited.
+ */
+export interface MixRecord {
+  readonly id: string
+  readonly name: string
+  readonly deckIds: readonly string[]
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
 export const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
  * A whole-library snapshot for export/import — also the recovery path for
- * iOS's IndexedDB eviction. Import replaces the whole library; it never
- * merges, because merge is a design problem nobody has asked to solve.
+ * iOS's IndexedDB eviction, and the body of the `/api/library` sync
+ * envelope. Import replaces the whole library; it never merges, because
+ * merge is a design problem nobody has asked to solve.
  */
 export interface Library {
   readonly format: typeof LIBRARY_FORMAT
   readonly schemaVersion: number
   readonly exportedAt: number
   readonly decks: readonly DeckRecord[]
+  /**
+   * Saved Mixes travel with the Decks (T059): they are her data, and a
+   * library that left them behind would lose them on a new phone. Optional
+   * because every backup written before schema v4 has no such field at all
+   * — absent means "no saved Mixes", never "invalid file".
+   */
+  readonly mixes?: readonly MixRecord[]
 }
 
 export interface DeckStore {
@@ -76,6 +98,20 @@ export interface DeckStore {
   exportAll(): Promise<Library>
   /** Replaces the whole library. Never merges. */
   importAll(library: Library): Promise<void>
+}
+
+/**
+ * Saved Mixes (T059). Separate from `DeckStore` because a Mix is its own
+ * aggregate with its own lifetime: deleting one must never reach a Deck,
+ * and deleting a Deck must never reach a Mix. Whole-library export/import
+ * stays on `DeckStore`, which owns the one `Library` envelope both stores
+ * travel in.
+ */
+export interface MixStore {
+  loadAll(): Promise<Mix[]>
+  /** Whole-aggregate put: insert or replace. */
+  save(mix: Mix): Promise<void>
+  remove(id: MixId): Promise<void>
 }
 
 /**

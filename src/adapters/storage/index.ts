@@ -1,4 +1,5 @@
 export { createIndexedDbDeckStore } from './indexed-db-deck-store'
+export { createIndexedDbMixStore } from './indexed-db-mix-store'
 export { createIndexedDbSettingsStore } from './settings-store'
 export type { Settings, SettingsStore, Voice } from './settings-store'
 export { backupFilename, parseLibraryFile } from './library'

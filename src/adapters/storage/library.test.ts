@@ -1,20 +1,52 @@
 import { describe, expect, it } from 'vitest'
 import { LIBRARY_FORMAT, type Library } from '../../domain'
-import { backupFilename, buildLibrary, migrateLibraryDecks, parseLibraryFile } from './library'
+import { backupFilename, buildLibrary, migrateLibraryDecks, migrateLibraryMixes, parseLibraryFile } from './library'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
+const MIX_RECORDS = [{ id: 'm1', name: 'Mornings', deckIds: ['d1'], createdAt: 2, updatedAt: 2 }]
+
 describe('buildLibrary', () => {
-  it('wraps deck records with the format, current schema version, and export time', () => {
+  it('wraps deck and mix records with the format, current schema version, and export time', () => {
     const records = [
       { id: 'd1', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 },
     ]
 
-    expect(buildLibrary(records, 12345)).toEqual({
+    expect(buildLibrary(records, MIX_RECORDS, 12345)).toEqual({
       format: LIBRARY_FORMAT,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       exportedAt: 12345,
       decks: records,
+      mixes: MIX_RECORDS,
     })
+  })
+
+  it('carries saved Mixes so they survive a new phone — the whole point of the sync envelope (T059)', () => {
+    expect(buildLibrary([], MIX_RECORDS, 1).mixes).toEqual(MIX_RECORDS)
+  })
+})
+
+describe('migrateLibraryMixes', () => {
+  it('returns the mix records of a current library unchanged', () => {
+    const library: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [],
+      mixes: MIX_RECORDS,
+    }
+
+    expect(migrateLibraryMixes(library)).toEqual(MIX_RECORDS)
+  })
+
+  it('reads a pre-v4 backup, which has no mixes field at all, as no saved Mixes', () => {
+    const library: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: 3,
+      exportedAt: 1,
+      decks: [{ id: 'd1', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+
+    expect(migrateLibraryMixes(library)).toEqual([])
   })
 })
 
@@ -80,6 +112,23 @@ describe('parseLibraryFile', () => {
 
   it('refuses a library whose decks field is not an array', () => {
     const result = parseLibraryFile(JSON.stringify({ ...validLibrary, decks: 'not-an-array' }))
+    expect(result).toEqual({ ok: false, reason: 'invalid' })
+  })
+
+  it('accepts a pre-v4 backup that has no mixes field — an old file is still a valid backup', () => {
+    const withoutMixes: Record<string, unknown> = { ...validLibrary, schemaVersion: 3 }
+    delete withoutMixes.mixes
+    const result = parseLibraryFile(JSON.stringify(withoutMixes))
+    expect(result.ok).toBe(true)
+  })
+
+  it('accepts a library carrying saved Mixes', () => {
+    const withMixes = { ...validLibrary, mixes: [{ id: 'm1', name: 'Mornings', deckIds: ['d1'], createdAt: 1, updatedAt: 1 }] }
+    expect(parseLibraryFile(JSON.stringify(withMixes))).toEqual({ ok: true, library: withMixes })
+  })
+
+  it('refuses a library whose mixes field is present but not an array', () => {
+    const result = parseLibraryFile(JSON.stringify({ ...validLibrary, mixes: 'not-an-array' }))
     expect(result).toEqual({ ok: false, reason: 'invalid' })
   })
 

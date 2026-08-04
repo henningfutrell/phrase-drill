@@ -1,5 +1,5 @@
 import { LIBRARY_FORMAT, type Library } from '../../domain'
-import { CURRENT_SCHEMA_VERSION, migrateDeckRecord, type DeckRecord } from './migrations'
+import { CURRENT_SCHEMA_VERSION, migrateDeckRecord, type DeckRecord, type MixRecord } from './migrations'
 
 export type { Library }
 
@@ -34,6 +34,12 @@ export function parseLibraryFile(raw: string): ParseLibraryResult {
   if (typeof candidate.schemaVersion !== 'number' || !Array.isArray(candidate.decks)) {
     return { ok: false, reason: 'invalid' }
   }
+  // `mixes` arrived at schema v4 (T059). Absent is normal — every backup
+  // written before then has no such field — but present-and-not-an-array is
+  // a corrupt file, not an old one.
+  if (candidate.mixes !== undefined && !Array.isArray(candidate.mixes)) {
+    return { ok: false, reason: 'invalid' }
+  }
 
   return { ok: true, library: candidate as unknown as Library }
 }
@@ -49,13 +55,23 @@ export function backupFilename(date: Date): string {
   return `phrase-drill-backup-${yyyy}-${mm}-${dd}.json`
 }
 
-/** Wrap a whole-library snapshot with its format, current schema version, and export time. */
-export function buildLibrary(decks: readonly DeckRecord[], exportedAt: number): Library {
+/**
+ * Wrap a whole-library snapshot with its format, current schema version, and
+ * export time. Saved Mixes travel with the Decks (T059): the same envelope
+ * is both the backup file and the `/api/library` sync body, so a Mix left
+ * out here is a Mix she loses when she gets a new phone.
+ */
+export function buildLibrary(
+  decks: readonly DeckRecord[],
+  mixes: readonly MixRecord[],
+  exportedAt: number,
+): Library {
   return {
     format: LIBRARY_FORMAT,
     schemaVersion: CURRENT_SCHEMA_VERSION,
     exportedAt,
     decks: [...decks],
+    mixes: [...mixes],
   }
 }
 
@@ -66,4 +82,18 @@ export function buildLibrary(decks: readonly DeckRecord[], exportedAt: number): 
  */
 export function migrateLibraryDecks(library: Library): DeckRecord[] {
   return library.decks.map((record) => migrateDeckRecord(record, library.schemaVersion))
+}
+
+/**
+ * The saved Mixes of an imported library. Mix records were born at schema
+ * v4 and have had exactly one shape since, so there is no chain to run —
+ * only the one question a pre-v4 backup asks, which is what "no `mixes`
+ * field at all" means. It means no saved Mixes, and it is not an error:
+ * refusing an old backup would refuse the very file that exists to rescue
+ * her phrases. The version guard itself still runs, on the decks
+ * (`migrateLibraryDecks`), so a library newer than this build is still
+ * rejected before anything is written.
+ */
+export function migrateLibraryMixes(library: Library): MixRecord[] {
+  return [...(library.mixes ?? [])]
 }

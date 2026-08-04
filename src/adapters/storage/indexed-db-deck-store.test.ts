@@ -10,6 +10,7 @@ vi.mock('idb', async () => {
 
 // Imported after the mock is registered, per Vitest's hoisting contract.
 const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
+const { createIndexedDbMixStore } = await import('./indexed-db-mix-store')
 
 function makeDeck(overrides: Partial<Deck> = {}): Deck {
   return {
@@ -103,6 +104,54 @@ describe('createIndexedDbDeckStore', () => {
     await store.importAll(replacement)
 
     expect((await store.loadAll()).map((d) => d.id)).toEqual(['fresh'])
+  })
+
+  it('carries saved Mixes through exportAll and importAll, so they survive a new phone (T059)', async () => {
+    const store = createIndexedDbDeckStore()
+    const mixStore = createIndexedDbMixStore()
+    await store.save(makeDeck({ id: 'home', name: 'Home' }))
+    await mixStore.save({ id: 'm1', name: 'Mornings', deckIds: ['home'] })
+
+    const library = await store.exportAll()
+    expect(library.mixes?.map((m) => m.id)).toEqual(['m1'])
+
+    resetFakeIdb()
+    const freshDecks = createIndexedDbDeckStore()
+    const freshMixes = createIndexedDbMixStore()
+    await freshDecks.importAll(library)
+
+    expect((await freshDecks.loadAll()).map((d) => d.id)).toEqual(['home'])
+    expect(await freshMixes.loadAll()).toEqual([{ id: 'm1', name: 'Mornings', deckIds: ['home'] }])
+  })
+
+  it('import replaces saved Mixes wholesale, the same way it replaces Decks', async () => {
+    const store = createIndexedDbDeckStore()
+    const mixStore = createIndexedDbMixStore()
+    await mixStore.save({ id: 'stale', name: 'Stale', deckIds: [] })
+    const exported = await store.exportAll()
+
+    await store.importAll({
+      ...exported,
+      mixes: [{ id: 'fresh', name: 'Fresh', deckIds: ['home'], createdAt: 1, updatedAt: 1 }],
+    })
+
+    expect((await mixStore.loadAll()).map((m) => m.id)).toEqual(['fresh'])
+  })
+
+  it('restores a pre-v4 backup that carries no mixes at all, leaving no saved Mixes behind', async () => {
+    const store = createIndexedDbDeckStore()
+    const mixStore = createIndexedDbMixStore()
+    await mixStore.save({ id: 'stale', name: 'Stale', deckIds: [] })
+
+    await store.importAll({
+      format: 'phrase-drill-library',
+      schemaVersion: 3,
+      exportedAt: 1,
+      decks: [{ id: 'home', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 }],
+    })
+
+    expect((await store.loadAll()).map((d) => d.id)).toEqual(['home'])
+    expect(await mixStore.loadAll()).toEqual([])
   })
 
   it('requests persistent storage once, at first save, and reports the real result', async () => {
