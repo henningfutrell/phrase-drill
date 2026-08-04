@@ -177,6 +177,7 @@ function createFakeGenerationQueue(): GenerationQueue & { enqueued: Array<{ id: 
     statusFor() {
       return undefined
     },
+    async whenIdle() {},
   }
 }
 
