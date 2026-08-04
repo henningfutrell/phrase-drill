@@ -1,6 +1,21 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { backupFileName, parseBackupTimestamp, selectExpiredBackups, resolveDestinationDir } from './backup.mjs'
+
+const execFileAsync = promisify(execFile)
+const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'backup.mjs')
+
+/** Runs the script for real and resolves with its exit code and streams — never throws on a non-zero exit. */
+function runScript(env) {
+  return execFileAsync(process.execPath, [SCRIPT], { env: { PATH: process.env.PATH, ...env } }).then(
+    ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
+    (err) => ({ code: err.code, stdout: err.stdout ?? '', stderr: err.stderr ?? '' }),
+  )
+}
 
 describe('backupFileName', () => {
   it('is ISO-8601 UTC with colons swapped for dashes, so it sorts chronologically and is a safe filename', () => {
@@ -62,5 +77,26 @@ describe('resolveDestinationDir', () => {
   it('refuses any other URI scheme for the same reason', () => {
     expect(() => resolveDestinationDir('https://example.com/backups')).toThrow(/local directory/)
     expect(() => resolveDestinationDir('b2://bucket')).toThrow(/local directory/)
+  })
+})
+
+// A backup that fails silently is worse than none. Every failure must reach
+// stderr, including the ones that happen before the logger is constructed —
+// those used to exit 1 with no output at all, which reads as a clean run to
+// anything watching stdout.
+describe('the script itself, run for real', () => {
+  it('says why it refused an s3:// destination instead of exiting 1 in silence', async () => {
+    const { code, stderr } = await runScript({
+      DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+      BACKUP_DEST: 's3://phrase-drill-backups',
+    })
+    expect(code).toBe(1)
+    expect(stderr).toMatch(/local directory/)
+  })
+
+  it('says which required variable was missing', async () => {
+    const { code, stderr } = await runScript({ BACKUP_DEST: '/tmp/nowhere' })
+    expect(code).toBe(1)
+    expect(stderr).toMatch(/DATABASE_URL is required/)
   })
 })
