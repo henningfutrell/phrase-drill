@@ -19,10 +19,14 @@ export interface VoiceOption {
 
 /** What a preview attempt resolved to — mirrors `SynthError`'s `kind`
  * without importing the adapter type. */
-export type PreviewOutcome = { ok: true } | { ok: false; reason: 'unauthorized' | 'quota' | 'network' }
+export type PreviewOutcome = { ok: true } | { ok: false; reason: 'unauthorized' | 'rate-limited' | 'quota' | 'network' }
 
 const PREVIEW_ERROR_COPY: Record<Exclude<PreviewOutcome, { ok: true }>['reason'], string> = {
   unauthorized: "That didn't play — the server isn't set up for speech yet. Ask whoever runs it to check.",
+  // Separate from `quota` on purpose (T035): being asked to slow down is a
+  // moment's wait, and telling her the credit is gone would send her asking
+  // for money nobody needs to spend.
+  'rate-limited': "That didn't play — a lot is being made at once. Wait a moment and try again.",
   quota: "That didn't play — this month's speech credit may be used up.",
   network: "That didn't play — check the connection and try again.",
 }

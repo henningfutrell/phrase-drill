@@ -186,6 +186,19 @@ describe('SettingsScreen', () => {
       expect(container.querySelector('[data-testid="voice-preview-error"]')?.textContent).toMatch(/server/i)
     })
 
+    // T035: our own server's limiter is a wait, not a bill. Telling her the
+    // speech credit is used up when it is not sends her to ask for money she
+    // does not need, and the remedy — try again in a moment — is different.
+    it('says to wait, not that the credit is gone, when the server itself is rate-limiting', async () => {
+      renderScreen({ onPreviewVoice: vi.fn().mockResolvedValue({ ok: false, reason: 'rate-limited' }) })
+      await act(async () => click(container.querySelector('[data-testid="voice-preview-voice-rachel"]')!))
+      await flush()
+
+      const text = container.querySelector('[data-testid="voice-preview-error"]')?.textContent ?? ''
+      expect(text).toMatch(/moment|again/i)
+      expect(text).not.toMatch(/credit/i)
+    })
+
     it('warns, before committing, that switching voices regenerates every phrase and takes a while — not "cache invalidation"', async () => {
       renderScreen()
       await act(async () => click(container.querySelector('[data-testid="voice-choose-voice-rachel"]')!))

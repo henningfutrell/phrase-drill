@@ -24,13 +24,36 @@ export interface SynthResult {
 }
 
 /**
- * Why a synth call could not produce a Clip. Shaped exactly like
- * `ScanError` (`unauthorized` / network-ish failure) so the UI has one
- * "ask Henning" vocabulary across both provider-backed adapters. `quota`
- * replaces `ScanError`'s `unreadable` — there is no analogous "response made
- * no sense" case here; a bad response is a `network` failure instead.
+ * Why a synth call could not produce a Clip.
+ *
+ * `rate-limited` and `quota` are the two that look alike and are not (T035):
+ *
+ * - **`rate-limited`** is *this app's own server* pacing us — HTTP 429 with
+ *   `Retry-After`. It is a queue, not a wall: the only remedy is to wait the
+ *   time it names and ask again, and the caller that gives up instead throws
+ *   away work that would have succeeded a second later.
+ * - **`quota`** is the *provider* out of credits — HTTP 402. No amount of
+ *   waiting fixes it; somebody has to pay. Terminal, and never retried.
+ *
+ * Collapsing them (both were 429 before) is what marked ~1,940 Phrases of a
+ * cold 1,000-Phrase library permanently failed on the first sweep.
  */
-export type SynthError = { kind: 'unauthorized' } | { kind: 'quota' } | { kind: 'network'; detail: string }
+export type SynthError =
+  | { kind: 'unauthorized' }
+  | { kind: 'rate-limited'; retryAfterMs: number }
+  | { kind: 'quota' }
+  | { kind: 'network'; detail: string }
+
+/** Used when a 429 carries no usable `Retry-After`. One second is the
+ * smallest wait worth taking; the server always sends the header, so this is
+ * the answer to a proxy having eaten it, not the normal path. */
+const DEFAULT_RETRY_AFTER_MS = 1000
+
+/** However long a `Retry-After` claims, the sweep is not parked longer than
+ * this. A minute is already far past anything this server's limiter can ask
+ * for (60 per 60s is one token per second), so a larger number is a bug or a
+ * middlebox, not an instruction worth honouring. */
+const MAX_RETRY_AFTER_MS = 60_000
 
 export interface SynthClient {
   /** Synthesize `text` (in `lang`) with the given voice. Resolves to MP3 bytes and an estimated duration. */
@@ -88,6 +111,10 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
       }
 
       if (response.status === 429) {
+        return Promise.reject(rateLimited(response.headers.get('retry-after')))
+      }
+
+      if (response.status === 402) {
         return Promise.reject(quota())
       }
 
@@ -109,6 +136,14 @@ function unauthorized(): SynthError {
 
 function quota(): SynthError {
   return { kind: 'quota' }
+}
+
+/** `Retry-After` is seconds (RFC 9110). Anything unparsable, zero, or
+ * negative falls back rather than being trusted; anything absurd is capped. */
+function rateLimited(header: string | null): SynthError {
+  const seconds = header === null ? NaN : Number(header)
+  const requested = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : DEFAULT_RETRY_AFTER_MS
+  return { kind: 'rate-limited', retryAfterMs: Math.min(requested, MAX_RETRY_AFTER_MS) }
 }
 
 function networkError(detail: string): SynthError {

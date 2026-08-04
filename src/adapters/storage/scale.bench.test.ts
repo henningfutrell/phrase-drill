@@ -223,16 +223,16 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
 
       const coldFillCalls = calls
 
-      // 2b. Concurrency: does the queue wait for one Phrase's Clips before
-      // starting the next? Measuring "max simultaneous in-flight" against an
+      // 2b. Concurrency: how many requests does the queue hold open at
+      // once? Measuring "max simultaneous in-flight" against an
       // instant-resolving fake is unreliable — it's dominated by how Node's
       // real WebCrypto scheduler batches digest completions, not by the
       // queue's own logic. A decisive proof instead: give every call a synth
       // client that NEVER resolves, enqueue the whole library, flush, and
-      // count how many synthesize() calls were issued anyway. If the queue
-      // throttled concurrency, this would stay near the throttle limit
-      // (e.g. low single digits) no matter how long we flush; if unbounded,
-      // it converges on 2n regardless of nothing ever completing.
+      // count how many synthesize() calls were issued anyway. This read 2n
+      // at every size before T035 — nothing waited for anything. It now
+      // reads the queue's concurrency bound (4) no matter how long we flush,
+      // because nothing ever frees a slot.
       let hangingCalls = 0
       const hangingClipCache = {
         async get() {

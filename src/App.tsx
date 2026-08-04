@@ -366,6 +366,7 @@ function App({
       if (signal.aborted) return { ok: true }
       const kind = (err as { kind?: string } | undefined)?.kind
       if (kind === 'unauthorized') return { ok: false, reason: 'unauthorized' }
+      if (kind === 'rate-limited') return { ok: false, reason: 'rate-limited' }
       if (kind === 'quota') return { ok: false, reason: 'quota' }
       return { ok: false, reason: 'network' }
     }

@@ -15,11 +15,11 @@ function mp3Response(status: number, byteLength: number, durationMs?: number): R
   } as unknown as Response
 }
 
-function errorResponse(status: number): Response {
+function errorResponse(status: number, headers: Record<string, string> = {}): Response {
   return {
     ok: false,
     status,
-    headers: { get: () => null },
+    headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
     arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
     json: () => Promise.resolve({}),
   } as unknown as Response
@@ -105,8 +105,39 @@ describe('createServerSynthClient', () => {
     await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'unauthorized' })
   })
 
-  it('rejects with quota on a 429', async () => {
+  // T035, the whole point: a 429 is OUR server's limiter saying "slow down",
+  // and it carries the wait. It is not the provider running out of credits.
+  it('rejects with rate-limited on a 429, carrying the wait the server asked for', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(errorResponse(429, { 'retry-after': '20' }))
+    const { client } = makeClient({ fetchImpl })
+
+    await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'rate-limited', retryAfterMs: 20_000 })
+  })
+
+  it('falls back to one second when a 429 carries no Retry-After', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(errorResponse(429))
+    const { client } = makeClient({ fetchImpl })
+
+    await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'rate-limited', retryAfterMs: 1000 })
+  })
+
+  it('ignores an unparsable or negative Retry-After rather than waiting forever or not at all', async () => {
+    const { client } = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(errorResponse(429, { 'retry-after': 'soon' })) })
+    await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'rate-limited', retryAfterMs: 1000 })
+
+    const negative = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(errorResponse(429, { 'retry-after': '-5' })) })
+    await expect(negative.client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'rate-limited', retryAfterMs: 1000 })
+  })
+
+  it('caps an absurd Retry-After, so a bad header cannot park the sweep for an hour', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(errorResponse(429, { 'retry-after': '99999' }))
+    const { client } = makeClient({ fetchImpl })
+
+    await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'rate-limited', retryAfterMs: 60_000 })
+  })
+
+  it('rejects with quota on a 402 — the provider is out of credits, which no amount of waiting fixes', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(errorResponse(402))
     const { client } = makeClient({ fetchImpl })
 
     await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'quota' })
