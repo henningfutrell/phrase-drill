@@ -107,8 +107,8 @@ export function DeckDetailScreen({
           {deck.phrases.map((phrase, index) => (
             <li key={phrase.id} data-testid={`phrase-row-${phrase.id}`} className="phrase-row">
               <div className="phrase-text">
-                <div className="phrase-french">{phrase.french}</div>
                 <div className="phrase-english">{phrase.english}</div>
+                <div className="phrase-french">{phrase.french}</div>
               </div>
               <div className="phrase-reorder">
                 <button

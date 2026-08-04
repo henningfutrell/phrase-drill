@@ -213,8 +213,8 @@ export function ImportScreen({
               {drafts.map((draft, index) => (
                 <li key={index} data-testid={`draft-row-${index}`} className="phrase-row draft-row">
                   <div className="phrase-text">
-                    <div className="phrase-french">{draft.french}</div>
                     <div className="phrase-english">{draft.english}</div>
+                    <div className="phrase-french">{draft.french}</div>
                   </div>
                   <div className="phrase-actions">
                     <button
