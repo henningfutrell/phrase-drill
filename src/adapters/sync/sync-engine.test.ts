@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { LIBRARY_FORMAT, type DeckRecord, type Library } from '../../domain'
+import { sameLibraryContent, sameVoice } from '../storage/library-identity'
 import { CURRENT_SCHEMA_VERSION } from '../storage/migrations'
 import type { LibrarySyncClient, PullResult, PushResult } from './library-sync-client'
 import { createSyncEngine, type PlatformPort, type Scheduler, type SyncEngine } from './sync-engine'
@@ -128,7 +129,9 @@ function createFakeBaseline() {
  */
 interface Faults {
   pull?: Error
+  /** The read half of `updateLocal` — IndexedDB refusing to open or read. */
   readLocal?: Error
+  /** Its write half — a quota, an aborted transaction. */
   writeLocal?: Error
   baselineRead?: Error
   baselineWrite?: Error
@@ -154,13 +157,16 @@ function createHarness(options: { local?: Library; server?: ReturnType<typeof cr
       },
       push: (pushed) => client.push(pushed),
     },
-    readLocal: async () => {
+    // Stands in for `createSyncedLibrary().updateLocal` — the update is
+    // applied to what is stored NOW, which is the whole point of the port
+    // (T074). `sync-round-trip-race.test.ts` runs the real one.
+    updateLocal: async (update) => {
       if (faults.readLocal) throw faults.readLocal
-      return local
-    },
-    writeLocal: async (written) => {
+      const next = update(local)
       if (faults.writeLocal) throw faults.writeLocal
-      local = written
+      const changed = !sameLibraryContent(local, next) || !sameVoice(local.voice, next.voice)
+      local = next
+      return { library: next, changed }
     },
     baseline: {
       async read() {
@@ -267,8 +273,7 @@ describe('createSyncEngine — syncing without a tap (T034)', () => {
     }
     const engine = createSyncEngine({
       client,
-      readLocal: async () => library([]),
-      writeLocal: async () => {},
+      updateLocal: async (update) => ({ library: update(library([])), changed: false }),
       baseline: createFakeBaseline(),
       readLastSyncAt: async () => null,
       recordSync: async () => {},
