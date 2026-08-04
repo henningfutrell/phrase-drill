@@ -21,6 +21,7 @@ import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry } from './adapters/diagnostics'
 import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/library-sync-client'
 import { createSyncEngine, type PlatformPort, type Scheduler, type SyncEngine } from './adapters/sync/sync-engine'
+import { createSyncedLibrary } from './adapters/sync/synced-library'
 import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
 
 vi.mock('./adapters/share/web-share', () => ({
@@ -48,6 +49,9 @@ function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore
     },
     async setVoice(voice) {
       settings = { ...settings, voice }
+    },
+    async adoptVoice(voice) {
+      if (voice) settings = { ...settings, voice }
     },
     async recordSync(timestamp) {
       settings = { ...settings, lastSyncAt: timestamp }
@@ -314,8 +318,7 @@ function createTestSyncEngine(
 ): SyncEngine {
   return createSyncEngine({
     client,
-    readLocal: () => deckStore.exportAll(),
-    writeLocal: (library) => deckStore.importAll(library),
+    ...createSyncedLibrary({ deckStore, settingsStore }),
     baseline: createFakeBaseline(),
     readLastSyncAt: async () => (await settingsStore.load()).lastSyncAt,
     recordSync: (timestamp) => settingsStore.recordSync(timestamp),
@@ -1769,5 +1772,43 @@ describe('App wired to sync without a tap (T034)', () => {
     )
 
     expect(syncLine()).toContain('not synced yet')
+  })
+})
+
+/**
+ * T067 requirement 4 — the only way a library is ever re-generated is her
+ * asking for it, scoped to a Deck or a Phrase. There is deliberately no
+ * library-wide control: a one-tap re-generation of everything is exactly the
+ * thousands-of-requests event this change exists to prevent.
+ */
+describe('App wired to explicit re-generation (T067)', () => {
+  const deckWithTwo: Deck = {
+    id: 'd1',
+    name: 'Home',
+    phrases: [
+      { id: 'p1', french: 'Bonjour', english: 'Hello' },
+      { id: 'p2', french: 'Merci', english: 'Thanks' },
+    ],
+  }
+
+  it('queues every Phrase of a Deck when she confirms re-generating it', async () => {
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(createFakeDeckStore([deckWithTwo]), createFakeSettingsStore(), createFakeSynthClient(), generationQueue)
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+
+    act(() => click(container.querySelector('[data-testid="regenerate-deck-audio"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-regenerate-deck-audio"]')!))
+
+    expect(generationQueue.enqueued.map((p) => p.id)).toEqual(['p1', 'p2'])
+  })
+
+  it('queues one Phrase when she asks for that Phrase alone', async () => {
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(createFakeDeckStore([deckWithTwo]), createFakeSettingsStore(), createFakeSynthClient(), generationQueue)
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+
+    await act(async () => click(container.querySelector('[data-testid="regenerate-phrase-audio-p2"]')!))
+
+    expect(generationQueue.enqueued.map((p) => p.id)).toEqual(['p2'])
   })
 })

@@ -142,6 +142,42 @@ describe('createIndexedDbSettingsStore', () => {
     expect((await store.load()).voice).toBeNull()
   })
 
+  /**
+   * T067 — the pinned voice follows her to a new phone, carried as its own
+   * named field on the `Library` envelope. `adoptVoice` is the one write
+   * that lands an arriving envelope's voice on this device.
+   */
+  describe('adoptVoice', () => {
+    const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
+
+    it('pins the voice an arriving Library carries when this device has none — the new-phone case', async () => {
+      const store = createIndexedDbSettingsStore()
+
+      await store.adoptVoice(VOICE)
+
+      expect((await store.load()).voice).toEqual(VOICE)
+    })
+
+    it('leaves the local pin alone when the arriving Library has no voice field at all', async () => {
+      const store = createIndexedDbSettingsStore()
+      await store.setVoice(VOICE)
+
+      await store.adoptVoice(undefined)
+
+      expect((await store.load()).voice).toEqual(VOICE)
+    })
+
+    it('replaces the local pin with the one it is given, since the merge already decided which that is', async () => {
+      const store = createIndexedDbSettingsStore()
+      await store.setVoice(VOICE)
+      const other = { ...VOICE, voiceId: 'voice-2' }
+
+      await store.adoptVoice(other)
+
+      expect((await store.load()).voice).toEqual(other)
+    })
+  })
+
   it('never lets the pinned voice appear in a Deck export', async () => {
     const settingsStore = createIndexedDbSettingsStore()
     const deckStore = createIndexedDbDeckStore()

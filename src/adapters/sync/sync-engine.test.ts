@@ -516,3 +516,33 @@ describe('createSyncEngine — the two failures a retry cannot fix', () => {
     expect(server.pushes).toEqual([])
   })
 })
+
+/**
+ * T067 — the pinned voice rides in the envelope. The engine has no opinion
+ * about it beyond one thing: a merge that brought a voice down from the
+ * other device is a merge that must be written back locally, or the voice
+ * arrives and is dropped on the floor.
+ */
+describe('createSyncEngine — the pinned voice (T067)', () => {
+  const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
+
+  it('writes the merge back locally when the only thing the server had that this device did not is the voice', async () => {
+    const server = createFakeServer({ ...library([deck('d1', 'Home')]), voice: VOICE })
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+
+    h.engine.start()
+    await settle()
+
+    expect(h.local.voice).toEqual(VOICE)
+    expect(h.engine.snapshot().libraryRevision).toBe(1)
+  })
+
+  it('pushes the voice this device has pinned', async () => {
+    const h = createHarness({ local: { ...library([deck('d1', 'Home')]), voice: VOICE } })
+
+    h.engine.start()
+    await settle()
+
+    expect(h.server.pushes[0]!.voice).toEqual(VOICE)
+  })
+})

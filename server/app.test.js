@@ -742,6 +742,48 @@ describe('server app (integration, fake upstreams)', () => {
       expect(res.status).toBe(400)
     })
 
+    /**
+     * T067 — the pinned voice rides in the envelope as its own named field,
+     * so it follows her to a new phone. The server stores the envelope
+     * verbatim; all it owes the field is the same shallow check `mixes` and
+     * `tombstones` get, so a malformed one is refused at the door rather
+     * than handed to the other device.
+     */
+    it('stores and returns the pinned voice an envelope carries', async () => {
+      await boot()
+      const voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
+      const envelope = { format: 'phrase-drill-library', schemaVersion: 6, exportedAt: 1, decks: [], mixes: [], tombstones: [], voice }
+      const put = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify(envelope),
+      })
+      expect(put.status).toBe(204)
+
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect((await get.json()).voice).toEqual(voice)
+    })
+
+    it('accepts an envelope with no voice field at all — absent means no voice recorded, never invalid', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 6, exportedAt: 1, decks: [] }),
+      })
+      expect(res.status).toBe(204)
+    })
+
+    it('rejects a PUT whose voice field is present but not an object', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 6, decks: [], voice: 'Rachel' }),
+      })
+      expect(res.status).toBe(400)
+    })
+
     it('rejects an oversized library payload with 413', async () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/library`, {

@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { computeDrillReadiness } from './drill-readiness'
 import type { ClipCache } from '../storage/clip-cache'
 import type { GenerationQueue } from './generation-queue'
-import type { Voice } from '../storage/settings-store'
+import type { Voice } from '../../domain'
 import type { Phrase } from '../../domain'
+import { knownVoices } from './voice-catalogue'
 
 const VOICE: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
@@ -82,6 +83,21 @@ describe('computeDrillReadiness', () => {
     expect(result.reason).toBe('no-voice')
     expect(clipCache.readyPhraseIds).not.toHaveBeenCalled()
     expect(generationQueue.enqueue).not.toHaveBeenCalled()
+  })
+
+  /**
+   * T067 — the defect this task exists to end. Readiness used to be asked
+   * about the pinned voice alone, so re-pinning made every already-generated
+   * Phrase read as unready and queued the whole library for regeneration.
+   */
+  it('asks the cache about the pinned voice first, then every other voice a Clip could be in', async () => {
+    const clipCache = fakeClipCache(['p1', 'p2', 'p3'])
+    const generationQueue = fakeQueue()
+
+    await computeDrillReadiness(PHRASES, { clipCache, generationQueue, voice: VOICE })
+
+    expect(clipCache.readyPhraseIds).toHaveBeenCalledWith(PHRASES, knownVoices(VOICE))
+    expect(knownVoices(VOICE)[0]).toEqual(VOICE)
   })
 
   it('can start when every Phrase is already ready, with nothing to queue', async () => {

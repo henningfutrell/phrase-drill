@@ -7,6 +7,7 @@ import {
   migrateLibraryMixes,
   normalizeLibrary,
   parseLibraryFile,
+  withVoice,
 } from './library'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
@@ -193,5 +194,70 @@ describe('backupFilename', () => {
 
   it('zero-pads single-digit months and days', () => {
     expect(backupFilename(new Date('2026-01-05T00:00:00Z'))).toBe('phrase-drill-backup-2026-01-05.json')
+  })
+})
+
+/**
+ * T067 — the pinned voice travels in the envelope, as its own named field.
+ * The property that field replaces is worth restating: nothing here reads
+ * the `settings` store wholesale, so only what is enumerated crosses the
+ * wire or lands in a backup file.
+ */
+describe('the pinned voice on the envelope (T067)', () => {
+  const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
+  const base: Library = {
+    format: LIBRARY_FORMAT,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    exportedAt: 1,
+    decks: [],
+    mixes: [],
+    tombstones: [],
+  }
+
+  it('adds the pinned voice to an envelope the deck store built without one', () => {
+    expect(withVoice(base, VOICE).voice).toEqual(VOICE)
+  })
+
+  it('adds no voice field at all when nothing is pinned', () => {
+    expect(withVoice(base, null).voice).toBeUndefined()
+  })
+
+  it('carries only the voice — the rest of the settings record has no way in', () => {
+    const serialized = JSON.stringify(withVoice(base, VOICE))
+    expect(serialized).not.toContain('lastSyncAt')
+    expect(serialized).not.toContain('lastExportAt')
+  })
+
+  it('keeps the voice through normalization, so a pulled envelope does not lose it before the merge', () => {
+    expect(normalizeLibrary({ ...base, voice: VOICE }).voice).toEqual(VOICE)
+  })
+
+  it('normalizes an envelope with no voice to no voice, never to a throw', () => {
+    expect(normalizeLibrary(base).voice).toBeUndefined()
+  })
+
+  it('drops a malformed voice from a pulled envelope rather than blocking the sync of her phrases', () => {
+    const wrong = { ...base, voice: { provider: 'elevenlabs' } } as unknown as Library
+    expect(normalizeLibrary(wrong).voice).toBeUndefined()
+  })
+
+  it('accepts a backup file that carries a voice', () => {
+    const result = parseLibraryFile(JSON.stringify({ ...base, voice: VOICE }))
+    expect(result).toEqual({ ok: true, library: { ...base, voice: VOICE } })
+  })
+
+  it('accepts an older backup file with no voice field — absent means "no voice recorded", never "invalid file"', () => {
+    const result = parseLibraryFile(JSON.stringify(base))
+    expect(result.ok).toBe(true)
+  })
+
+  it('refuses a file whose voice field is present but not a Voice', () => {
+    const result = parseLibraryFile(JSON.stringify({ ...base, voice: 'Rachel' }))
+    expect(result).toEqual({ ok: false, reason: 'invalid' })
+  })
+
+  it('refuses a file whose voice is an object missing part of the content address', () => {
+    const result = parseLibraryFile(JSON.stringify({ ...base, voice: { provider: 'elevenlabs', voiceId: 'v' } }))
+    expect(result).toEqual({ ok: false, reason: 'invalid' })
   })
 })

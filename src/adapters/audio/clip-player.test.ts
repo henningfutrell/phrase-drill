@@ -3,7 +3,7 @@ import { createClipPlayer, UNLOCK_SOURCE_FOR_TEST } from './clip-player'
 import type { AudioElementLike } from './clip-player'
 import type { Clip, ClipCache } from '../storage/clip-cache'
 import { computeClipHash } from '../storage/clip-cache'
-import type { Voice } from '../storage/settings-store'
+import type { Voice } from '../../domain'
 
 const VOICE: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
@@ -112,7 +112,7 @@ describe('createClipPlayer', () => {
   describe('unlock', () => {
     it('plays then immediately pauses the shared element inside the gesture, and reports success', async () => {
       const element = fakeAudioElement()
-      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voice: VOICE })
+      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voices: [VOICE] })
 
       expect(player.unlockStatus).toBe('pending')
       const ok = await player.unlock()
@@ -125,7 +125,7 @@ describe('createClipPlayer', () => {
 
     it('reports failure, observably, when the gesture-unlock play() rejects', async () => {
       const element = fakeAudioElement({ play: vi.fn().mockRejectedValue(new Error('NotAllowedError')) })
-      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voice: VOICE })
+      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voices: [VOICE] })
 
       const ok = await player.unlock()
 
@@ -140,7 +140,7 @@ describe('createClipPlayer', () => {
       const clip = fakeClip({ hash, durationMs: 500 })
       const cache = fakeClipCache({ [hash]: clip })
       const element = fakeAudioElement()
-      const player = createClipPlayer({ element, clipCache: cache, voice: VOICE })
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE] })
 
       const done = player.speak('Bonjour', 'fr-FR')
       await waitUntil(() => element.playCalls > 0)
@@ -157,7 +157,7 @@ describe('createClipPlayer', () => {
       const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
       const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 1000 }) })
       const element = fakeAudioElement()
-      const player = createClipPlayer({ element, clipCache: cache, voice: VOICE })
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE] })
 
       const done = player.speak('Bonjour', 'fr-FR')
       await waitUntil(() => element.playCalls > 0)
@@ -172,7 +172,7 @@ describe('createClipPlayer', () => {
       const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
       const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 20 }) })
       const element = fakeAudioElement()
-      const player = createClipPlayer({ element, clipCache: cache, voice: VOICE, slackMs: 20 })
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], slackMs: 20 })
 
       const done = player.speak('Bonjour', 'fr-FR')
       await waitUntil(() => element.playCalls > 0)
@@ -193,7 +193,7 @@ describe('createClipPlayer', () => {
       const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
       const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 20 }) })
       const element = fakeAudioElement()
-      const player = createClipPlayer({ element, clipCache: cache, voice: VOICE, slackMs: 20 })
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], slackMs: 20 })
 
       const done = player.speak('Bonjour', 'fr-FR')
       await waitUntil(() => element.playCalls > 0)
@@ -209,7 +209,7 @@ describe('createClipPlayer', () => {
       const element = fakeAudioElement()
       const cache = fakeClipCache({})
       const onMissingClip = vi.fn()
-      const player = createClipPlayer({ element, clipCache: cache, voice: VOICE, onMissingClip })
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], onMissingClip })
 
       await player.speak('Bonjour inconnu', 'fr-FR')
 
@@ -222,7 +222,7 @@ describe('createClipPlayer', () => {
       const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
       const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 1000 }) })
       const element = fakeAudioElement({ play: vi.fn().mockRejectedValue(new Error('blocked')) })
-      const player = createClipPlayer({ element, clipCache: cache, voice: VOICE })
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE] })
 
       await player.speak('Bonjour', 'fr-FR')
 
@@ -237,7 +237,7 @@ describe('createClipPlayer', () => {
         [hashMerci]: fakeClip({ hash: hashMerci, durationMs: 100 }),
       })
       const element = fakeAudioElement()
-      const player = createClipPlayer({ element, clipCache: cache, voice: VOICE })
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE] })
 
       const first = player.speak('Bonjour', 'fr-FR')
       await waitUntil(() => element.playCalls > 0)
@@ -257,7 +257,7 @@ describe('createClipPlayer', () => {
   describe('cancel', () => {
     it('is safe when idle', () => {
       const element = fakeAudioElement()
-      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voice: VOICE })
+      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voices: [VOICE] })
 
       expect(() => player.cancel()).not.toThrow()
       expect(element.pauseCalls).toBe(1)
@@ -267,7 +267,7 @@ describe('createClipPlayer', () => {
       const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
       const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 60_000 }) })
       const element = fakeAudioElement()
-      const player = createClipPlayer({ element, clipCache: cache, voice: VOICE })
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE] })
 
       const done = player.speak('Bonjour', 'fr-FR')
       await waitUntil(() => element.playCalls > 0)
@@ -305,5 +305,91 @@ describe('createClipPlayer — the unlock source itself', () => {
     expect(uint32(4)).toBe(bytes.length - 8)
     expect(ascii(36, 40)).toBe('data')
     expect(uint32(40)).toBe(bytes.length - 44)
+  })
+})
+
+/**
+ * T067 — a Phrase that has audio must never go silent because a preference
+ * changed. Playback prefers the pinned voice where a Clip exists in it, and
+ * otherwise plays the first voice in the offered order that has one.
+ */
+describe('createClipPlayer — playing what exists (T067)', () => {
+  let createObjectURL: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    createObjectURL = vi.fn().mockReturnValue('blob:fake-url')
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const OTHER: Voice = { ...VOICE, voiceId: 'voice-2' }
+
+  it('plays the Clip in the pinned voice when there is one', async () => {
+    const pinnedHash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+    const otherHash = await computeClipHash({ ...OTHER, lang: 'fr-FR', text: 'Bonjour' })
+    const cache = fakeClipCache({
+      [pinnedHash]: fakeClip({ hash: pinnedHash, durationMs: 10 }),
+      [otherHash]: fakeClip({ hash: otherHash, durationMs: 20 }),
+    })
+    const element = fakeAudioElement()
+    const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE, OTHER] })
+
+    const done = player.speak('Bonjour', 'fr-FR')
+    await waitUntil(() => element.playCalls > 0)
+    element.emit('ended')
+    await done
+
+    expect(await cache.get(pinnedHash)).toBeDefined()
+    expect(element.playCalls).toBe(1)
+  })
+
+  it('plays a Clip in another voice when the pinned voice has none — silence is never the answer', async () => {
+    const otherHash = await computeClipHash({ ...OTHER, lang: 'fr-FR', text: 'Bonjour' })
+    const cache = fakeClipCache({ [otherHash]: fakeClip({ hash: otherHash, durationMs: 10 }) })
+    const element = fakeAudioElement()
+    const onMissingClip = vi.fn()
+    const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE, OTHER], onMissingClip })
+
+    const done = player.speak('Bonjour', 'fr-FR')
+    await waitUntil(() => element.playCalls > 0)
+    element.emit('ended')
+    await done
+
+    expect(element.playCalls).toBe(1)
+    expect(onMissingClip).not.toHaveBeenCalled()
+  })
+
+  it('reports the Clip missing only when no offered voice has one', async () => {
+    const element = fakeAudioElement()
+    const onMissingClip = vi.fn()
+    const player = createClipPlayer({ element, clipCache: fakeClipCache(), voices: [VOICE, OTHER], onMissingClip })
+
+    await player.speak('Bonjour', 'fr-FR')
+
+    expect(onMissingClip).toHaveBeenCalledWith({ text: 'Bonjour', lang: 'fr-FR' })
+    expect(element.playCalls).toBe(0)
+  })
+
+  it('takes the offered order, not the cache order, when several voices have the Clip', async () => {
+    const firstHash = await computeClipHash({ ...OTHER, lang: 'fr-FR', text: 'Bonjour' })
+    const secondHash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+    const cache = fakeClipCache({
+      [secondHash]: fakeClip({ hash: secondHash, durationMs: 10 }),
+      [firstHash]: fakeClip({ hash: firstHash, durationMs: 20 }),
+    })
+    const gets: string[] = []
+    const spyCache = { ...cache, get: async (hash: string) => { gets.push(hash); return cache.get(hash) } }
+    const element = fakeAudioElement()
+    const player = createClipPlayer({ element, clipCache: spyCache, voices: [OTHER, VOICE] })
+
+    const done = player.speak('Bonjour', 'fr-FR')
+    await waitUntil(() => element.playCalls > 0)
+    element.emit('ended')
+    await done
+
+    expect(gets).toEqual([firstHash])
   })
 })
