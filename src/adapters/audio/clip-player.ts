@@ -116,6 +116,59 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
   let unlockStatus: UnlockStatus = 'pending'
   let lastUnlockFailure: UnlockFailure | undefined
   let stopCurrent: (() => void) | null = null
+  // Shared by every caller mid-attempt (T001): a second Start-Drill tap
+  // arriving before the first unlock() resolves used to re-enter this
+  // method, reassigning `element.src` and calling `play()` again while the
+  // first `play()` was still pending — which the HTML media spec answers by
+  // rejecting the first promise with AbortError. Concurrent callers now
+  // await the one attempt already in flight instead of racing the element.
+  let unlockInFlight: Promise<boolean> | null = null
+
+  /**
+   * `retried` distinguishes a fresh AbortError from one seen after the one
+   * retry below — see the AbortError branch.
+   */
+  async function attemptUnlock(retried: boolean): Promise<boolean> {
+    try {
+      element.src = SILENT_UNLOCK_SOURCE
+      await element.play()
+      element.pause()
+      unlockStatus = 'unlocked'
+      lastUnlockFailure = undefined
+      return true
+    } catch (error) {
+      const name = error instanceof Error ? error.name : 'UnknownError'
+      if (name === 'AbortError') {
+        // A THIRD category, distinct from the two below: AbortError means
+        // this play() was INTERRUPTED (something else touched the element
+        // mid-flight — historically, a second unlock() call), not that
+        // iOS or the source refused it. The element is typically left
+        // unlocked by whichever attempt actually completed. One retry
+        // turns "typically" into a real answer for the cases that still
+        // reach here after the in-flight guard above (e.g. a stray
+        // cancel()/speak() on the same shared element); if the retry
+        // aborts too, further retries just spin on the same interruption,
+        // so treat it as unlocked rather than report a failure that was
+        // never a refusal.
+        if (!retried) return attemptUnlock(true)
+        unlockStatus = 'unlocked'
+        lastUnlockFailure = undefined
+        return true
+      }
+      // The whole point of naming it: at this call site an iOS autoplay
+      // refusal (NotAllowedError) and an undecodable source
+      // (NotSupportedError) are the same catch, and they need opposite
+      // fixes. Reporting "couldn't start audio on this phone" for both
+      // blamed the device for a malformed 52-byte WAV for an entire
+      // release. Never collapse them again.
+      lastUnlockFailure =
+        error instanceof Error
+          ? { name: error.name, message: error.message }
+          : { name: 'UnknownError', message: String(error) }
+      unlockStatus = 'failed'
+      return false
+    }
+  }
 
   return {
     get unlockStatus(): UnlockStatus {
@@ -127,27 +180,12 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
     },
 
     async unlock(): Promise<boolean> {
-      try {
-        element.src = SILENT_UNLOCK_SOURCE
-        await element.play()
-        element.pause()
-        unlockStatus = 'unlocked'
-        lastUnlockFailure = undefined
-        return true
-      } catch (error) {
-        // The whole point of naming it: at this call site an iOS autoplay
-        // refusal (NotAllowedError) and an undecodable source
-        // (NotSupportedError) are the same catch, and they need opposite
-        // fixes. Reporting "couldn't start audio on this phone" for both
-        // blamed the device for a malformed 52-byte WAV for an entire
-        // release. Never collapse them again.
-        lastUnlockFailure =
-          error instanceof Error
-            ? { name: error.name, message: error.message }
-            : { name: 'UnknownError', message: String(error) }
-        unlockStatus = 'failed'
-        return false
-      }
+      if (unlockInFlight) return unlockInFlight
+      const attempt = attemptUnlock(false).finally(() => {
+        unlockInFlight = null
+      })
+      unlockInFlight = attempt
+      return attempt
     },
 
     async speak(text: string, lang: Language): Promise<void> {

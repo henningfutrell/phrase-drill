@@ -262,6 +262,48 @@ describe('DrillScreen — the one-tap unlock', () => {
     expect(testid('drill-running')).toBeNull()
     expect(speech.calls).toEqual([])
   })
+
+  it('disables Start Drill while its own tap is unlocking, and re-enables it after a failure so she can retry (T001)', async () => {
+    let resolveUnlock: ((outcome: { ok: false; name: string; message: string }) => void) | undefined
+    const unlock = vi.fn(
+      () =>
+        new Promise<{ ok: false; name: string; message: string }>((resolve) => {
+          resolveUnlock = resolve
+        }),
+    )
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={unlock}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    const button = testid('drill-start') as HTMLButtonElement
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      await flushMicrotasks()
+    })
+
+    expect(button.disabled).toBe(true)
+
+    await act(async () => {
+      resolveUnlock?.({ ok: false, name: 'NotAllowedError', message: 'blocked' })
+      await flushMicrotasks()
+    })
+
+    expect(button.disabled).toBe(false)
+    expect(testid('drill-unlock-error')).not.toBeNull()
+
+    // Re-tappable: a second tap invokes unlock() again rather than being
+    // permanently dead.
+    await click(testid('drill-start'))
+    expect(unlock).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('DrillScreen — running a Drill', () => {
