@@ -25,6 +25,12 @@ export interface SyncBaselineStore {
  * regenerable bookkeeping — losing it costs a merge its precision for one
  * round-trip, nothing more. `settings-store.ts` reads its three keys by name
  * and never enumerates the store, so it cannot see this one.
+ *
+ * The corollary, which the code did not hold until T081: nothing migrates what
+ * is stored here, so a value written by a build at another schema version is
+ * read back as-is. `mergeLibraries` treats such a value as no baseline at all
+ * — one round-trip of precision, exactly as claimed above — rather than
+ * refusing it, which used to stop sync permanently.
  */
 const SYNC_BASELINE = 'syncBaseline'
 

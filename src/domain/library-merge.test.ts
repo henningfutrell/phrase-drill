@@ -510,10 +510,35 @@ describe('mergeLibraries — the three-way half (T034: two devices editing one D
     expect([local, remote, base].map((l) => JSON.stringify(l))).toEqual(before)
   })
 
-  it('refuses a baseline at a different schema version rather than comparing records of different shapes', () => {
-    const older: Library = { ...base, schemaVersion: VERSION - 1 }
+  it('ignores a baseline at a different schema version rather than comparing records of different shapes', () => {
+    // Nothing migrates the baseline, so an app update that bumps the schema
+    // leaves one behind at the old version (T081). Refusing it killed sync
+    // permanently on a phone whose app was already current; it is derived,
+    // regenerable bookkeeping, so an unusable one is simply one this merge
+    // does not have. Only the version is judged — an EMPTY baseline at the
+    // current version still means "we agreed on nothing" (T072).
+    const local = library({ decks: [deck({ id: 'd1', name: 'Home', updatedAt: 30 })] })
+    const remote = library({ decks: [deck({ id: 'd1', name: 'Renamed', updatedAt: 20 })] })
+    const older: Library = {
+      ...library({ decks: [deck({ id: 'd1', name: 'Home', updatedAt: 30 })] }),
+      schemaVersion: VERSION - 1,
+    }
 
-    expect(() => mergeLibraries(library({}), library({}), older)).toThrow(/schema version/)
+    // Used, it would say local never moved and hand back the other device's
+    // whole record. Ignored, the later `updatedAt` decides.
+    expect(mergeLibraries(local, remote, older).decks.map((d) => d.name)).toEqual(['Home'])
+    expect(mergeLibraries(local, remote).decks.map((d) => d.name)).toEqual(['Home'])
+  })
+
+  it('ignores a baseline from a NEWER build too', () => {
+    const local = library({ decks: [deck({ id: 'd1', name: 'Home', updatedAt: 30 })] })
+    const remote = library({ decks: [deck({ id: 'd1', name: 'Renamed', updatedAt: 20 })] })
+    const ahead: Library = {
+      ...library({ decks: [deck({ id: 'd1', name: 'Home', updatedAt: 30 })] }),
+      schemaVersion: VERSION + 1,
+    }
+
+    expect(mergeLibraries(local, remote, ahead).decks.map((d) => d.name)).toEqual(['Home'])
   })
 })
 

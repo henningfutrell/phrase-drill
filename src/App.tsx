@@ -601,16 +601,20 @@ function App({
     if (!library) return
     setPendingRestore(undefined)
     void syncEngine
-      // BEFORE the library is written, never after (T072). A restore used to
-      // undo itself: the local Tombstones are cleared by `importAll`, the
+      // The engine owns both halves of a restore (T081). It used to own only
+      // the first — `libraryRestored()` here, `writeLocal` chained after it —
+      // and the two could come apart in either direction: a round-trip already
+      // pushing put the pre-restore snapshot back over the emptied baseline,
+      // and a local write that failed left the emptied baseline over an
+      // unchanged library. Handing the write in makes them one operation with
+      // one outcome; everything below runs only if that succeeded.
+      //
+      // Why the baseline is emptied at all (T072): a restore used to undo
+      // itself, because `importAll` clears this device's Tombstones, the
       // server keeps its own, and the next round-trip pulled them back and
-      // re-deleted the Deck she had just restored. `libraryRestored` records
-      // that this device now agrees with the server about nothing, which is
-      // what makes every restored record outrank a stale deletion. Ordered
-      // first so that a failure to record it stops the restore: a restore
-      // applied on top of an intact baseline is the defect happening.
-      .libraryRestored()
-      .then(() => syncedLibrary.writeLocal(library))
+      // re-deleted the Deck she had just restored. An empty baseline makes
+      // every restored record outrank a stale deletion.
+      .libraryRestored(() => syncedLibrary.writeLocal(library))
       .then(() => Promise.all([deckStore.loadAll(), mixStore.loadAll(), settingsStore.load()]))
       .then(([loadedDecks, loadedMixes, loadedSettings]) => {
         // A restore replaces the whole library, saved Mixes included — read
