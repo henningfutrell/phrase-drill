@@ -362,6 +362,28 @@ describe('SettingsScreen', () => {
       expect(usage?.textContent).toMatch(/3,190/)
     })
 
+    /**
+     * The meter is driven by `transform: scaleX()` rather than `width`, so that
+     * it composites instead of laying out every frame. That makes the fill a
+     * ratio between 0 and 1, not a percentage string, and nothing else in the
+     * screen would notice if the two were confused — a `scaleX(71)` reads as a
+     * full bar exactly like `scaleX(0.71)` does, because the track clips it.
+     */
+    it('fills the meter to the fraction of the ceiling actually in use', () => {
+      renderScreen({ savedAudio: USAGE })
+      const fill = container.querySelector<HTMLElement>('.audio-meter-fill')
+      const scale = Number(/scaleX\(([\d.]+)\)/.exec(fill?.style.transform ?? '')?.[1])
+      expect(scale).toBeCloseTo(USAGE.bytes / USAGE.maxBytes, 3)
+      expect(scale).toBeLessThanOrEqual(1)
+    })
+
+    it('never overfills the meter when the cache is over its ceiling', () => {
+      renderScreen({ savedAudio: { ...USAGE, bytes: USAGE.maxBytes * 2 } })
+      const fill = container.querySelector<HTMLElement>('.audio-meter-fill')
+      const scale = Number(/scaleX\(([\d.]+)\)/.exec(fill?.style.transform ?? '')?.[1])
+      expect(scale).toBe(1)
+    })
+
     it('says the least-drilled audio goes first, and that her library never does', () => {
       renderScreen({ savedAudio: USAGE })
       const section = container.querySelector('[data-testid="saved-audio-section"]')
