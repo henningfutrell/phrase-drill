@@ -69,6 +69,28 @@ describe('readPasswordFrom', () => {
     await expect(readPasswordFrom({ input, output })).resolves.toBe('piped-pw')
   })
 
+  it('unrefs the input after reading, so the process can exit', async () => {
+    // The second half of the Render hang, and the more deceptive one: with the
+    // read fixed, the account WAS created and the process then sat there
+    // forever, because `process.stdin` stayed referenced and held the event
+    // loop open. No "created user" line, dead terminal — indistinguishable
+    // from the original bug at the keyboard.
+    //
+    // Asserting `isPaused()` here would be vacuous: `rl.close()` pauses the
+    // stream on its own, so that assertion passes against the BROKEN version.
+    // `unref` is the property that actually lets the process exit, so that is
+    // what gets pinned. It is optional on a plain Readable, hence the spy
+    // rather than a call through.
+    const input = neverEndingInput(['hunter2\n'])
+    let unrefCalls = 0
+    input.unref = () => {
+      unrefCalls += 1
+    }
+    const output = collectingOutput()
+    await readPasswordFrom({ input, output })
+    expect(unrefCalls).toBe(1)
+  })
+
   it('rejects when the stream ends with no line at all', async () => {
     const input = Readable.from([])
     const output = collectingOutput()
