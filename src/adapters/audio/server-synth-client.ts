@@ -34,7 +34,7 @@ export interface SynthClient {
 }
 
 export interface ServerSynthClientDeps {
-  /** Reads the current Keycloak access token from wherever it is stored (T043 — never a provider key). */
+  /** Reads the current session token from wherever it is stored (T050 — never a provider key). */
   getAccessToken(): Promise<string>
   /** Injected in tests; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch
@@ -42,8 +42,8 @@ export interface ServerSynthClientDeps {
 
 /**
  * The `SynthClient` implementation for T041: talks to this app's own
- * `/api/tts`, same-origin, authenticated with a Keycloak access token
- * (`Authorization: Bearer <key>`) — never an ElevenLabs key, which the
+ * `/api/tts`, same-origin, authenticated with a session token (T050,
+ * `Authorization: Bearer <token>`) — never an ElevenLabs key, which the
  * device no longer holds at all. Replaces
  * `eleven-labs-synth-client.ts` as the sole thing `generation-queue.ts` and
  * the composition root depend on; nothing downstream of the `SynthClient`

@@ -19,7 +19,7 @@ describe('createIndexedDbSettingsStore', () => {
     vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
   })
 
-  it('loads with no identity field — device identity is a Keycloak token now, not settings-store state (T043)', async () => {
+  it('loads with no identity field — device identity is a session token now, not settings-store state (T050)', async () => {
     const store = createIndexedDbSettingsStore()
 
     const settings = await store.load()

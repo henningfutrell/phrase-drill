@@ -1,4 +1,4 @@
-# The server (T041, T043)
+# The server (T041, T050)
 
 Plain Node, no framework, no vendor SDK. Owns both provider credentials
 (ElevenLabs speech, Anthropic vision) and her phrase library, so the device
@@ -6,48 +6,55 @@ never holds a key. `server/index.js` is the entry point; `server/app.js`
 composes every route; both static PWA and API are served from the same
 process and port.
 
-Three services now, not one (T043): the app server, Postgres (its
-persistence), and Keycloak in front of it (her login). See "Identity:
-Keycloak login" and "Run locally" below.
+Two services (T050): the app server and Postgres (its persistence). Login is
+baked into the app itself — no third service, no vendor account, no admin
+console to run for one person. See "Identity: session tokens" below.
 
 ## Why this exists
 
 She has no physical access to her own phone and is not technical. Any UX that
 asks her to paste an API key, pick a setting, or be walked through
-configuration is unworkable. The server holds the keys; she logs in once with
-a Keycloak account the owner created for her, and the device stays signed in.
+configuration is unworkable. The server holds the keys; she logs in with a
+username and password the owner set up for her, and the device stays signed
+in for 30 days.
+
+**Why not Keycloak (T050).** An earlier version of this server fronted login
+with Keycloak — full OIDC, a hosted login page, its own Postgres schema. At
+one non-technical user, the redirect dance, the vendor account, and the
+memory it cost (measured: 760 MiB settled / 2.17 GiB peak — 97% of the
+stack's memory, to log in one person) were cost with no matching benefit. A
+login form inside the app is *simpler* for her than being bounced to a
+third-party page, not just cheaper to run. Deleted entirely, not adapted:
+`server/jwt-verifier.js`, `keycloak/`, `scripts/keycloak/`,
+`src/adapters/auth/keycloak-auth.ts`, and every `KEYCLOAK_*`/`OIDC_*` env
+var.
 
 ## Endpoints
 
-Every `/api/*` route requires `Authorization: Bearer <access-token>` — a
-Keycloak-issued JWT, verified server-side (`server/jwt-verifier.js`) against
-the realm's JWKS: signature, issuer, audience, and expiry. A missing,
-malformed, unsigned, expired, or wrong-issuer/audience token is
-`401 unauthorized` before any route-specific logic runs.
+Every `/api/*` route except `/api/login` requires `Authorization: Bearer
+<session-token>` — an opaque token looked up against the `sessions` table
+(`server/session-auth.js`). A missing, unknown, or expired token is `401
+unauthorized` before any route-specific logic runs; an expired session row is
+deleted the moment it's found, not left to expire on its own schedule.
 
 | Method | Path           | Purpose                                              | Body limit | Rate limit       |
 | ------ | -------------- | ----------------------------------------------------- | ---------- | ----------------- |
 | GET    | `/api/health`  | Liveness check, no auth required.                     | —          | none               |
-| POST   | `/api/tts`     | Synthesize speech for one phrase (`{text, voiceId, modelId}` → audio/mpeg). | 8 KB       | 60 / 60s per key   |
-| POST   | `/api/scan`    | Read handwritten phrases from an uploaded photo (image bytes → `{phrases}`). | 6 MB       | 10 / 60s per key   |
-| GET    | `/api/library` | Fetch the stored library JSON for this key.           | —          | 30 / 60s per key   |
-| PUT    | `/api/library` | Replace the stored library JSON for this key.         | 8 MB       | 30 / 60s per key   |
+| POST   | `/api/login`   | `{username, password}` → `200 {token, expiresAt}` or `401` (identical body whether the username doesn't exist or the password is wrong — no leak). | 2 KB | 5 / 60s per username |
+| POST   | `/api/logout`  | Deletes the session row for the bearer token, if any. Always `204`. | — | none |
+| POST   | `/api/tts`     | Synthesize speech for one phrase (`{text, voiceId, modelId}` → audio/mpeg). | 8 KB       | 60 / 60s per session |
+| POST   | `/api/scan`    | Read handwritten phrases from an uploaded photo (image bytes → `{phrases}`). | 6 MB       | 10 / 60s per session |
+| GET    | `/api/library` | Fetch the stored library JSON for this user.          | —          | 30 / 60s per session |
+| PUT    | `/api/library` | Replace the stored library JSON for this user.        | 8 MB       | 30 / 60s per session |
 | \*     | anything else under `/api/` | `404 not-found`.                        | —          | —                  |
 | \*     | anything not under `/api/`  | Falls back to the built PWA (`dist/`, SPA fallback to `index.html`). | — | — |
 
 Rate limits are in-memory, per-process token buckets (`server/rate-limiter.js`)
 — a restart resets every bucket to full; there is no distributed store to keep
 in sync, which is the right failure direction for a single-container app.
-
-**Why these numbers.** `/api/tts` and `/api/scan` are the two paid calls: 60/min
-covers a normal drilling+scanning session with room to spare; 10/min on scan
-reflects that a scan is a deliberate, occasional action (photographing a page),
-never a background loop. `/api/library` is a device sync call, cheap and
-frequent by nature (a push after every save/delete), so 30/min. Size caps: a
-TTS request is one sentence (8 KB is generous); a scan is one downsized photo
-(device caps ~1600px/JPEG q0.85, 6 MB is headroom); a library PUT is the whole
-exported library (8 MB is ~6.5× the modelled 10,000-phrase export,
-`docs/scale.md` §4).
+`/api/login`'s limiter is keyed by the *submitted username*, not the session
+(there isn't one yet) — 5 attempts per 60s makes password guessing
+impractical without punishing her for a typo.
 
 Provider failures map to HTTP status: `not-configured` (no key set on the
 server) → 503; `quota` (provider rate-limited us) → 429; `unreadable` (vision
@@ -74,70 +81,94 @@ malformed request is never worth retrying:
 - ElevenLabs: `baseMs=500`, `retries=2`, ±20% jitter
 - Anthropic: `baseMs=800`, `retries=2`, ±20% jitter
 
-## Identity: Keycloak login (T043)
+## Identity: session tokens (T050)
 
-The device-generated 64-hex library key is gone — deleted, not deprecated,
-along with every caller of it (`SettingsScreen`'s Sync section, the old
-`getLibraryKey` name on every adapter, `extractPassword`'s predecessor). Her
-identity is now the Keycloak `sub` (subject claim) inside a signed access
-token, the same identity model any real login uses.
+Two tables, created idempotently on startup (`createAuthStore(pool).init()`
+in `server/db.js`):
 
-**Login flow (browser):** authorization code + PKCE (S256), a public OAuth
-client (`phrase-drill-app`) with no client secret anywhere — the PWA is a
-static bundle anyone can read, so it can never hold one.
-`src/adapters/auth/keycloak-auth.ts` drives it: `login()` full-page-redirects
-to Keycloak's `/auth` endpoint with a PKCE challenge; Keycloak redirects back
-with `?code=...&state=...`; `handleRedirectCallback()` exchanges the code for
-tokens (validating `state` first, rejecting a mismatch as a possible CSRF or
-stale redirect) and stores them.
+```
+users    (id text primary key, username text unique not null,
+          password_hash text not null, created_at bigint not null)
+sessions (token_hash text primary key, user_id text not null,
+          created_at bigint not null, expires_at bigint not null)
+```
 
-**Session length vs. token length.** Access tokens are short (5 minutes,
-realm default) — the server never trusts one longer than that. The realm's
-session is what makes "never log in twice on one device" true: 30-day idle,
-365-day max (`keycloak/realm-template.json`,
-`workflows/web-app-development/phrase-drill/2026-08-02-bootstrap/notes/T042-keycloak-verified.md`).
-`getAccessToken()` is the one thing every server-calling adapter uses — it
-returns the cached token if it has more than 30s left, otherwise silently
-exchanges the refresh token first (`grant_type=refresh_token`, still no
-secret), so the 5-minute token length is invisible to her. Proven in
-`src/adapters/auth/keycloak-auth.test.ts` with an injected clock: advance
-virtual time to inside the 30s refresh window, assert the refresh grant fires
-and the new token is what callers get.
+**Passwords.** Hashed with `node:crypto`'s `scrypt` (RFC 7914, the OpenSSL
+binding — not a new dependency, not hand-rolled): a random ≥16-byte salt per
+user, cost parameters embedded in the stored string (`scrypt:N:r:p:salt:hash`,
+all base64) so they can be raised later without a format change. Compared
+with `crypto.timingSafeEqual`, never `===` — a length or byte mismatch never
+takes a data-dependent path. `server/session-auth.js` owns both
+`hashPassword`/`verifyPassword`.
 
-**What someone holding a stolen access token can do, for up to 5 minutes:**
-read and overwrite the library belonging to that token's `sub`
-(`GET`/`PUT /api/library`), and spend that user's share of the rate-limited
-TTS/Scan budget. They cannot read or derive the provider keys (the server
-never returns them, see below), cannot affect another `sub`'s data — every
-row in `libraries` is keyed by `sub`, and the server never trusts a `sub` a
-token didn't itself carry — and cannot exceed the per-token rate limits.
+**Session tokens.** 32 random bytes (`crypto.randomBytes`), base64url-encoded,
+handed to the browser once at login and stored in `localStorage`
+(`src/adapters/auth/session-auth.ts`). The server never stores the token
+itself — only its SHA-256 hash, so a database leak yields no usable token,
+only lookups that fail. `POST /api/login` creates a row with `expires_at` 30
+days out; every authenticated request looks the hash up, checks
+`expires_at`, and deletes the row on the way out if it's past — both the
+check and the cleanup happen in `server/session-auth.js#verify`, not two
+separate code paths that could disagree.
 
-**The VERIFY_PROFILE trap, and the decision.** Keycloak's default
-`VERIFY_PROFILE` required action demands email/first/last name be complete
-before login can finish — a trap for a realm with `registrationAllowed:
-false` where the owner creates the one account by hand and can easily forget
-to fill every field. Disabled realm-wide in `keycloak/realm-template.json`'s
-`requiredActions` rather than relying on remembering to fill the fields at
-account-creation time: deterministic regardless of *how* the account gets
-created (admin console today, a REST script tomorrow), and there is exactly
-one account in this realm, so nothing is lost by not collecting a profile
-nobody reads.
+**What someone holding a stolen session token can do, for up to 30 days or
+until it's revoked:** read and overwrite the library belonging to that
+token's user (`GET`/`PUT /api/library`), and spend that user's share of the
+rate-limited TTS/Scan budget. They cannot read or derive the provider keys
+(the server never returns them, see below), cannot see the password hash
+(never sent to the client, ever), and cannot forge a session for a user they
+don't hold a token for. `POST /api/logout` deletes the row outright —
+immediate revocation, not just letting the token expire.
 
-**Existing IndexedDB decks still load.** The library-key identity was never
-part of what's inside a `Deck`/`Phrase`/`Library` export — only
-`SettingsStore` held it, purely for talking to the server. Removing it from
-`Settings` (`src/adapters/storage/settings-store.ts`) leaves every decks
-IndexedDB record untouched; `settings-store.test.ts` proves a settings
-record with a legacy `libraryKey` field is read back with the field simply
-ignored, not migrated or errored on.
+**Adding a user — CLI only, no signup endpoint.** There is no `/api/signup`;
+an unauthenticated device has no way to create an account, by design (one
+user, owner-provisioned).
+
+```sh
+npm run useradd -- her-username
+# prompts for password on stdin — never pass it as an argv, it would land in
+# shell history and `ps`
+```
+
+`scripts/useradd.mjs` refuses if the username already exists rather than
+silently overwriting it — resetting a forgotten password is a deliberate CLI
+action (delete the row, `useradd` again), not an accidental one.
+
+**Existing IndexedDB decks still load.** Identity was never part of what's
+inside a `Deck`/`Phrase`/`Library` export — only `SettingsStore` held a
+device-identity field at all (the old library key, deleted at T043), and it's
+already gone. This change touches nothing under `IndexedDB`.
+
+## Accepted trade-offs, at two users
+
+These are deliberate stopping points, not gaps someone forgot to close:
+
+- **No password-reset flow.** If she forgets her password, the owner deletes
+  her row directly in Postgres (or waits for a future `useradd --force`) and
+  runs `npm run useradd` again. A self-service reset flow means email
+  delivery, tokens, another surface to secure — for one user the owner can
+  already reach.
+- **No MFA.** A second factor protects an account worth attacking at scale;
+  this one has a $0 bounty and one user.
+- **30-day token, `localStorage`, until expiry or explicit revocation.** A
+  stolen device keeps access until the token's 30 days run out or the owner
+  deletes the session row by hand (there's no self-service "sign out other
+  devices" — there's only ever one device). This is the same shape as most
+  consumer apps' "stay signed in," accepted here for the same reason: the
+  cost of re-entering a password from a share sheet on an iPhone, for a
+  non-technical user, every few days, is real and the threat model (a
+  physically lost or stolen phone that's also unlocked) is already covered by
+  the phone's own lock screen.
 
 ## Provable: no key can leak
 
 - `server/logger.js` redacts every secret out of every log field before a
   line is ever written to stdout: `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`,
-  and (T043) the password segment of `DATABASE_URL`
+  and the password segment of `DATABASE_URL`
   (`server/db.js#extractPassword`, pulled out once at startup and passed
   into `createLogger({ secrets: [...] })` alongside the provider keys).
+  `handleLogin` never passes the submitted password to the logger in any
+  field, on any path — proven in `server/app.test.js`'s login tests.
 - `server/app.test.js`'s `describe('secrets never leak', ...)` drives every
   route with both provider secrets configured and asserts neither raw key
   string appears in any response body or any captured log line, across every
@@ -149,60 +180,53 @@ ignored, not migrated or errored on.
   connection-string password extraction directly: pulls the password out of
   a well-formed URL, returns `null` for a connection string with no password
   segment and for an unparsable string, never throws.
-- Access tokens themselves are bearer credentials, not server secrets — they
-  are short-lived (5 minutes) and scoped to one `sub`; logging one is not the
-  same failure class as logging a provider key, and none of the above claims
-  they're redacted.
+- Password hashes never leave `server/db.js` — `getUserByUsername` is used
+  only inside `session-auth.js#login` for the `verifyPassword` comparison,
+  never returned in any HTTP response.
+- Session tokens themselves are bearer credentials, not server secrets — the
+  server stores only their hash and they're scoped to one user; logging one
+  is not the same failure class as logging a provider key or a password, and
+  none of the above claims they're redacted.
 
 ## Environment variables
 
 | Var                    | Default                                                     | Meaning                                           |
 | ----------------------- | ------------------------------------------------------------ | -------------------------------------------------- |
 | `PORT`                  | `8080`                                                        | HTTP port.                                          |
-| `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for the app's own `libraries` table. |
+| `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `users`, `sessions`. |
 | `DIST_DIR`               | `../dist` (relative to `server/`)                             | Built PWA to serve statically.               |
 | `ELEVENLABS_API_KEY`     | unset                                                         | Speech generation returns `not-configured` if unset.|
 | `ANTHROPIC_API_KEY`      | unset                                                         | Scan reading returns `not-configured` if unset.      |
-| `KEYCLOAK_ISSUER`        | `http://localhost:8081/realms/phrase-drill`                   | Must equal the literal `iss` claim Keycloak puts in every token — the address the *browser* used to reach Keycloak, not necessarily reachable from inside the server's own container. |
-| `KEYCLOAK_JWKS_URI`      | `http://localhost:8081/realms/phrase-drill/protocol/openid-connect/certs` | Where the server itself fetches signing keys — can (and in Docker Compose, does) use container-internal DNS even when `KEYCLOAK_ISSUER` can't. |
-| `TOKEN_AUDIENCE`         | `phrase-drill-app`                                            | Must match the `aud` claim Keycloak puts in tokens (`keycloak/realm-template.json`'s audience mapper on the `phrase-drill-app` client). |
 
-Build-time-only (baked into the static PWA bundle by Vite, not read at
-server runtime — see `Dockerfile`'s builder-stage `ARG`s):
-`VITE_KEYCLOAK_URL`, `VITE_KEYCLOAK_REALM`, `VITE_KEYCLOAK_CLIENT_ID`. These
-are public OAuth client config, not secrets — a public client has none.
+That's the whole list (T050) — no login-provider config, no build-time
+`VITE_*` client id/realm to bake into the PWA, nothing else to set.
 
-Secrets (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, the Postgres/Keycloak
-admin passwords) come from the environment only — never committed, never
-logged, never returned in a response or error body (see "Provable" above).
-`.env.example` documents every variable this stack reads, with safe
-local-only defaults; `docker-compose.yml`'s own defaults (`phrase_drill`/
-`admin`) are for `docker compose up` on a laptop, never for anything
-reachable off `localhost`.
+Secrets (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, the Postgres password)
+come from the environment only — never committed, never logged, never
+returned in a response or error body (see "Provable" above). `.env.example`
+documents every variable this stack reads, with safe local-only defaults;
+`docker-compose.yml`'s own defaults (`phrase_drill`/`phrase_drill`) are for
+`docker compose up` on a laptop, never for anything reachable off
+`localhost`.
 
 ## Schema: creation and change
 
-`createLibraryStore(pool).init()` runs `CREATE TABLE IF NOT EXISTS libraries
-(...)` on every boot (`server/db.js`) — idempotent, so a fresh database and
-one that already has the table both end up in the same state with no
-separate migration step to remember to run. This is deliberately the whole
-story for now: one table, no columns added yet.
+`createLibraryStore(pool).init()` and `createAuthStore(pool).init()` both run
+`CREATE TABLE IF NOT EXISTS` on every boot (`server/db.js`) — idempotent, so
+a fresh database and one that already has the tables both end up in the same
+state with no separate migration step to remember to run.
 
 **How a future schema change is applied to a running deployment:** this
 server has no migration runner (`node-pg-migrate`, `Flyway`, etc.) — adding
 one is future work if `init()`'s `IF NOT EXISTS` approach stops being enough
-(e.g. adding a column to `libraries` with a backfill, not just creating a
-table that isn't there yet). Until then, a schema change ships as: (1) a
-migration SQL step added to `init()` guarded by its own existence check
-(e.g. `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`), so it's still safe to run
-against both an old and an already-migrated database, then (2) redeploy —
-Coolify (or `docker compose up --build`) restarts the `phrase-drill`
-container, `init()` runs the guarded `ALTER`, the app comes back up. No
-manual `psql` step, no downtime beyond a normal redeploy.
-
-Keycloak owns its *own* schema inside the separate `keycloak` database
-entirely — its own startup runs its own migrations. This server never
-touches it.
+(e.g. adding a column with a backfill, not just creating a table that isn't
+there yet). Until then, a schema change ships as: (1) a migration SQL step
+added to `init()` guarded by its own existence check (e.g. `ALTER TABLE ...
+ADD COLUMN IF NOT EXISTS`), so it's still safe to run against both an old and
+an already-migrated database, then (2) redeploy — Coolify (or `docker compose
+up --build`) restarts the `phrase-drill` container, `init()` runs the guarded
+`ALTER`, the app comes back up. No manual `psql` step, no downtime beyond a
+normal redeploy.
 
 ## Run locally, no cloud account
 
@@ -210,35 +234,24 @@ touches it.
 docker compose up --build
 ```
 
-Three services: Postgres (one instance, two logical databases —
-`phrase_drill` for the app, `keycloak` for Keycloak's own accounts/sessions,
-both created by `scripts/postgres/init-multi-db.sh` on Postgres's first
-boot), Keycloak (production mode — `kc.sh start`, never `start-dev` — with
-the realm imported from `keycloak/realm-template.json` at startup via
-`scripts/keycloak/entrypoint.sh`), and the app itself. Serves the app at
-`http://localhost:8080` and the Keycloak admin console at
-`http://localhost:8081`.
+Two services: Postgres and the app. Serves the app at
+`http://localhost:8080`.
 
 With no provider keys set, the PWA, drilling cached Clips, and the phrase
-library all work once logged in; Speech and Scan return a "not set up"
-state until keys are added. Put real values in a git-ignored `.env` file
-next to `docker-compose.yml` — copy `.env.example` and fill it in:
+library all work once logged in; Speech and Scan return a "not set up" state
+until keys are added. Put real values in a git-ignored `.env` file next to
+`docker-compose.yml` — copy `.env.example` and fill it in:
 
 ```sh
 cp .env.example .env
-# edit .env: real POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD,
-# ELEVENLABS_API_KEY, ANTHROPIC_API_KEY
+# edit .env: real POSTGRES_PASSWORD, ELEVENLABS_API_KEY, ANTHROPIC_API_KEY
 docker compose up --build
+npm run useradd -- her-username   # once, to create her account
 ```
 
-Log in for the first time by creating her account in the Keycloak admin
-console (`http://localhost:8081`, `KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD`)
-under the `phrase-drill` realm — `registrationAllowed: false`, so there is no
-self-service signup, by design (one user, owner-provisioned).
-
-There is no non-Docker path any more: Postgres and Keycloak are real
-services, not embeddable the way `node:sqlite` was, so `docker compose up`
-is the only supported way to run this server locally.
+There is no non-Docker path any more: Postgres is a real service, not
+embeddable the way `node:sqlite` was, so `docker compose up` is the only
+supported way to run this server locally.
 
 ## Deploy to Coolify
 
@@ -246,26 +259,16 @@ Point Coolify at this repository; it builds `docker-compose.yml` unchanged.
 Steps:
 
 1. New resource → Docker Compose → this repo, this branch.
-2. Set `POSTGRES_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `ELEVENLABS_API_KEY`,
-   and `ANTHROPIC_API_KEY` in Coolify's environment variables UI — never in
-   `docker-compose.yml` or committed anywhere.
-3. Set `APP_REDIRECT_URI` to the real public origin plus `/*`
-   (e.g. `https://phrase-drill.example.com/*`) — **never** a wildcard host
-   like `https://*/*`, which the realm template refuses to ship with
-   (`keycloak/realm-template.json`'s `redirectUris` is templated from this
-   var, never hardcoded to a wildcard).
-4. Set `VITE_KEYCLOAK_URL`/`KEYCLOAK_ISSUER` to Keycloak's real public URL
-   once it has one (both must be the address the *browser* reaches, not a
-   Docker-internal one).
-5. Attach a persistent volume for `postgres-data` (declared in
-   `docker-compose.yml`) so both the app's library table and Keycloak's own
-   accounts/sessions survive a redeploy.
-6. Expose port `8080` (the app) publicly; `8081` (Keycloak) only if the
-   admin console needs to be reachable off the deploy network.
-
-Create her account in the Keycloak admin console once, the same as local —
-there's no migration path for an account, because there was never a
-device-generated key to migrate away from on a deployment that starts here.
+2. Set `POSTGRES_PASSWORD`, `ELEVENLABS_API_KEY`, and `ANTHROPIC_API_KEY` in
+   Coolify's environment variables UI — never in `docker-compose.yml` or
+   committed anywhere.
+3. Attach a persistent volume for `postgres-data` (declared in
+   `docker-compose.yml`) so the library table and the `users`/`sessions`
+   tables survive a redeploy.
+4. Expose port `8080` publicly.
+5. `npm run useradd -- her-username` once, from inside the running container
+   (`docker compose exec phrase-drill npm run useradd -- her-username`, or
+   Coolify's own shell access), to create her account.
 
 ## Logs
 
@@ -273,5 +276,6 @@ One JSON line per event on stdout (`server/logger.js`): `{level, ts, msg,
 ...fields}`. Every inbound request logs one `"request"` line at `info` with
 `method`, `path`, `status`, `ms`. `docker compose logs -f phrase-drill` (or
 Coolify's log viewer) shows them as they happen. Every field is redacted
-against both provider keys before the line is written, so a raw key can never
-appear even if a deeper error message happened to contain one.
+against both provider keys and the database password before the line is
+written, so a raw secret can never appear even if a deeper error message
+happened to contain one.

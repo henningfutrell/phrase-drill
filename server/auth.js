@@ -1,9 +1,11 @@
 /**
- * Bearer-token extraction only (T043). Identity itself — deciding whether a
- * token is genuine, current, and hers — is `server/jwt-verifier.js`'s job,
- * against Keycloak's JWKS. This module used to also validate the shape of
- * the old 64-hex device-generated library key; that identity model is gone
- * (deleted, not deprecated — repo doctrine) along with every caller of it.
+ * Bearer-token extraction only. Identity itself — deciding whether a token
+ * is genuine, current, and hers — is `server/session-auth.js`'s job,
+ * against the `sessions` table (T050; previously Keycloak's JWKS, before
+ * that a hand-validated 64-hex device-generated library key). Each earlier
+ * identity model is gone entirely (deleted, not deprecated — repo
+ * doctrine) along with every caller of it; this module has needed no
+ * change across any of them.
  */
 
 /** Extracts the bearer token from `Authorization: Bearer <token>`, or `null`. */

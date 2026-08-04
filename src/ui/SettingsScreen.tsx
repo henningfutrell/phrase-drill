@@ -43,8 +43,8 @@ const RESTORE_ERROR_COPY: Record<RestoreRefusal['reason'], string> = {
 
 /**
  * Settings — the voice picker and backup/restore (docs/design.md §3.6). Her
- * identity on the server is now a Keycloak login (T043), not a key this
- * screen shows or lets her paste in — the Sync section that used to do that
+ * identity on the server is a session token from a plain login form (T050),
+ * not a key this screen shows or lets her paste in — the Sync section that used to do that
  * is gone entirely: log-in/out lives wherever the app puts an
  * account-status affordance, not here. Purely presentational: every persist
  * decision, every synth call, every file read, and the actual share/download

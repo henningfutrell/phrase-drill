@@ -13,11 +13,11 @@ export interface Voice {
  * Never part of `Library` — `DeckStore.exportAll()` reads only the `decks`
  * store and structurally cannot see this data (see its own test).
  *
- * There is no identity field here (T043): the device's identity on the
- * server is a Keycloak access token, held by `keycloak-auth.ts` (in-memory
- * plus its own refresh-token storage), never generated or stored by this
- * module — the old device-generated 64-hex library key it replaces is
- * deleted, not deprecated.
+ * There is no identity field here (T043, T050): the device's identity on
+ * the server is an opaque session token, held by `session-auth.ts` in
+ * `localStorage`, never generated or stored by this module — the old
+ * device-generated 64-hex library key it replaces is deleted, not
+ * deprecated.
  */
 export interface Settings {
   readonly voice: Voice | null

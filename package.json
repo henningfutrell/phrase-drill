@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:mutation": "stryker run",
     "format": "prettier --write .",
-    "deploy": "scripts/deploy.sh"
+    "deploy": "scripts/deploy.sh",
+    "useradd": "node scripts/useradd.mjs"
   },
   "dependencies": {
     "idb": "^8.0.3",

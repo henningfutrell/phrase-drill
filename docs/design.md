@@ -340,8 +340,8 @@ first-class state, not an error:
 Reached from `Scan a page` in the Decks list header (§3.2).
 `src/ui/ImportScreen.tsx` implements this flow; `App.tsx` renders it with
 `createServerScanReader` (T041), which calls this app's own `/api/scan`,
-authenticated with her Keycloak access token (T043, replacing the earlier
-device library key). The device holds no Anthropic key at all any more, so
+authenticated with her session token (T050, replacing an earlier Keycloak
+login in turn replacing the original device library key). The device holds no Anthropic key at all any more, so
 there is nothing to be present or missing — the old `apiKeyPresent` gate is
 gone with it.
 
@@ -408,10 +408,11 @@ mid-build to be able to choose the voice herself; and, in T041, both
 provider-key fields were deleted outright and replaced with a **Sync**
 section — the server now holds both credentials, so there was no key
 left for this screen to collect. T043 deleted that Sync section in turn:
-identity is now a Keycloak login (browser redirect, authorization code +
-PKCE), not a pasted key, so there is nothing left on this screen to display,
-copy, or recover by hand — a wiped or replaced phone recovers by logging in
-again, the same as any other account.
+identity is a login (T050: a plain username/password form; T043 through
+T049 used a Keycloak browser redirect instead), not a pasted key, so there
+is nothing left on this screen to display, copy, or recover by hand — a
+wiped or replaced phone recovers by logging in again, the same as any other
+account.
 
 1. **Voice — a picker.** A curated catalogue of voices (currently three, each
    named and described, e.g. "Female voice, American-accented English

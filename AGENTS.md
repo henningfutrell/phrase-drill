@@ -21,14 +21,15 @@ user's phone, not for hypothetical others.
   is a plain-Node HTTP server — no framework, no vendor SDK — that owns both
   provider credentials (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, env only)
   and her phrase library (Postgres, T043). The device never sees a provider
-  key: it authenticates to the server with a Keycloak-issued access token
-  (browser login, authorization code + PKCE — T043, replacing the earlier
-  device-generated library key entirely) and calls same-origin `/api/tts`,
-  `/api/scan`, `/api/library`. Three services (`docker-compose.yml`) —
-  the app, Postgres, Keycloak — serve the stack together; see
-  `docs/server.md` for endpoints, env vars, local run, and Coolify deploy.
-  The offline drill is unaffected — the server generates Clips, the device
-  still caches and plays them from cache with no mid-run network dependency.
+  key: it authenticates to the server with an opaque session token (a plain
+  login form, `POST /api/login` — T050, replacing an earlier Keycloak/OIDC
+  login in turn replacing the original device-generated library key) and
+  calls same-origin `/api/tts`, `/api/scan`, `/api/library`. Two services
+  (`docker-compose.yml`) — the app and Postgres — serve the stack together;
+  see `docs/server.md` for endpoints, env vars, local run, and Coolify
+  deploy. The offline drill is unaffected — the server generates Clips, the
+  device still caches and plays them from cache with no mid-run network
+  dependency.
 
 ## Architecture: ports and adapters
 
