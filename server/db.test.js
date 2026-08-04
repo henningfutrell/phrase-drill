@@ -204,8 +204,8 @@ describe('createAuthStore (Postgres) — users', () => {
     const store = createAuthStore(fakeAuthPool())
     await store.init()
 
-    await store.createUser({ id: 'user-1', username: 'her', passwordHash: 'scrypt:...', createdAt: 1000 })
-    const row = await store.getUserByUsername('her')
+    await store.users.create({ id: 'user-1', username: 'her', passwordHash: 'scrypt:...', createdAt: 1000 })
+    const row = await store.users.getByUsername('her')
 
     expect(row).toEqual({ id: 'user-1', username: 'her', passwordHash: 'scrypt:...', createdAt: 1000 })
   })
@@ -214,17 +214,17 @@ describe('createAuthStore (Postgres) — users', () => {
     const store = createAuthStore(fakeAuthPool())
     await store.init()
 
-    expect(await store.getUserByUsername('nobody')).toBeNull()
+    expect(await store.users.getByUsername('nobody')).toBeNull()
   })
 
   it('refuses to create a second user with an existing username, rather than silently overwriting', async () => {
     const store = createAuthStore(fakeAuthPool())
     await store.init()
 
-    await store.createUser({ id: 'user-1', username: 'her', passwordHash: 'hash-1', createdAt: 1000 })
-    await expect(store.createUser({ id: 'user-2', username: 'her', passwordHash: 'hash-2', createdAt: 2000 })).rejects.toThrow()
+    await store.users.create({ id: 'user-1', username: 'her', passwordHash: 'hash-1', createdAt: 1000 })
+    await expect(store.users.create({ id: 'user-2', username: 'her', passwordHash: 'hash-2', createdAt: 2000 })).rejects.toThrow()
 
-    const row = await store.getUserByUsername('her')
+    const row = await store.users.getByUsername('her')
     expect(row.id).toBe('user-1') // untouched by the rejected attempt
   })
 })
@@ -234,8 +234,8 @@ describe('createAuthStore (Postgres) — sessions', () => {
     const store = createAuthStore(fakeAuthPool())
     await store.init()
 
-    await store.createSession('hash-abc', 'user-1', 1000, 999_000)
-    const row = await store.getSession('hash-abc')
+    await store.sessions.create('hash-abc', 'user-1', 1000, 999_000)
+    const row = await store.sessions.get('hash-abc')
 
     expect(row).toEqual({ userId: 'user-1', expiresAt: 999_000 })
   })
@@ -244,17 +244,17 @@ describe('createAuthStore (Postgres) — sessions', () => {
     const store = createAuthStore(fakeAuthPool())
     await store.init()
 
-    expect(await store.getSession('nonexistent')).toBeNull()
+    expect(await store.sessions.get('nonexistent')).toBeNull()
   })
 
   it('deletes a session so it no longer resolves', async () => {
     const store = createAuthStore(fakeAuthPool())
     await store.init()
 
-    await store.createSession('hash-abc', 'user-1', 1000, 999_000)
-    await store.deleteSession('hash-abc')
+    await store.sessions.create('hash-abc', 'user-1', 1000, 999_000)
+    await store.sessions.delete('hash-abc')
 
-    expect(await store.getSession('hash-abc')).toBeNull()
+    expect(await store.sessions.get('hash-abc')).toBeNull()
   })
 })
 
