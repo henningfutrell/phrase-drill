@@ -664,3 +664,41 @@ button:disabled {
     transition-duration: 0.01ms !important;
   }
 }
+
+/*
+ * The one alert in the app (T069): a write this phone refused.
+ *
+ * Fixed to the top rather than placed in the flow, because the screen under it
+ * may be a Drill running full-bleed, and this is the single message she must
+ * not be able to walk past. It borrows the `--danger` edge from the overdue
+ * Backup card — the same visual language for the same class of fact, her work
+ * not being safe — and nothing from --accent, which stays reserved for the
+ * live beat and the primary action.
+ */
+.write-failure {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: max(14px, env(safe-area-inset-top)) 20px 16px;
+  background: var(--surface-lift);
+  border-bottom: 1px solid var(--danger);
+  box-shadow: var(--shadow-lift);
+}
+
+.write-failure-message {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-base);
+}
+
+.write-failure-detail {
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--text-sm);
+}

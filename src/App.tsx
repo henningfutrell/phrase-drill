@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type {
   Deck,
   DeckId,
@@ -52,6 +52,7 @@ import { SettingsScreen, type PreviewOutcome } from './ui/SettingsScreen'
 import type { ExportOutcome } from './ui/BackupStatus'
 import type { RestoreFileResult } from './ui/RestoreControl'
 import { DiagnosticsScreen } from './ui/DiagnosticsScreen'
+import { WriteFailureNotice } from './ui/WriteFailureNotice'
 
 const EMPTY_SETTINGS: Settings = {
   voice: null,
@@ -161,6 +162,10 @@ function App({
   const [drillTarget, setDrillTarget] = useState<
     { title: string; phrases: readonly Phrase[] } | undefined
   >(undefined)
+  // A write to this phone's storage was refused, and she has not read it yet
+  // (T069). Holds the sentence naming what did not save; the standing
+  // explanation is the notice's own.
+  const [writeFailure, setWriteFailure] = useState<string | undefined>(undefined)
 
   // One Wake Lock port for the app's lifetime (T006 carried obligation:
   // hold the screen on for a Drill's duration). Stateless, so a single
@@ -288,6 +293,49 @@ function App({
     }
   }, [syncedLibrary, decks, mixes, settings.voice])
 
+  /**
+   * Every write to this phone's storage goes through here (T069).
+   *
+   * The screen has already been changed by the time this runs — that is what
+   * makes the app feel like a phone rather than a form. The debt that creates
+   * is settled here and nowhere else: if the store refuses the write, the
+   * screens are put back to what is really on disk and she is told, in the
+   * same breath, which change did not survive. Without both halves she is
+   * looking at a Phrase that does not exist, with nothing to suggest it.
+   *
+   * A write that failed is also never announced to the sync engine. There is
+   * nothing to send.
+   */
+  function persistLocally(write: Promise<void>, failureMessage: string): void {
+    void write.then(
+      () => syncToServer(),
+      () => {
+        setWriteFailure(failureMessage)
+        reloadLibraryFromStores()
+      },
+    )
+  }
+
+  /** Make the screens show what the stores actually hold, not what was asked of them. */
+  function reloadLibraryFromStores(): void {
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(
+      ([loadedDecks, loadedMixes]) => {
+        setDecks(loadedDecks)
+        setMixes(loadedMixes)
+      },
+      () => {
+        // The store cannot even be read. Nothing can be rolled back to, and
+        // the notice is then the whole of the guarantee — which is why it is
+        // set before this is called, never after.
+      },
+    )
+  }
+
+  /** Same, for the Settings the `settings` store holds. */
+  function reloadSettings(): void {
+    void settingsStore.load().then(setSettings, () => {})
+  }
+
   /** Whole-Deck upsert into local state and the store — an unknown id is a
    * newly-created Deck (Import's "New Deck…" path shares this with
    * `handleCreateDeck`), a known id replaces in place. */
@@ -296,7 +344,7 @@ function App({
       const list = current ?? []
       return list.some((d) => d.id === deck.id) ? list.map((d) => (d.id === deck.id ? deck : d)) : [...list, deck]
     })
-    void deckStore.save(deck).then(() => syncToServer())
+    persistLocally(deckStore.save(deck), `“${deck.name}” could not be saved on this phone.`)
   }
 
   /**
@@ -324,7 +372,7 @@ function App({
     setMixes((current) =>
       current.some((m) => m.id === mix.id) ? current.map((m) => (m.id === mix.id ? mix : m)) : [...current, mix],
     )
-    void mixStore.save(mix).then(() => syncToServer())
+    persistLocally(mixStore.save(mix), `“${mix.name}” could not be saved on this phone.`)
   }
 
   function handleSaveMix(name: string, deckIds: readonly DeckId[]) {
@@ -349,13 +397,15 @@ function App({
    * stores, so it is structural, not a promise).
    */
   function handleDeleteMix(id: MixId) {
+    const name = mixes.find((m) => m.id === id)?.name
     setMixes((current) => current.filter((m) => m.id !== id))
-    void mixStore.remove(id).then(() => syncToServer())
+    persistLocally(mixStore.remove(id), `“${name ?? 'That Mix'}” could not be deleted on this phone.`)
   }
 
   function handleDeleteDeck(id: DeckId) {
+    const name = (decks ?? []).find((d) => d.id === id)?.name
     setDecks((current) => (current ?? []).filter((d) => d.id !== id))
-    void deckStore.remove(id).then(() => syncToServer())
+    persistLocally(deckStore.remove(id), `“${name ?? 'That Deck'}” could not be deleted on this phone.`)
     if (selectedDeckId === id) setSelectedDeckId(undefined)
   }
 
@@ -396,7 +446,13 @@ function App({
   function recordExport(): void {
     const timestamp = Date.now()
     setSettings((current) => ({ ...current, lastExportAt: timestamp }))
-    void settingsStore.recordExport(timestamp)
+    void settingsStore.recordExport(timestamp).catch(() => {
+      // The file did leave the app; only the note that it did was refused. Say
+      // so plainly rather than let the Backup age quietly go back to claiming
+      // she has not exported in a month.
+      setWriteFailure('That backup was made, but this phone could not record that it was.')
+      reloadSettings()
+    })
   }
 
   async function handleRestoreFileChosen(file: File): Promise<RestoreFileResult> {
@@ -426,6 +482,13 @@ function App({
         setSelectedDeckId(undefined)
         setSettingsOpen(false)
         syncToServer()
+      })
+      .catch(() => {
+        // `importAll` is one transaction over all three stores, so a refusal
+        // rolls the whole restore back — nothing was replaced, and the Decks
+        // she had are still the Decks she has.
+        setWriteFailure('That backup could not be restored on this phone.')
+        reloadLibraryFromStores()
       })
   }
 
@@ -458,7 +521,15 @@ function App({
     // one (T067). Nothing is regenerated by this: the audio she has is
     // playable in the voice it was made in, and this decides what the next
     // new Phrase is made in.
-    void settingsStore.setVoice(voice).then(() => syncToServer())
+    void settingsStore
+      .setVoice(voice)
+      .then(() => syncToServer())
+      .catch(() => {
+        // A voice the screen shows as pinned but the store never took is a
+        // Drill that will not start, with nothing to explain why (T069).
+        setWriteFailure('The voice you chose could not be saved on this phone.')
+        reloadSettings()
+      })
   }
 
   /**
@@ -481,14 +552,6 @@ function App({
   }
 
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
-
-  /**
-   * How long since her library was last safe somewhere else (T031). Measured
-   * from whichever of the automatic sync and her own last export happened
-   * later — a server-side copy is a backup, so a sync that just succeeded
-   * makes the answer honest without her doing anything.
-   */
-  const age = backupAge(lastBackupAt(settings.lastSyncAt, settings.lastExportAt), Date.now())
 
   function withSelectedDeck(fn: (deck: Deck) => Deck): Deck | undefined {
     if (!selectedDeck) return undefined
@@ -557,181 +620,208 @@ function App({
     }
   }
 
-  if (decks === undefined) {
-    return <main className="screen" />
-  }
+  return (
+    <>
+      {writeFailure !== undefined && (
+        <WriteFailureNotice message={writeFailure} onDismiss={() => setWriteFailure(undefined)} />
+      )}
+      {renderScreen()}
+    </>
+  )
 
-  if (diagnosticsOpen) {
+  /**
+   * Which screen she is looking at. Wrapped by the notice above rather than
+   * returned beside it: a screen added later cannot forget to surface a
+   * write this phone refused, because it has no way to render itself
+   * without going through here.
+   */
+  function renderScreen(): ReactNode {
+    /**
+     * How long since her library was last safe somewhere else (T031).
+     * Measured from whichever of the automatic sync and her own last export
+     * happened later — a server-side copy is a backup, so a sync that just
+     * succeeded makes the answer honest without her doing anything. Read at
+     * render, like the sync line below and for the same reason: the clock
+     * moving is not worth a ticking interval on a phone.
+     */
+    const age = backupAge(lastBackupAt(settings.lastSyncAt, settings.lastExportAt), Date.now())
+
+    if (decks === undefined) {
+      return <main className="screen" />
+    }
+
+    if (diagnosticsOpen) {
+      return (
+        <DiagnosticsScreen
+          onBack={() => setDiagnosticsOpen(false)}
+          reportText={diagnosticsReport}
+          onCopyReport={(text) => copyText(text)}
+        />
+      )
+    }
+
+    if (settingsOpen) {
+      const previewText =
+        (decks ?? []).flatMap((d) => d.phrases).find((p) => p.french.trim().length > 0)?.french ??
+        FALLBACK_PREVIEW_PHRASE
+
+      return (
+        <SettingsScreen
+          onBack={() => setSettingsOpen(false)}
+          voice={settings.voice}
+          voices={VOICE_CATALOGUE}
+          previewText={previewText}
+          onPreviewVoice={handlePreviewVoice}
+          onChooseVoice={handleChooseVoice}
+          backupAge={age}
+          onExportBackup={handleExportBackup}
+          onCopyText={(text) => copyText(text)}
+          onRestoreFileChosen={handleRestoreFileChosen}
+          onConfirmRestore={handleConfirmRestore}
+          onCancelRestore={handleCancelRestore}
+          onOpenDiagnostics={handleOpenDiagnostics}
+          savedAudio={savedAudio}
+        />
+      )
+    }
+
+    if (drillTarget) {
+      return (
+        <DrillScreen
+          title={drillTarget.title}
+          checkReadiness={(): Promise<DrillReadinessResult> =>
+            computeDrillReadiness(drillTarget.phrases, { clipCache, generationQueue, voice: settings.voice })
+          }
+          speech={clipPlayer ?? NOOP_SPEECH}
+          clock={systemClock}
+          unlock={async () => {
+            if (!clipPlayer) {
+              // Reachable only if readiness said canStart with no pinned voice —
+              // a wiring fault, not the phone's doing. Name it as one.
+              return { ok: false as const, name: 'NoVoicePinned', message: 'no voice is pinned' }
+            }
+            const ok = await clipPlayer.unlock()
+            if (ok) return { ok: true as const }
+            const failure = clipPlayer.lastUnlockFailure
+            return {
+              ok: false as const,
+              name: failure?.name ?? 'UnknownError',
+              message: failure?.message ?? '',
+            }
+          }}
+          acquireWakeLock={() => wakeLock.acquire()}
+          releaseWakeLock={() => wakeLock.release()}
+          onExit={() => setDrillTarget(undefined)}
+          onOpenSettings={handleOpenSettings}
+        />
+      )
+    }
+
+    if (mixOpen) {
+      return (
+        <MixSelectScreen
+          decks={decks}
+          mixes={mixes}
+          onBack={() => setMixOpen(false)}
+          onStartMix={(mix: Mix) => {
+            setMixOpen(false)
+            setDrillTarget({ title: mix.name, phrases: resolveMixPhrases(mix, decks) })
+          }}
+          onStartSelection={(selected) => {
+            setMixOpen(false)
+            setDrillTarget({ title: 'Mix', phrases: selected.flatMap((deck) => deck.phrases) })
+          }}
+          onSaveMix={handleSaveMix}
+          onRenameMix={handleRenameMix}
+          onEditMixDecks={handleEditMixDecks}
+          onDeleteMix={handleDeleteMix}
+        />
+      )
+    }
+
+    if (importOpen) {
+      return (
+        <ImportScreen
+          decks={decks}
+          scanReader={scanReader}
+          onSave={handleImportSave}
+          onCancel={() => setImportOpen(false)}
+        />
+      )
+    }
+
+    if (selectedDeck) {
+      return (
+        <DeckDetailScreen
+          deck={selectedDeck}
+          decks={decks}
+          backupAge={age}
+          onExportBackup={handleExportBackup}
+          onCopyText={(text) => copyText(text)}
+          translator={translator}
+          onAddPhraseCandidates={handleAddCandidates}
+          onBack={() => setSelectedDeckId(undefined)}
+          onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
+          onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
+          onDrillDeck={() => setDrillTarget({ title: selectedDeck.name, phrases: selectedDeck.phrases })}
+          onRegenerateDeckAudio={() => {
+            for (const phrase of selectedDeck.phrases) generationQueue.enqueue(phrase)
+          }}
+          onRegeneratePhraseAudio={(id: PhraseId) => {
+            const phrase = selectedDeck.phrases.find((p) => p.id === id)
+            if (phrase) generationQueue.enqueue(phrase)
+          }}
+          onAddPhrase={(french, english) => {
+            const id = crypto.randomUUID()
+            const updated = withSelectedDeck((deck) => addPhrase(deck, { id, french, english }))
+            queuePhraseGeneration(updated, id)
+          }}
+          onUpdatePhrase={(id: PhraseId, fields) => {
+            const updated = withSelectedDeck((deck) => updatePhrase(deck, id, fields))
+            queuePhraseGeneration(updated, id)
+          }}
+          onDeletePhrase={(id: PhraseId) => withSelectedDeck((deck) => removePhrase(deck, id))}
+          onMovePhraseUp={(id: PhraseId) =>
+            withSelectedDeck((deck) => {
+              const index = deck.phrases.findIndex((p) => p.id === id)
+              return index <= 0 ? deck : reorderPhrase(deck, index, index - 1)
+            })
+          }
+          onMovePhraseDown={(id: PhraseId) =>
+            withSelectedDeck((deck) => {
+              const index = deck.phrases.findIndex((p) => p.id === id)
+              return index === -1 || index >= deck.phrases.length - 1
+                ? deck
+                : reorderPhrase(deck, index, index + 1)
+            })
+          }
+        />
+      )
+    }
+
     return (
-      <DiagnosticsScreen
-        onBack={() => setDiagnosticsOpen(false)}
-        reportText={diagnosticsReport}
-        onCopyReport={(text) => copyText(text)}
-      />
-    )
-  }
-
-  if (settingsOpen) {
-    const previewText =
-      (decks ?? []).flatMap((d) => d.phrases).find((p) => p.french.trim().length > 0)?.french ??
-      FALLBACK_PREVIEW_PHRASE
-
-    return (
-      <SettingsScreen
-        onBack={() => setSettingsOpen(false)}
-        voice={settings.voice}
-        voices={VOICE_CATALOGUE}
-        previewText={previewText}
-        onPreviewVoice={handlePreviewVoice}
-        onChooseVoice={handleChooseVoice}
+      <DecksScreen
+        decks={decks}
+        onCreateDeck={handleCreateDeck}
+        onRenameDeck={handleRenameDeck}
+        onDeleteDeck={handleDeleteDeck}
+        onOpenDeck={setSelectedDeckId}
+        onOpenSettings={handleOpenSettings}
+        onOpenMix={() => setMixOpen(true)}
+        onOpenImport={() => setImportOpen(true)}
         backupAge={age}
         onExportBackup={handleExportBackup}
         onCopyText={(text) => copyText(text)}
         onRestoreFileChosen={handleRestoreFileChosen}
         onConfirmRestore={handleConfirmRestore}
         onCancelRestore={handleCancelRestore}
-        onOpenDiagnostics={handleOpenDiagnostics}
-        savedAudio={savedAudio}
+        // Computed at render, not on a timer: the engine re-renders this screen
+        // on every state change, and a "3 minutes ago" that is occasionally a
+        // minute stale is not worth a ticking interval on a phone.
+        syncStatus={syncStatusText(sync, Date.now())}
       />
     )
   }
-
-  if (drillTarget) {
-    return (
-      <DrillScreen
-        title={drillTarget.title}
-        checkReadiness={(): Promise<DrillReadinessResult> =>
-          computeDrillReadiness(drillTarget.phrases, { clipCache, generationQueue, voice: settings.voice })
-        }
-        speech={clipPlayer ?? NOOP_SPEECH}
-        clock={systemClock}
-        unlock={async () => {
-          if (!clipPlayer) {
-            // Reachable only if readiness said canStart with no pinned voice —
-            // a wiring fault, not the phone's doing. Name it as one.
-            return { ok: false as const, name: 'NoVoicePinned', message: 'no voice is pinned' }
-          }
-          const ok = await clipPlayer.unlock()
-          if (ok) return { ok: true as const }
-          const failure = clipPlayer.lastUnlockFailure
-          return {
-            ok: false as const,
-            name: failure?.name ?? 'UnknownError',
-            message: failure?.message ?? '',
-          }
-        }}
-        acquireWakeLock={() => wakeLock.acquire()}
-        releaseWakeLock={() => wakeLock.release()}
-        onExit={() => setDrillTarget(undefined)}
-        onOpenSettings={handleOpenSettings}
-      />
-    )
-  }
-
-  if (mixOpen) {
-    return (
-      <MixSelectScreen
-        decks={decks}
-        mixes={mixes}
-        onBack={() => setMixOpen(false)}
-        onStartMix={(mix: Mix) => {
-          setMixOpen(false)
-          setDrillTarget({ title: mix.name, phrases: resolveMixPhrases(mix, decks) })
-        }}
-        onStartSelection={(selected) => {
-          setMixOpen(false)
-          setDrillTarget({ title: 'Mix', phrases: selected.flatMap((deck) => deck.phrases) })
-        }}
-        onSaveMix={handleSaveMix}
-        onRenameMix={handleRenameMix}
-        onEditMixDecks={handleEditMixDecks}
-        onDeleteMix={handleDeleteMix}
-      />
-    )
-  }
-
-  if (importOpen) {
-    return (
-      <ImportScreen
-        decks={decks}
-        scanReader={scanReader}
-        onSave={handleImportSave}
-        onCancel={() => setImportOpen(false)}
-      />
-    )
-  }
-
-  if (selectedDeck) {
-    return (
-      <DeckDetailScreen
-        deck={selectedDeck}
-        decks={decks}
-        backupAge={age}
-        onExportBackup={handleExportBackup}
-        onCopyText={(text) => copyText(text)}
-        translator={translator}
-        onAddPhraseCandidates={handleAddCandidates}
-        onBack={() => setSelectedDeckId(undefined)}
-        onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
-        onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
-        onDrillDeck={() => setDrillTarget({ title: selectedDeck.name, phrases: selectedDeck.phrases })}
-        onRegenerateDeckAudio={() => {
-          for (const phrase of selectedDeck.phrases) generationQueue.enqueue(phrase)
-        }}
-        onRegeneratePhraseAudio={(id: PhraseId) => {
-          const phrase = selectedDeck.phrases.find((p) => p.id === id)
-          if (phrase) generationQueue.enqueue(phrase)
-        }}
-        onAddPhrase={(french, english) => {
-          const id = crypto.randomUUID()
-          const updated = withSelectedDeck((deck) => addPhrase(deck, { id, french, english }))
-          queuePhraseGeneration(updated, id)
-        }}
-        onUpdatePhrase={(id: PhraseId, fields) => {
-          const updated = withSelectedDeck((deck) => updatePhrase(deck, id, fields))
-          queuePhraseGeneration(updated, id)
-        }}
-        onDeletePhrase={(id: PhraseId) => withSelectedDeck((deck) => removePhrase(deck, id))}
-        onMovePhraseUp={(id: PhraseId) =>
-          withSelectedDeck((deck) => {
-            const index = deck.phrases.findIndex((p) => p.id === id)
-            return index <= 0 ? deck : reorderPhrase(deck, index, index - 1)
-          })
-        }
-        onMovePhraseDown={(id: PhraseId) =>
-          withSelectedDeck((deck) => {
-            const index = deck.phrases.findIndex((p) => p.id === id)
-            return index === -1 || index >= deck.phrases.length - 1
-              ? deck
-              : reorderPhrase(deck, index, index + 1)
-          })
-        }
-      />
-    )
-  }
-
-  return (
-    <DecksScreen
-      decks={decks}
-      onCreateDeck={handleCreateDeck}
-      onRenameDeck={handleRenameDeck}
-      onDeleteDeck={handleDeleteDeck}
-      onOpenDeck={setSelectedDeckId}
-      onOpenSettings={handleOpenSettings}
-      onOpenMix={() => setMixOpen(true)}
-      onOpenImport={() => setImportOpen(true)}
-      backupAge={age}
-      onExportBackup={handleExportBackup}
-      onCopyText={(text) => copyText(text)}
-      onRestoreFileChosen={handleRestoreFileChosen}
-      onConfirmRestore={handleConfirmRestore}
-      onCancelRestore={handleCancelRestore}
-      // Computed at render, not on a timer: the engine re-renders this screen
-      // on every state change, and a "3 minutes ago" that is occasionally a
-      // minute stale is not worth a ticking interval on a phone.
-      syncStatus={syncStatusText(sync, Date.now())}
-    />
-  )
 }
 
 export default App
