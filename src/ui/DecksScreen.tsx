@@ -20,6 +20,7 @@ export function DecksScreen({
   onOpenImport,
   showBackupNudge = false,
   onDismissBackupNudge,
+  syncStatus,
 }: {
   decks: readonly Deck[]
   onCreateDeck: (name: string) => void
@@ -40,6 +41,12 @@ export function DecksScreen({
   showBackupNudge?: boolean
   /** Required whenever `showBackupNudge` can be true. */
   onDismissBackupNudge?: () => void
+  /**
+   * One line about sync (T034) — already worded by `sync-status-text.ts`;
+   * this screen only places it. Omitted in tests that do not exercise sync,
+   * and then nothing is shown rather than an empty line.
+   */
+  syncStatus?: string
 }) {
   const [sheet, setSheet] = useState<SheetState>(undefined)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<DeckId | undefined>(undefined)
@@ -89,6 +96,12 @@ export function DecksScreen({
           </button>
         </div>
       </header>
+
+      {syncStatus && (
+        <p className="sync-status" data-testid="sync-status">
+          {syncStatus}
+        </p>
+      )}
 
       {decks.length === 0 ? (
         <>

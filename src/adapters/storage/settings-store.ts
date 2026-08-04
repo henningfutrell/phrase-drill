@@ -30,11 +30,12 @@ export interface Settings {
    */
   readonly backupNudgeDismissed: boolean
   /**
-   * Epoch ms of the last successful Library sync (`docs/sync.md`), or `null`
-   * if none has ever completed. Diagnostics (T039) is the first reader;
-   * nothing writes this yet — the sync feature that calls `recordSync` is a
-   * separate change. Additive field: missing in previously-stored settings
-   * reads as `null`, same treatment as `backupNudgeDismissed`.
+   * Epoch ms of the last Library sync the server ACCEPTED (`docs/sync.md`),
+   * or `null` if none has ever completed. Written only by the sync engine, on
+   * the success path and nowhere else, which is what makes it safe for the
+   * sync line and Diagnostics (T039) to read it as proof a sync happened.
+   * Additive field: missing in previously-stored settings reads as `null`,
+   * same treatment as `backupNudgeDismissed`.
    */
   readonly lastSyncAt: number | null
 }

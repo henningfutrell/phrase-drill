@@ -199,17 +199,27 @@ describe('createSyncEngine — syncing without a tap (T034)', () => {
     expect(h.scheduler.pending).toEqual([2_000])
   })
 
-  it('coalesces a change made while a sync is in flight into exactly one follow-up round-trip', async () => {
-    const h = createHarness()
-    let releasePull: (() => void) | undefined
-    const slow = h.server.client()
+  it('coalesces changes made while a sync is in flight into exactly one follow-up round-trip', async () => {
+    const server = createFakeServer()
+    const live = server.client()
+    let releaseFirstPull: (() => void) | undefined
     const client: LibrarySyncClient = {
-      push: slow.push,
+      push: live.push,
       pull: async () => {
-        await new Promise<void>((resolve) => {
-          releasePull = resolve
-        })
-        return slow.pull()
+        if (releaseFirstPull === undefined) {
+          await new Promise<void>((resolve) => {
+            releaseFirstPull = resolve
+          })
+        }
+        return live.pull()
+      },
+    }
+    // A scheduler with no delay at all, so `requestSync` lands while the
+    // launch round-trip is still waiting on its pull.
+    const immediate: Scheduler = {
+      schedule(fn) {
+        fn()
+        return () => {}
       },
     }
     const engine = createSyncEngine({
@@ -220,8 +230,8 @@ describe('createSyncEngine — syncing without a tap (T034)', () => {
       readLastSyncAt: async () => null,
       recordSync: async () => {},
       now: () => 1,
-      scheduler: h.scheduler,
-      platform: h.platform,
+      scheduler: immediate,
+      platform: createManualPlatform(),
       debounceMs: 0,
     })
 
@@ -229,12 +239,11 @@ describe('createSyncEngine — syncing without a tap (T034)', () => {
     await settle()
     engine.requestSync()
     engine.requestSync()
-    releasePull?.()
-    await settle()
-    await h.scheduler.fire()
+    engine.requestSync()
+    releaseFirstPull?.()
     await settle()
 
-    expect(h.server.pushes.length).toBe(2)
+    expect(server.pushes.length).toBe(2)
   })
 
   it('flushes immediately when the app is backgrounded, so locking the phone does not strand a change', async () => {
