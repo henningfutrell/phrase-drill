@@ -216,60 +216,86 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
    * The size index, read once per cache instance. Small rows only — the whole
    * reason `clipMeta` is its own store is that this never loads audio.
    *
-   * Any Clip with no index row is indexed here first (T072), so a phone that
-   * upgraded into this build keeps the audio it already has instead of
-   * re-fetching it. Blocking, not background: an index that under-reports the
-   * cache says "not ready" for Phrases that are ready, which queues audio for
-   * regeneration that is already on the disk.
+   * The index is **reconciled against the audio** before it is used (T076),
+   * and then the ceiling is applied to it (T076) — in that order, because
+   * evicting against a wrong account is worse than not evicting at all.
+   *
+   * Blocking, not background: an index that under-reports the cache says "not
+   * ready" for Phrases that are ready, which queues audio for regeneration
+   * that is already on the disk.
    */
   function getIndex(): Promise<Map<string, ClipMeta>> {
     indexPromise ??= (async () => {
       const db = await getDatabase()
-      const rows = (await db.getAll(CLIP_META_STORE)) as ClipMeta[]
-      const backfilled = await backfillMissingMeta(db, rows)
-      const all = [...rows, ...backfilled].sort((a, b) => a.lastUsedAt - b.lastUsedAt)
+      const rows = await reconcileIndex(db, (await db.getAll(CLIP_META_STORE)) as ClipMeta[])
       const index = new Map<string, ClipMeta>()
-      for (const row of all) {
+      totalBytes = 0
+      for (const row of [...rows].sort((a, b) => a.lastUsedAt - b.lastUsedAt)) {
         index.set(row.hash, row)
         totalBytes += row.bytes
       }
+      // The ceiling applies on every launch, not only when she generates
+      // something (T076). Nothing to protect here — no Clip was just cached.
+      await evictDownToTarget(index, undefined)
       return index
     })()
     return indexPromise
   }
 
   /**
-   * Index rows for Clips that have none, written and returned (T072).
+   * The index made to agree with the audio, in both directions — the rows that
+   * survive, returned.
    *
-   * This is the v5 -> v6 backfill, moved out of the versionchange transaction
-   * that used to do it with one `getAll` over the whole clip store — ~890 MB
-   * at a full library (docs/scale.md §1), which is an out-of-memory kill on a
-   * phone, retried on every launch because the upgrade never completes. Here
-   * it is ordinary work on an open database: no transaction to hold, nothing
-   * to crashloop, and a failure costs a re-fetch rather than her library.
+   * Every number the ceiling is enforced against is computed from this index,
+   * so an index that disagrees with the `clips` store is a ceiling that does
+   * not bind. The two drift apart in both directions:
    *
-   * Three properties it needs, and no more:
+   * - **A Clip with no row (T072).** The v5 -> v6 backfill: the store was
+   *   created empty, so a phone that upgraded into this build has audio nobody
+   *   has measured. Left alone it reads as no audio at all and the whole
+   *   library is re-fetched.
+   * - **A row with no Clip (T076).** Eviction deletes the audio and the row in
+   *   two steps; interrupted between them — the app backgrounded, the tab
+   *   killed — it leaves the row. That row is then charged against the ceiling
+   *   forever, and `has()` answers `true` for audio that is gone.
    *
-   * - **Bounded memory.** Audio is read one chunk at a time and only the size
-   *   is kept, so a few megabytes are in hand at once rather than the store.
-   * - **Resumable.** It is driven off the difference between the two stores,
-   *   so an interrupted run leaves the rows it managed and the next launch
-   *   does the rest.
-   * - **Free once done.** `count` answers "is anything missing?" without
-   *   reading a key, let alone a byte, which is what every launch after the
-   *   upgrade pays.
+   * The second also hides the first: this used to ask `count(CLIPS_STORE) <=
+   * known.length` and stop there, so one orphan cancelled one unindexed Clip
+   * exactly, and that Clip was never indexed on any launch, ever. Hence keys,
+   * not a count. `getAllKeys` over the `clips` store is ~10,000 hex hashes at a
+   * full library — about 1 MB of strings, no structured clone of an
+   * `ArrayBuffer` (docs/scale.md §3) — paid once per launch. That is the price
+   * of an account that is true, and a count is not a cheaper version of it, it
+   * is a wrong one.
    *
-   * `lastUsedAt` seeds from `createdAt`: nothing recorded when a Clip was last
-   * played before this store existed, and generation order is the only honest
-   * answer available.
+   * `clipMeta` is **derived**, exactly like the audio it measures: a row whose
+   * Clip is gone describes nothing, so deleting it loses nothing. Nothing here
+   * can name a store but `CLIPS_STORE` and `CLIP_META_STORE`, and only ever
+   * deletes from the latter — a Clip is only ever *added* to the index.
+   *
+   * Still bounded and still resumable (T072): audio is read one
+   * `CLIP_META_BACKFILL_CHUNK` at a time and only the byte count is kept, and
+   * the work is driven off the difference between the two stores, so an
+   * interrupted run leaves the rows it managed and the next launch does the
+   * rest. `lastUsedAt` seeds from `createdAt`: nothing recorded when a Clip was
+   * last played before this store existed, and generation order is the only
+   * honest answer available.
    */
-  async function backfillMissingMeta(db: IDBPDatabase, known: readonly ClipMeta[]): Promise<ClipMeta[]> {
-    if ((await db.count(CLIPS_STORE)) <= known.length) return []
+  async function reconcileIndex(db: IDBPDatabase, known: readonly ClipMeta[]): Promise<ClipMeta[]> {
+    const cached = new Set((await db.getAllKeys(CLIPS_STORE)) as string[])
 
-    const indexed = new Set(known.map((row) => row.hash))
-    const missing = ((await db.getAllKeys(CLIPS_STORE)) as string[]).filter((hash) => !indexed.has(hash))
+    const live: ClipMeta[] = []
+    for (const row of known) {
+      if (cached.has(row.hash)) {
+        live.push(row)
+        continue
+      }
+      await db.delete(CLIP_META_STORE, row.hash)
+    }
 
-    const written: ClipMeta[] = []
+    const indexed = new Set(live.map((row) => row.hash))
+    const missing = [...cached].filter((hash) => !indexed.has(hash))
+
     for (let from = 0; from < missing.length; from += CLIP_META_BACKFILL_CHUNK) {
       const chunk = missing.slice(from, from + CLIP_META_BACKFILL_CHUNK)
       const clips = (await Promise.all(chunk.map((hash) => db.get(CLIPS_STORE, hash)))) as (Clip | undefined)[]
@@ -277,10 +303,10 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
         if (!clip) continue
         const meta: ClipMeta = { hash: clip.hash, bytes: clip.bytes.byteLength, lastUsedAt: clip.createdAt }
         await db.put(CLIP_META_STORE, meta)
-        written.push(meta)
+        live.push(meta)
       }
     }
-    return written
+    return live
   }
 
   /** Re-dates a Clip and moves it to the young end of the LRU order. */
@@ -296,14 +322,21 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
 
   /**
    * Deletes least-recently-played Clips until the cache is back under
-   * `EVICT_TO_FRACTION` of the ceiling. `protectedHash` is the Clip this put
-   * just cached: evicting it would mean a put that silently did nothing, and
-   * the caller has no way to notice.
+   * `EVICT_TO_FRACTION` of the ceiling. `protectedHash` is the Clip a put just
+   * cached — evicting it would mean a put that silently did nothing, and the
+   * caller has no way to notice — or `undefined` on the launch sweep, where
+   * nothing was just cached and everything is a candidate.
+   *
+   * **The index is a parameter, not something this fetches (T076).** The
+   * launch sweep runs from inside `getIndex`'s own build, and by then
+   * `indexPromise` is already assigned — the assignment happens when the async
+   * body reaches its first `await`, not when it returns. So a `getIndex()`
+   * here would await the very promise this work has to settle: a hang with no
+   * timeout, on the index every screen waits for. Verified, not assumed.
    */
-  async function evictDownToTarget(protectedHash: string): Promise<void> {
+  async function evictDownToTarget(index: Map<string, ClipMeta>, protectedHash: string | undefined): Promise<void> {
     if (totalBytes <= maxBytes) return
     const db = await getDatabase()
-    const index = await getIndex()
     const target = Math.floor(maxBytes * EVICT_TO_FRACTION)
 
     for (const hash of [...index.keys()]) {
@@ -340,7 +373,7 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       await db.put(CLIPS_STORE, clip)
       await db.put(CLIP_META_STORE, meta)
 
-      await evictDownToTarget(clip.hash)
+      await evictDownToTarget(index, clip.hash)
     },
 
     async has(hash: string): Promise<boolean> {

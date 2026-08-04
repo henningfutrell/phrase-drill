@@ -226,7 +226,8 @@ still says which one would come back first if either fix regressed.
 
 `clip-cache.ts` holds a ceiling of **200 MB** (`DEFAULT_CLIP_CACHE_MAX_BYTES`)
 and evicts **least recently played** Clips down to 90% of it whenever a `put`
-crosses the line. `get()` is what counts as playing; `has()` — the readiness
+crosses the line — and, since T076, on the first index build of every launch as
+well (§8). `get()` is what counts as playing; `has()` — the readiness
 sweep's question, asked of every Phrase at every drill start — deliberately
 does not, because counting it would reset every Clip's age at once.
 
@@ -277,8 +278,9 @@ on its first index build, outside any versionchange transaction:
   ~2 MB in hand, only the byte count kept.
 - **Resumable** — driven off the difference between the two stores, so an
   interrupted run costs only the rows it did not reach.
-- **Free once done** — a `count` answers "is anything missing?" without
-  reading a key, which is what every launch after the upgrade pays.
+- **Cheap once done** — one `getAllKeys` over the `clips` store, which is what
+  every launch after the upgrade pays. (T072 used a `count` here; §8 says why
+  that was not enough.)
 - **Not fatal** — a failure here costs a re-fetch of derived audio. Nothing in
   it can reach a Deck, a Phrase, a Mix or a Tombstone.
 
@@ -295,6 +297,65 @@ app hangs on a library that is perfectly fine, saying nothing. Both conditions
 are reported to the composition root and surface in the T069 write-failure
 notice, with their own detail line, because "this phone may be out of space"
 would send her to fix the wrong thing.
+
+## 8. The ceiling made to actually bind (T076)
+
+§6's ceiling is enforced against the `clipMeta` index, not against the audio.
+Two things made that ceiling stop meaning anything.
+
+**The index and the audio drift apart, in both directions.** A Clip with no
+row is §7's case. A row with no Clip is the reverse: eviction deletes the audio
+and the row in two steps, and an app backgrounded between them leaves the row
+behind. An orphaned row is charged against the ceiling forever — so the cache
+believes it holds bytes it does not, and evicts audio it did not need to — and
+`has()` answers `true` for audio that is gone, so the readiness sweep promises
+a drill the player cannot play.
+
+Worse, an orphan **hid** §7's case. The backfill asked
+`count(CLIPS_STORE) <= known.length` and stopped there, so one orphaned row
+cancelled one unindexed Clip exactly, and that Clip was never indexed on any
+launch, ever — re-fetched every time. The fix is keys, not a count:
+`getAllKeys` over `clips` at a full library is ~10,000 hex hashes, about 1 MB
+of strings with no `ArrayBuffer` structured clone (§3), once per launch. A
+count is not a cheaper version of that answer; it is a wrong one.
+
+Rows whose Clip is gone are deleted. `clipMeta` is **derived**, exactly like
+the audio it measures — a row describing a Clip that no longer exists
+describes nothing — and the reconciliation can name only `clips` and
+`clipMeta`, deleting from the latter alone.
+
+**Nothing swept an already-fat cache.** `evictDownToTarget` ran only from
+`put`. A phone carrying a pre-T036 cache — up to 890 MB by §1 — stayed that fat
+until the next Clip was generated, and if she generated nothing it never
+shrank at all. The ceiling was therefore a bound on growth, not a bound on
+size, on exactly the phones that most needed the second. It now runs at the end
+of the first index build of every launch too.
+
+That could not simply be called: `evictDownToTarget` fetched the index with
+`getIndex()`, and the launch sweep runs *inside* `getIndex`'s own build, where
+`indexPromise` is already assigned — an async function assigns before its first
+`await` resumes — so it would have awaited the promise it was there to settle.
+A hang with no timeout, on the one promise every screen waits for. The index is
+now a parameter.
+
+The sweep blocks the first index build, deliberately: the alternative is a
+background sweep racing the puts that build the index it is walking, and the
+work is the same per-Clip cost `put` already pays, only paid once, and
+resumable — each delete commits on its own, so an interrupted sweep resumes on
+the next launch.
+
+Rejected: **a persisted "reconciled at" marker** to skip the key read on later
+launches (it adds a persisted field to save ~1 MB of key reads, and a marker
+that is ever wrong reinstates the exact defect it optimizes); **trusting the
+count with a repair pass only when it disagrees** (the equal-counts case is the
+one that hides a permanent defect); and **rebuilding `clipMeta` from scratch on
+every launch** (correct, and it reads every byte of audio — §7's crash, moved
+from the upgrade to every launch).
+
+Asserted by `src/adapters/storage/clip-cache.test.ts` ("the ceiling still binds
+after an upgrade"), including that the launch sweep's only destructive
+operations are on `clips` and `clipMeta` and that an exported library is
+byte-identical across it.
 
 ## Assumptions and gaps, named plainly
 
