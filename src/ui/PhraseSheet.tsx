@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Deck, PhraseCandidate, Translator } from '../domain'
+import '../styles/tokens.css'
+import './PhraseSheet.css'
 
 const DEBOUNCE_MS = 500
 
@@ -10,8 +12,10 @@ interface AcceptedCandidate {
 }
 
 /**
- * Add and edit a Phrase share this one sheet shape — French, then English.
- * When `translator` is supplied (the Add sheet only, T057), typing English
+ * Add and edit a Phrase share this one sheet shape — English, then French.
+ * English comes first and holds the focus because that is the direction she
+ * works in: she knows what she wants to say, and the French is what the app
+ * proposes back (T061). When `translator` is supplied (the Add sheet only, T057), typing English
  * proposes one or more French Phrase Candidates to review and choose from;
  * typing French with English still empty proposes a single English
  * suggestion, shown but never saved un-reviewed. Omitting `translator`
@@ -127,20 +131,6 @@ export function PhraseSheet({
 
   return (
     <div className="sheet" role="dialog" aria-label="Phrase">
-      <label className="sheet-label" htmlFor="phrase-french">
-        French
-      </label>
-      <input
-        id="phrase-french"
-        data-testid="phrase-french-input"
-        className="sheet-input"
-        value={french}
-        autoFocus
-        onChange={(e) => {
-          setFrench(e.target.value)
-          setLastEdited('french')
-        }}
-      />
       <label className="sheet-label" htmlFor="phrase-english">
         English
         {englishSuggested && (
@@ -154,10 +144,24 @@ export function PhraseSheet({
         data-testid="phrase-english-input"
         className="sheet-input"
         value={english}
+        autoFocus
         onChange={(e) => {
           setEnglish(e.target.value)
           setLastEdited('english')
           setEnglishSuggested(false)
+        }}
+      />
+      <label className="sheet-label" htmlFor="phrase-french">
+        French
+      </label>
+      <input
+        id="phrase-french"
+        data-testid="phrase-french-input"
+        className="sheet-input"
+        value={french}
+        onChange={(e) => {
+          setFrench(e.target.value)
+          setLastEdited('french')
         }}
       />
 
@@ -178,6 +182,8 @@ export function PhraseSheet({
             <div className="candidate-row" data-testid={`candidate-row-${i}`} key={i}>
               <input
                 type="checkbox"
+                className="candidate-checkbox"
+                aria-label={`Add ${candidate.text}`}
                 data-testid={`candidate-checkbox-${i}`}
                 checked={selected.has(i)}
                 onChange={() => toggleSelected(i)}
@@ -190,6 +196,8 @@ export function PhraseSheet({
               )}
               {decks && (
                 <select
+                  className="candidate-deck"
+                  aria-label={`Deck for ${candidate.text}`}
                   data-testid={`candidate-deck-${i}`}
                   value={candidateDeckIds[i] ?? currentDeckId ?? ''}
                   onChange={(e) =>
