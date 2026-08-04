@@ -35,57 +35,136 @@ export function fakeLibraryPool() {
   const versions = []
   const queries = []
   let nextId = 1
+  let failPattern = null
 
-  return {
+  // T082. `put` now runs archive-and-overwrite inside one transaction that
+  // takes `SELECT … FOR UPDATE` on the row first, so this fake has to model a
+  // transaction or the concurrency test would prove nothing.
+  //
+  // It serializes at `BEGIN` rather than at the `FOR UPDATE`, which is
+  // COARSER than Postgres — the real lock is per row, this one is per pool.
+  // For a single library key the observable outcome is the same, and a fake
+  // that let two transactions interleave would be modelling a database that
+  // does not exist. What it cannot show is that Postgres accepts this SQL;
+  // `db.postgres.test.js` is the only thing that can.
+  let transactionGate = Promise.resolve()
+
+  const pool = {
     queries,
-    async query(text, params = []) {
-      queries.push({ text, params })
-      const sql = flatten(text)
+    leased: 0,
+    /** Arms the next query matching `pattern` to reject, for the rollback path. */
+    failNext(pattern) {
+      failPattern = pattern
+    },
 
-      if (sql.startsWith('CREATE TABLE')) {
-        created.add(tableOf(sql))
+    async query(text, params = []) {
+      return run(text, params)
+    },
+
+    async connect() {
+      pool.leased += 1
+      let release = null
+      let released = false
+      return {
+        async query(text, params = []) {
+          const sql = flatten(text)
+          if (sql === 'BEGIN') {
+            queries.push({ text, params })
+            const held = transactionGate
+            let open
+            transactionGate = new Promise((resolve) => {
+              open = resolve
+            })
+            release = open
+            await held
+            return { rows: [] }
+          }
+          if (sql === 'COMMIT' || sql === 'ROLLBACK') {
+            queries.push({ text, params })
+            release?.()
+            release = null
+            return { rows: [] }
+          }
+          return run(text, params)
+        },
+        release() {
+          if (released) return
+          released = true
+          // A client released mid-transaction must not wedge every later
+          // writer — `pg` discards such a connection; this reopens the gate.
+          release?.()
+          release = null
+          pool.leased -= 1
+        },
+      }
+    },
+
+    async end() {},
+  }
+
+  return pool
+
+  async function run(text, params = []) {
+    queries.push({ text, params })
+    const sql = flatten(text)
+
+    if (failPattern && failPattern.test(sql)) {
+      failPattern = null
+      throw new Error(`fakeLibraryPool: forced failure for: ${sql}`)
+    }
+
+    return dispatch(sql, params)
+  }
+
+  async function dispatch(sql, params) {
+    if (sql.startsWith('CREATE TABLE')) {
+      created.add(tableOf(sql))
+      return { rows: [] }
+    }
+    if (sql.startsWith('CREATE INDEX')) return { rows: [] }
+
+    const table = tableOf(sql)
+    if (!created.has(table)) throw new Error(`relation "${table}" does not exist`)
+
+    if (table === 'libraries') {
+      if (sql.startsWith('SELECT')) {
+        const row = libraries.get(params[0])
+        return { rows: row ? [{ data: row.data, updatedAt: row.updatedAt }] : [] }
+      }
+      if (sql.startsWith('INSERT')) {
+        const [key, data, updatedAt] = params
+        libraries.set(key, { data, updatedAt })
         return { rows: [] }
       }
-      if (sql.startsWith('CREATE INDEX')) return { rows: [] }
+    }
 
-      const table = tableOf(sql)
-      if (!created.has(table)) throw new Error(`relation "${table}" does not exist`)
-
-      if (table === 'libraries') {
-        if (sql.startsWith('SELECT')) {
-          const row = libraries.get(params[0])
-          return { rows: row ? [{ data: row.data, updatedAt: row.updatedAt }] : [] }
-        }
-        if (sql.startsWith('INSERT')) {
-          const [key, data, updatedAt] = params
-          libraries.set(key, { data, updatedAt })
-          return { rows: [] }
-        }
+    if (table === 'library_versions') {
+      if (sql.startsWith('INSERT')) {
+        const [key, data, updatedAt, archivedAt] = params
+        versions.push({ id: nextId++, libraryKey: key, data, updatedAt, archivedAt })
+        return { rows: [] }
       }
-
-      if (table === 'library_versions') {
-        if (sql.startsWith('INSERT')) {
-          const [key, data, updatedAt, archivedAt] = params
-          versions.push({ id: nextId++, libraryKey: key, data, updatedAt, archivedAt })
-          return { rows: [] }
-        }
-        if (sql.startsWith('DELETE')) {
-          const doomed = new Set(params[0])
-          for (let i = versions.length - 1; i >= 0; i -= 1) if (doomed.has(versions[i].id)) versions.splice(i, 1)
-          return { rows: [] }
-        }
-        if (sql.startsWith('SELECT')) {
-          const mine = versions.filter((v) => v.libraryKey === params[0]).sort((a, b) => b.id - a.id)
-          // `pg` hands `bigint` back as a string; `db.js` is what converts.
-          if (sql.includes('LIMIT 1')) return { rows: mine.slice(0, 1).map((v) => ({ archivedAt: String(v.archivedAt) })) }
-          if (sql.includes('octet_length')) return { rows: mine.map((v) => ({ id: String(v.id), bytes: String(Buffer.byteLength(v.data)) })) }
-          return { rows: mine.map((v) => ({ id: String(v.id), data: v.data, updatedAt: String(v.updatedAt), archivedAt: String(v.archivedAt) })) }
-        }
+      if (sql.startsWith('DELETE')) {
+        const doomed = new Set(params[0])
+        for (let i = versions.length - 1; i >= 0; i -= 1) if (doomed.has(versions[i].id)) versions.splice(i, 1)
+        return { rows: [] }
       }
+      if (sql.startsWith('SELECT')) {
+        const mine = versions.filter((v) => v.libraryKey === params[0]).sort((a, b) => b.id - a.id)
+        // `pg` hands `bigint` back as a string; `db.js` is what converts.
+        if (sql.includes('LIMIT 1')) return { rows: mine.slice(0, 1).map((v) => ({ archivedAt: String(v.archivedAt) })) }
+        if (sql.includes('octet_length')) {
+          // T082: retention thins by interval, so the prune needs each row's
+          // `archived_at` as well as its size.
+          return {
+            rows: mine.map((v) => ({ id: String(v.id), bytes: String(Buffer.byteLength(v.data)), archivedAt: String(v.archivedAt) })),
+          }
+        }
+        return { rows: mine.map((v) => ({ id: String(v.id), data: v.data, updatedAt: String(v.updatedAt), archivedAt: String(v.archivedAt) })) }
+      }
+    }
 
-      throw new Error(`fakeLibraryPool: unrecognized query: ${sql}`)
-    },
-    async end() {},
+    throw new Error(`fakeLibraryPool: unrecognized query: ${sql}`)
   }
 }
 
