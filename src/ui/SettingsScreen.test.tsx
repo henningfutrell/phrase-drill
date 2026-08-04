@@ -122,7 +122,7 @@ describe('SettingsScreen', () => {
 
       expect(props.onPreviewVoice).toHaveBeenCalledTimes(1)
       const [voiceArg, textArg] = vi.mocked(props.onPreviewVoice).mock.calls[0]!
-      expect(voiceArg).toEqual({ modelId: 'eleven_multilingual_v2', voiceId: 'voice-rachel' })
+      expect(voiceArg).toEqual({ provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-rachel' })
       expect(textArg).toBe('Où est la gare ?')
     })
 

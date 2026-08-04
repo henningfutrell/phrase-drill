@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApp } from './app.js'
-import { createLibraryStore } from './db.js'
+import { createLibraryStore, createClipStore } from './db.js'
 import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
@@ -73,11 +73,25 @@ function fetchThatFailsWith(status) {
   return async () => ({ ok: false, status })
 }
 
+/**
+ * The fake ElevenLabs upstream, counting its own calls. `calls` is the whole
+ * point of T063: the shared Clip store exists so that the same phrase in the
+ * same voice is paid for once, on any device, ever — and the only way to
+ * assert that is on the provider's call count, not on the response bodies
+ * (which are identical either way).
+ */
 function fetchElevenLabsOk() {
-  return async (url, init) => {
+  const impl = async (url, init) => {
     if (init.headers['xi-api-key'] !== SECRET_ELEVENLABS_KEY) throw new Error('wrong key used against fake upstream')
-    return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(1600) }
+    impl.calls += 1
+    // Distinguishable bytes per call, so a test can tell a replayed cached
+    // clip from a freshly generated one.
+    const bytes = new Uint8Array(1600)
+    bytes[0] = impl.calls
+    return { ok: true, status: 200, arrayBuffer: async () => bytes.buffer }
   }
+  impl.calls = 0
+  return impl
 }
 
 function fetchAnthropicOk(phrases) {
@@ -127,10 +141,48 @@ function fakePool() {
   }
 }
 
+/** Same idea as `fakePool`, for the `clips` table (T063). */
+function fakeClipPool() {
+  let tableCreated = false
+  const rows = new Map()
+  return {
+    async query(text, params = []) {
+      const sql = text.trim()
+      if (sql.startsWith('CREATE TABLE')) {
+        tableCreated = true
+        return { rows: [] }
+      }
+      if (!tableCreated) throw new Error('relation "clips" does not exist')
+      if (sql.startsWith('SELECT')) {
+        const row = rows.get(params[0])
+        return { rows: row ? [{ bytes: row.bytes, mime: row.mime, durationMs: row.durationMs }] : [] }
+      }
+      if (sql.startsWith('INSERT')) {
+        const [hash, bytes, mime, durationMs, createdAt] = params
+        if (!rows.has(hash)) rows.set(hash, { bytes, mime, durationMs, createdAt })
+        return { rows: [] }
+      }
+      throw new Error(`fakeClipPool: unrecognized query: ${sql}`)
+    },
+    async end() {},
+  }
+}
+
 async function newLibraryStore() {
   const store = createLibraryStore(fakePool())
   await store.init()
   return store
+}
+
+async function newClipStore() {
+  const store = createClipStore(fakeClipPool())
+  await store.init()
+  return store
+}
+
+/** Every field `/api/tts` needs to derive the content address (T063). */
+function ttsBody(overrides = {}) {
+  return JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1', provider: 'elevenlabs', lang: 'fr-FR', ...overrides })
 }
 
 describe('server app (integration, fake upstreams)', () => {
@@ -139,9 +191,14 @@ describe('server app (integration, fake upstreams)', () => {
   let libraryStore
   let distDir
   let logger
+  let clipStore
+  /** The counting fake upstream this boot wired in — `.calls` is what the T063 tests assert on. */
+  let elevenLabsUpstream
 
   async function boot({ elevenLabsFetch = fetchElevenLabsOk(), anthropicFetch = fetchAnthropicOk([]) } = {}) {
+    elevenLabsUpstream = elevenLabsFetch
     libraryStore = await newLibraryStore()
+    clipStore = await newClipStore()
     distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-dist-'))
     mkdirSync(join(distDir, 'assets'), { recursive: true })
     writeFileSync(join(distDir, 'index.html'), '<!doctype html><title>phrase-drill</title>')
@@ -165,6 +222,7 @@ describe('server app (integration, fake upstreams)', () => {
 
     const handleRequest = createApp({
       libraryStore,
+      clipStore,
       elevenLabs,
       anthropic,
       ttsLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
@@ -234,7 +292,7 @@ describe('server app (integration, fake upstreams)', () => {
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
         headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
+        body: ttsBody(),
       })
       expect(res.status).toBe(200)
       expect(res.headers.get('content-type')).toBe('audio/mpeg')
@@ -248,7 +306,7 @@ describe('server app (integration, fake upstreams)', () => {
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
         headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'x'.repeat(20_000), voiceId: 'v1', modelId: 'm1' }),
+        body: ttsBody({ text: 'x'.repeat(20_000) }),
       })
       expect(res.status).toBe(413)
     })
@@ -265,6 +323,7 @@ describe('server app (integration, fake upstreams)', () => {
 
     it('returns 503 not-configured when the upstream key is missing, without ever leaking the (absent) key', async () => {
       libraryStore = await newLibraryStore()
+      clipStore = await newClipStore()
       distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-dist-'))
       writeFileSync(join(distDir, 'index.html'), '<!doctype html>')
       logger = collectingLogger()
@@ -272,6 +331,7 @@ describe('server app (integration, fake upstreams)', () => {
       const anthropic = createAnthropicProvider({ apiKey: null, queue: createBoundedQueue({ concurrency: 2 }) })
       const handleRequest = createApp({
         libraryStore,
+        clipStore,
         elevenLabs,
         anthropic,
         ttsLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
@@ -290,7 +350,7 @@ describe('server app (integration, fake upstreams)', () => {
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
         headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
+        body: ttsBody(),
       })
       expect(res.status).toBe(503)
     })
@@ -300,7 +360,7 @@ describe('server app (integration, fake upstreams)', () => {
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
         headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
+        body: ttsBody(),
       })
       expect(res.status).toBe(429)
     })
@@ -311,13 +371,115 @@ describe('server app (integration, fake upstreams)', () => {
         fetch(`${baseUrl}/api/tts`, {
           method: 'POST',
           headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
+          body: ttsBody(),
         })
       await request()
       await request()
       await request()
       const fourth = await request()
       expect(fourth.status).toBe(429)
+    })
+  })
+
+  describe('POST /api/tts — the shared Clip store (T063)', () => {
+    function tts(body, token = VALID_TOKEN) {
+      return fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body,
+      })
+    }
+
+    // THE acceptance test. Every device used to pay to generate the same
+    // audio again: the content address was computed on the device and never
+    // sent anywhere, so the server had no way to know it had made this exact
+    // clip before. Two identical requests, one provider call.
+    it('calls the provider exactly once for two identical requests', async () => {
+      await boot()
+
+      const first = await tts(ttsBody())
+      const second = await tts(ttsBody())
+
+      expect(elevenLabsUpstream.calls).toBe(1)
+      expect(first.status).toBe(200)
+      expect(second.status).toBe(200)
+    })
+
+    it('replays the stored bytes on the second request, not a fresh generation', async () => {
+      await boot()
+
+      const firstBytes = Buffer.from(await (await tts(ttsBody())).arrayBuffer())
+      const secondRes = await tts(ttsBody())
+      const secondBytes = Buffer.from(await secondRes.arrayBuffer())
+
+      expect(secondBytes.equals(firstBytes)).toBe(true)
+      expect(secondRes.headers.get('content-type')).toBe('audio/mpeg')
+      expect(secondRes.headers.get('x-duration-ms')).toBe('100')
+    })
+
+    // The store is content-addressed, not per-user: the whole point is that
+    // a *second device* — and, at this scale, a second account — does not pay
+    // again for audio the server already holds. Nothing is disclosed by that:
+    // to reach a stored clip you must already know its exact provider, model,
+    // voice, language and text.
+    it('serves a clip generated for one session to a different session', async () => {
+      await boot()
+
+      await tts(ttsBody(), VALID_TOKEN)
+      await tts(ttsBody(), OTHER_TOKEN)
+
+      expect(elevenLabsUpstream.calls).toBe(1)
+    })
+
+    it('calls the provider again when any field of the content address differs', async () => {
+      await boot()
+
+      await tts(ttsBody())
+      await tts(ttsBody({ text: 'salut' }))
+      await tts(ttsBody({ lang: 'en-US' }))
+
+      expect(elevenLabsUpstream.calls).toBe(3)
+    })
+
+    // A cache hit is still an authenticated request doing a database read and
+    // streaming audio back, so it spends a token like any other. Stated
+    // outright because the opposite is tempting and wrong: making hits free
+    // would put an un-metered path behind a bearer token.
+    it('charges a cache hit against the rate limit, same as a miss', async () => {
+      await boot() // ttsLimiter capacity is 3 in this harness
+
+      await tts(ttsBody())
+      await tts(ttsBody())
+      await tts(ttsBody())
+      const fourth = await tts(ttsBody())
+
+      expect(fourth.status).toBe(429)
+      expect(elevenLabsUpstream.calls).toBe(1)
+    })
+
+    it('rejects a request that omits the fields the content address is derived from', async () => {
+      await boot()
+
+      const noProvider = await tts(JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1', lang: 'fr-FR' }))
+      const noLang = await tts(JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1', provider: 'elevenlabs' }))
+
+      expect(noProvider.status).toBe(400)
+      expect(noLang.status).toBe(400)
+      expect(elevenLabsUpstream.calls).toBe(0)
+    })
+
+    // The device already paid for these bytes; a store that is down or full
+    // must not turn a successful generation into a failed request.
+    it('still returns the audio when writing it to the store fails', async () => {
+      await boot()
+      clipStore.put = async () => {
+        throw new Error('disk full')
+      }
+
+      const res = await tts(ttsBody())
+
+      expect(res.status).toBe(200)
+      expect(Buffer.from(await res.arrayBuffer()).byteLength).toBe(1600)
     })
   })
 
@@ -430,6 +592,7 @@ describe('server app (integration, fake upstreams)', () => {
       const anthropic = createAnthropicProvider({ apiKey: null, queue: createBoundedQueue({ concurrency: 2 }) })
       const handleRequest = createApp({
         libraryStore,
+        clipStore,
         elevenLabs,
         anthropic,
         ttsLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
@@ -593,7 +756,7 @@ describe('server app (integration, fake upstreams)', () => {
         fetch(`${baseUrl}/api/tts`, {
           method: 'POST',
           headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
+          body: ttsBody(),
         }),
         fetch(`${baseUrl}/api/scan`, {
           method: 'POST',
@@ -626,7 +789,7 @@ describe('server app (integration, fake upstreams)', () => {
       await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
         headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' }),
+        body: ttsBody(),
       })
       for (const line of logger.lines) {
         expect(line).not.toContain(SECRET_ELEVENLABS_KEY)
