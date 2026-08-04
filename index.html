@@ -21,6 +21,24 @@
     -->
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="phrase-drill" />
+
+    <!--
+      The ground, painted before any CSS parses. Without this the first frame
+      of a cold launch is the browser's white, which against an aubergine app
+      reads as a flash on every open (T058).
+    -->
+    <meta name="theme-color" content="#191016" />
+
+    <!--
+      Both faces are needed by the first screen she sees — Pinyon for the login
+      title, Garamond for the fields — so both are preloaded rather than
+      discovered a stylesheet later. `crossorigin` is required on a font
+      preload even same-origin; without it the browser fetches the file twice.
+      Italic is deliberately NOT preloaded: it appears only in hints and
+      placeholders, well after first paint.
+    -->
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="%BASE_URL%fonts/eb-garamond-latin-wght-normal.woff2" />
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="%BASE_URL%fonts/pinyon-script-latin-400-normal.woff2" />
   </head>
   <body>
     <div id="root"></div>

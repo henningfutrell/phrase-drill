@@ -2,12 +2,20 @@
  * The Drill screen (docs/design.md §3.1) — hands-free, arm's length, spoken
  * aloud. Largest text on the whole app; controls sized for a thumb, not a
  * fingertip.
+ *
+ * This is the screen the ornament rule was written for (T058). The lace band
+ * sits at the head and the réseau veils the head and foot, but the current
+ * line has nothing behind it: no texture, no tint, no gradient. It is écru on
+ * plain velvet at up to 96px, because she is reading it at arm's length,
+ * possibly in a gym, possibly while walking, and every gram of ornament behind
+ * it is paid for out of legibility she needs.
  */
 
 .drill-screen {
   min-height: 100vh;
+  min-height: 100dvh;
   box-sizing: border-box;
-  padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+  padding: max(20px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
   background: var(--bg);
   color: var(--ink);
   display: flex;
@@ -15,15 +23,44 @@
   gap: 16px;
 }
 
+/* The start card's title, which sits outside .screen-header. */
+.drill-screen h1 {
+  font-family: var(--font-script);
+  font-size: var(--text-xl);
+  font-weight: 400;
+  line-height: 1.1;
+  margin: 0;
+  padding: 0.12em 0.06em;
+}
+
 .drill-header {
   display: flex;
   justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
 }
 
 .drill-header-title {
-  font-size: var(--text-sm);
-  color: var(--ink-dim);
+  font-family: var(--font-script);
+  font-size: var(--text-lg);
+  line-height: 1.2;
+  color: var(--ink-soft);
   margin: 0;
+  padding: 0.08em 0.06em 0;
+  text-align: center;
+}
+
+/* The one piece of ornament on the running screen: a scalloped selvedge under
+   the deck name, marking the top of the stage. Nothing below it is decorated. */
+.drill-header::after {
+  content: '';
+  width: min(240px, 62%);
+  height: 14px;
+  background-image: var(--lace-band);
+  background-repeat: repeat-x;
+  background-position: center top;
+  opacity: 0.55;
 }
 
 .drill-blocked,
@@ -31,6 +68,8 @@
   font-size: var(--text-sm);
   color: var(--ink-dim);
   text-align: center;
+  max-width: 60ch;
+  margin-inline: auto;
 }
 
 .drill-unlock-error {
@@ -43,76 +82,146 @@
   font-size: var(--text-sm);
   color: var(--ink-dim);
   text-align: center;
+  font-style: italic;
 }
 
 .drill-banner {
   background: var(--surface);
-  color: var(--ink);
+  border: 1px solid var(--gilt-dim);
+  color: var(--ink-soft);
   font-size: var(--text-sm);
   text-align: center;
-  padding: 10px 16px;
+  padding: 11px 16px;
   border-radius: 12px;
 }
+
+/* ---- The cadence -------------------------------------------------------
+   Four beats: french · pause · english · pause. In lace terms each is a
+   bobbin thread with a picot at its head — a hairline, not a bar. Filled in
+   rose as it is spoken, thread-white once done. */
 
 .drill-beat-row {
   display: flex;
   justify-content: center;
-  gap: 10px;
+  align-items: flex-start;
+  gap: 18px;
   margin-top: auto;
 }
 
 .drill-beat {
-  width: 8px;
-  height: 48px;
-  border-radius: 4px;
-  background: transparent;
-  border: 2px solid var(--ink-dim);
-  transition: background-color 200ms ease, border-color 200ms ease;
+  position: relative;
+  width: 1.5px;
+  height: 44px;
+  border-radius: 1px;
+  background: var(--gilt-dim);
+  transition:
+    background-color 260ms var(--ease-out),
+    box-shadow 260ms var(--ease-out);
+}
+
+/* The picot at the head of each thread. */
+.drill-beat::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  margin-left: -2.5px;
+  border-radius: 50%;
+  background: var(--gilt-dim);
+  transition: background-color 260ms var(--ease-out);
 }
 
 .drill-beat--live {
   background: var(--accent);
-  border-color: var(--accent);
+  box-shadow: 0 2px 12px -2px rgba(233, 185, 195, 0.55);
 }
 
+.drill-beat--live::before {
+  background: var(--accent);
+}
+
+/* Quieter than live by value, not only by hue: rose and mauve sit close enough
+   at 1.5px that "spoken" and "speaking" were not distinguishable at a glance,
+   which is the one thing this row exists to show. */
 .drill-beat--done {
   background: var(--ink-dim);
-  border-color: var(--ink-dim);
+  opacity: 0.45;
 }
 
+.drill-beat--done::before {
+  background: var(--ink-dim);
+}
+
+/* ---- The line ----------------------------------------------------------
+   Nothing behind it. Nothing beside it. This is the whole app. */
+
 .drill-current-line {
+  font-family: var(--font-body);
   font-size: var(--text-drill);
-  font-weight: 700;
+  /* Garamond at 96px does not need bold to have presence, and bold at this
+     size closes the counters that make é/è/ê distinguishable at arm's length. */
+  font-weight: 500;
+  line-height: 1.06;
+  letter-spacing: -0.012em;
   text-align: center;
+  text-wrap: balance;
   margin: 0;
   min-height: 1em;
-  transition: opacity 150ms ease;
+  /* Accented capitals (É, À) sit above the cap line; without room the diacritic
+     is clipped by the line box at this size. */
+  padding-top: 0.06em;
+  animation: line-arrive 380ms var(--ease-out);
+}
+
+/* The one authored moment in the app: each line of the cadence resolves out of
+   the velvet rather than cutting in. Blur and opacity only — nothing moves
+   horizontally, because a line she is reading must not slide under her eye. */
+@keyframes line-arrive {
+  from {
+    opacity: 0;
+    filter: blur(7px);
+    transform: translateY(6px) scale(0.985);
+  }
 }
 
 .drill-rep-counter {
   font-size: var(--text-sm);
   color: var(--ink-dim);
   text-align: center;
+  letter-spacing: 0.06em;
   margin: 0 0 auto;
 }
 
+/* ---- Controls ----------------------------------------------------------- */
+
 .drill-controls {
   display: grid;
-  grid-template-columns: 56px 1fr 56px;
+  grid-template-columns: 60px 1fr 60px;
   align-items: center;
   gap: 16px;
 }
 
 .drill-control {
-  min-height: 56px;
-  border-radius: 16px;
-  font-weight: 700;
+  min-height: 60px;
+  border-radius: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition:
+    transform 200ms var(--ease-out),
+    background-color 200ms var(--ease-out);
+}
+
+.drill-control:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .drill-control--secondary {
-  min-width: 56px;
+  min-width: 60px;
   background: var(--surface);
-  color: var(--ink);
+  border: 1px solid var(--gilt-dim);
+  color: var(--ink-soft);
   font-size: var(--text-sm);
 }
 
@@ -120,4 +229,13 @@
   background: var(--accent);
   color: var(--bg);
   font-size: var(--text-lg);
+  box-shadow:
+    inset 0 0 0 1px rgba(25, 16, 22, 0.22),
+    var(--shadow-lift);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drill-current-line {
+    animation: none;
+  }
 }

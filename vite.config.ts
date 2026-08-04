@@ -52,7 +52,13 @@ export default defineConfig({
       workbox: {
         clientsClaim: true,
         skipWaiting: true,
-        globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
+        // woff2 is in this list deliberately (T058). The app's two faces are
+        // self-hosted, and an offline drill that falls back to Palatino is a
+        // different app. This is also why only the `latin` subsets are
+        // vendored: precache takes everything matched here up front, so
+        // unicode-range never gets the chance to skip a subset she cannot
+        // render a character from. See src/styles/fonts.css.
+        globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest,woff2}'],
       },
       manifest: {
         id: base,
@@ -72,8 +78,8 @@ export default defineConfig({
         // current selection) and is explicit that it "never decorates";
         // tinting chrome with it would be a fourth, undesigned use, so chrome
         // gets `--bg` too and stays dark and neutral like the rest of the app.
-        theme_color: '#101114',
-        background_color: '#101114',
+        theme_color: '#191016',
+        background_color: '#191016',
         icons: [
           {
             src: 'icons/icon-192.png',
