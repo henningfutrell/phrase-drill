@@ -224,6 +224,31 @@ describe('createClipPlayer', () => {
       expect(player.unlockStatus).toBe('failed')
       expect(player.lastUnlockFailure).toEqual({ name: 'NotSupportedError', message: 'bad source' })
     })
+
+    it('logs to diagnostics when a second AbortError is judged unlocked anyway, since that judgement could be wrong (T002)', async () => {
+      // Same fixture as "does not surface AbortError..." above — play()
+      // rejects with AbortError on both the first attempt and the retry.
+      // The caller still sees success (unchanged, T001's whole point), but a
+      // reader of the diagnostics report should be able to see this
+      // judgement was made at all.
+      const abort = new Error('The operation was aborted.')
+      abort.name = 'AbortError'
+      const element = fakeAudioElement({ play: vi.fn().mockRejectedValue(abort) })
+      const onSilentFailure = vi.fn()
+      const player = createClipPlayer({
+        element,
+        clipCache: fakeClipCache(),
+        voices: [VOICE],
+        onSilentFailure,
+      })
+
+      const ok = await player.unlock()
+
+      expect(ok).toBe(true)
+      expect(player.unlockStatus).toBe('unlocked')
+      expect(onSilentFailure).toHaveBeenCalledTimes(1)
+      expect(onSilentFailure.mock.calls[0]![0]).toEqual(expect.stringContaining('AbortError'))
+    })
   })
 
   describe('speak', () => {
@@ -310,6 +335,20 @@ describe('createClipPlayer', () => {
       expect(onMissingClip).toHaveBeenCalledWith({ text: 'Bonjour inconnu', lang: 'fr-FR' })
     })
 
+    it('logs a missing Clip to diagnostics without the phrase text — her data, not the log\'s (T002)', async () => {
+      const element = fakeAudioElement()
+      const cache = fakeClipCache({})
+      const onSilentFailure = vi.fn()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], onSilentFailure })
+
+      await player.speak('Bonjour inconnu secret', 'fr-FR')
+
+      expect(onSilentFailure).toHaveBeenCalledTimes(1)
+      const message = onSilentFailure.mock.calls[0]![0] as string
+      expect(message).not.toContain('Bonjour inconnu secret')
+      expect(message.toLowerCase()).toContain('missing')
+    })
+
     it('resolves rather than hanging when the element rejects play() (e.g. blocked autoplay)', async () => {
       const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
       const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 1000 }) })
@@ -319,6 +358,71 @@ describe('createClipPlayer', () => {
       await player.speak('Bonjour', 'fr-FR')
 
       expect(revokeObjectURL).toHaveBeenCalledTimes(1)
+    })
+
+    it('logs a play failure after unlock to diagnostics, but still resolves quietly (T002)', async () => {
+      const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+      const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 1000 }) })
+      const refusal = new Error('blocked')
+      refusal.name = 'NotAllowedError'
+      const element = fakeAudioElement({ play: vi.fn().mockRejectedValue(refusal) })
+      const onSilentFailure = vi.fn()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], onSilentFailure })
+
+      await expect(player.speak('Bonjour', 'fr-FR')).resolves.toBeUndefined()
+
+      expect(onSilentFailure).toHaveBeenCalledTimes(1)
+      expect(onSilentFailure.mock.calls[0]![0]).toEqual(expect.stringContaining('NotAllowedError'))
+    })
+
+    it('does not flood diagnostics with the same repeating play failure across a whole Drill (T002)', async () => {
+      const hashA = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Un' })
+      const hashB = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Deux' })
+      const cache = fakeClipCache({
+        [hashA]: fakeClip({ hash: hashA, durationMs: 10 }),
+        [hashB]: fakeClip({ hash: hashB, durationMs: 10 }),
+      })
+      const refusal = new Error('blocked')
+      refusal.name = 'NotAllowedError'
+      const element = fakeAudioElement({ play: vi.fn().mockRejectedValue(refusal) })
+      const onSilentFailure = vi.fn()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], onSilentFailure })
+
+      await player.speak('Un', 'fr-FR')
+      await player.speak('Deux', 'fr-FR')
+
+      expect(onSilentFailure).toHaveBeenCalledTimes(1)
+    })
+
+    it('logs a play failure again after a successful play in between (recovery resets the throttle) (T002)', async () => {
+      const hashA = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Un' })
+      const hashB = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Deux' })
+      const cache = fakeClipCache({
+        [hashA]: fakeClip({ hash: hashA, durationMs: 10 }),
+        [hashB]: fakeClip({ hash: hashB, durationMs: 10 }),
+      })
+      const refusal = new Error('blocked')
+      refusal.name = 'NotAllowedError'
+      let shouldFail = true
+      const element = fakeAudioElement({
+        play: vi.fn().mockImplementation(() => (shouldFail ? Promise.reject(refusal) : Promise.resolve())),
+      })
+      const onSilentFailure = vi.fn()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], onSilentFailure })
+
+      await player.speak('Un', 'fr-FR')
+      expect(onSilentFailure).toHaveBeenCalledTimes(1)
+
+      shouldFail = false
+      const second = player.speak('Deux', 'fr-FR')
+      await waitUntil(() => element.playCalls > 1)
+      element.emit('ended')
+      await second
+
+      shouldFail = true
+      await player.speak('Un', 'fr-FR')
+
+      expect(onSilentFailure).toHaveBeenCalledTimes(2)
     })
 
     it('reuses the single injected element across successive clips, swapping src rather than creating new elements', async () => {

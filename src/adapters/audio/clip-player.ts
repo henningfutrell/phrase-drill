@@ -95,6 +95,25 @@ export interface ClipPlayerDeps {
    * decision this drives.
    */
   onMissingClip?(info: MissingClipInfo): void
+  /**
+   * Reports a failure this adapter deliberately swallows (never throws,
+   * never surfaces on the Drill screen) so it still leaves a trace in
+   * Diagnostics (T039) instead of none at all: a play() rejection after
+   * unlock, a Clip missing at play time, and unlock()'s
+   * "judged unlocked after a second AbortError" branch. A plain string
+   * callback, not a dependency on the diagnostics adapter directly — this
+   * stays an `adapters/audio` file, and the composition root (`App.tsx`)
+   * wires it to `errorLog.record`. Never passed the phrase text: that is
+   * her data, not this adapter's to persist (see the missing-Clip call site).
+   *
+   * Throttled per failure kind, not called on every occurrence: a Drill
+   * speaks constantly, and the diagnostics log is a 50-entry ring buffer
+   * (`ERROR_LOG_CAP`) — logging every repeat of the same standing failure
+   * would flood it with duplicates and push out everything else. Each kind
+   * logs once, then stays quiet until it recovers (a subsequent successful
+   * play), at which point the next occurrence logs again.
+   */
+  onSilentFailure?(message: string): void
 }
 
 /**
@@ -111,11 +130,16 @@ export interface ClipPlayerDeps {
  * side channel a caller can watch instead.
  */
 export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
-  const { element, clipCache, voices, onMissingClip } = deps
+  const { element, clipCache, voices, onMissingClip, onSilentFailure } = deps
   const slackMs = deps.slackMs ?? DEFAULT_SLACK_MS
   let unlockStatus: UnlockStatus = 'pending'
   let lastUnlockFailure: UnlockFailure | undefined
   let stopCurrent: (() => void) | null = null
+  // Per-kind throttle for `onSilentFailure` (see its doc comment): true once
+  // logged, reset to false on the next successful play so a later, distinct
+  // occurrence still surfaces.
+  let playFailureLogged = false
+  let missingClipLogged = false
   // Shared by every caller mid-attempt (T001): a second Start-Drill tap
   // arriving before the first unlock() resolves used to re-enter this
   // method, reassigning `element.src` and calling `play()` again while the
@@ -153,6 +177,10 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
         if (!retried) return attemptUnlock(true)
         unlockStatus = 'unlocked'
         lastUnlockFailure = undefined
+        onSilentFailure?.(
+          `unlock judged the element unlocked after a second AbortError in a row (retry aborted too) — ` +
+            `that judgement could be wrong`,
+        )
         return true
       }
       // The whole point of naming it: at this call site an iOS autoplay
@@ -197,8 +225,16 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
       const clip = hash ? await clipCache.get(hash) : undefined
       if (!clip) {
         onMissingClip?.({ text, lang })
+        // Never the phrase text — that is her data, not this log's (redact.ts
+        // only strips known secrets, not free text). `lang` is enough for a
+        // report to say "audio is missing for French" without it.
+        if (!missingClipLogged) {
+          missingClipLogged = true
+          onSilentFailure?.(`Clip missing at play time for a Phrase readiness said was playable (lang ${lang})`)
+        }
         return
       }
+      missingClipLogged = false
 
       const url = URL.createObjectURL(new Blob([clip.bytes], { type: clip.mime }))
       await new Promise<void>((resolve) => {
@@ -218,7 +254,20 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
         element.addEventListener('ended', onEnded, { once: true })
         const timer = setTimeout(finish, clip.durationMs + slackMs)
         element.src = url
-        element.play().catch(() => finish())
+        element.play().then(
+          () => {
+            playFailureLogged = false
+          },
+          (error: unknown) => {
+            if (!playFailureLogged) {
+              playFailureLogged = true
+              const name = error instanceof Error ? error.name : 'UnknownError'
+              const message = error instanceof Error ? error.message : String(error)
+              onSilentFailure?.(`play() failed after unlock (${name}: ${message})`)
+            }
+            finish()
+          },
+        )
       })
     },
 
