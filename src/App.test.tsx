@@ -25,6 +25,7 @@ import { createSyncEngine, type PlatformPort, type Scheduler, type SyncEngine } 
 import { createSyncedLibrary } from './adapters/sync/synced-library'
 import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
 import type { DatabaseTrouble, DatabaseTroubleSource } from './adapters/storage'
+import type { AudioElementLike } from './adapters/audio/clip-player'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
@@ -413,6 +414,22 @@ function neverSyncs(): LibrarySyncClient {
   return createFakeLibrarySyncClient({ push: async () => ({ ok: false, reason: 'network' }) })
 }
 
+/** Stands in for the DOM `<audio>` element `main.tsx` reads from `index.html` (T006). */
+function fakeAudioElement(): AudioElementLike {
+  const listeners: Record<string, Array<() => void>> = {}
+  return {
+    src: '',
+    play: () => Promise.resolve(),
+    pause: () => {},
+    addEventListener(type, listener) {
+      ;(listeners[type] ??= []).push(listener)
+    },
+    removeEventListener(type, listener) {
+      listeners[type] = (listeners[type] ?? []).filter((l) => l !== listener)
+    },
+  }
+}
+
 async function renderApp(
   store: DeckStore,
   settingsStore: SettingsStore = createFakeSettingsStore(),
@@ -426,6 +443,7 @@ async function renderApp(
   mixStore: MixStore = createFakeMixStore(),
   syncEngine: SyncEngine = createTestSyncEngine(store, settingsStore, librarySyncClient),
   databaseTrouble: DatabaseTroubleSource = createFakeDatabaseTrouble(),
+  audioElement: AudioElementLike = fakeAudioElement(),
 ) {
   await act(async () => {
     root.render(
@@ -441,6 +459,7 @@ async function renderApp(
         syncEngine={syncEngine}
         translator={translator}
         databaseTrouble={databaseTrouble}
+        audioElement={audioElement}
       />,
     )
   })
@@ -925,46 +944,78 @@ describe('App wired to the Drill screen', () => {
         return []
       },
     }
-    // jsdom has no real media pipeline (`clip-player.test.ts`'s own note) —
-    // `new Audio()`'s play() rejects as "not implemented" by default, which
-    // would fail unlock() before the Drill ever starts. Stubbed here, not in
-    // clip-player's own tests, because this is the one place a real `Audio`
-    // element is actually constructed (App.tsx's composition root).
-    const play = vi.spyOn(window.HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
-    const pause = vi.spyOn(window.HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    // App.tsx no longer constructs its own `Audio` (T006 — the shared
+    // element now lives in `index.html`, read by `main.tsx`), so this needs
+    // no real-media stubbing: `renderApp`'s default `fakeAudioElement()`
+    // resolves `play()` immediately, same as `clip-player.test.ts`'s own
+    // fakes.
+    await renderApp(
+      store,
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      clipCache,
+      createFakeScanReader(),
+      errorLog,
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-start"]')!))
 
-    try {
-      await renderApp(
-        store,
-        createFakeSettingsStore({ voice: FAKE_VOICE }),
-        createFakeSynthClient(),
-        createFakeGenerationQueue(),
-        clipCache,
-        createFakeScanReader(),
-        errorLog,
-      )
-      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
-      await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
-      await act(async () => click(container.querySelector('[data-testid="drill-start"]')!))
-
-      // speak()'s hash lookup crosses a genuine async boundary
-      // (crypto.subtle.digest) that doesn't resolve on microtask-flushing
-      // alone (see clip-player.test.ts's `waitUntil` doc comment) — poll
-      // with real timers instead of a fixed microtask count.
-      const deadline = Date.now() + 2000
-      while (recorded.length === 0 && Date.now() < deadline) {
-        await act(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 10))
-        })
-      }
-
-      expect(recorded.some((entry) => entry.source === 'adapter' && entry.message.startsWith('clip-player:'))).toBe(
-        true,
-      )
-    } finally {
-      play.mockRestore()
-      pause.mockRestore()
+    // speak()'s hash lookup crosses a genuine async boundary
+    // (crypto.subtle.digest) that doesn't resolve on microtask-flushing
+    // alone (see clip-player.test.ts's `waitUntil` doc comment) — poll
+    // with real timers instead of a fixed microtask count.
+    const deadline = Date.now() + 2000
+    while (recorded.length === 0 && Date.now() < deadline) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      })
     }
+
+    expect(recorded.some((entry) => entry.source === 'adapter' && entry.message.startsWith('clip-player:'))).toBe(
+      true,
+    )
+  })
+
+  it('unlocks the real DOM-attached audio element passed in, not a freshly constructed one (T006)', async () => {
+    // Proves App.tsx wires `audioElement` straight into `createClipPlayer` —
+    // the regression this guards is App silently going back to `new
+    // Audio()`, which `index-html.test.ts` cannot see (it only checks the
+    // markup exists, not that App.tsx actually uses it).
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    const clipCache = createFakeClipCache(new Set(['p1']))
+    let playCalls = 0
+    const audioElement: AudioElementLike = {
+      ...fakeAudioElement(),
+      play: () => {
+        playCalls += 1
+        return Promise.resolve()
+      },
+    }
+
+    await renderApp(
+      store,
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      clipCache,
+      createFakeScanReader(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      audioElement,
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-start"]')!))
+
+    expect(playCalls).toBeGreaterThan(0)
   })
 })
 

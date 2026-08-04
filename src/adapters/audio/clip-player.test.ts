@@ -249,6 +249,84 @@ describe('createClipPlayer', () => {
       expect(onSilentFailure).toHaveBeenCalledTimes(1)
       expect(onSilentFailure.mock.calls[0]![0]).toEqual(expect.stringContaining('AbortError'))
     })
+
+    it('settles within a bounded time even when play() never settles, judging the element unlocked so the Drill still starts (T006)', async () => {
+      // Models exactly the regression T006 reports live: a media element
+      // whose play() never resolves and never rejects. Before this fix
+      // nothing here ever timed out, so `unlock()` never settled and the
+      // Drill screen's "starting" flag (and the shared in-flight promise
+      // below) stayed true forever.
+      //
+      // Timeout is judged UNLOCKED, not failed — overriding this file's own
+      // earlier draft of this test. She is a non-technical user with no one
+      // to ask; a Drill that proceeds (possibly silently) is recoverable by
+      // her (Stop, try again), a Drill that flatly refuses to start is not.
+      // `onSilentFailure` is what keeps the judgement from being invisible.
+      const element = fakeAudioElement({ play: () => new Promise<void>(() => {}) })
+      const onSilentFailure = vi.fn()
+      const player = createClipPlayer({
+        element,
+        clipCache: fakeClipCache(),
+        voices: [VOICE],
+        unlockTimeoutMs: 15,
+        onSilentFailure,
+      })
+
+      const ok = await player.unlock()
+
+      expect(ok).toBe(true)
+      expect(player.unlockStatus).toBe('unlocked')
+      expect(player.lastUnlockFailure).toBeUndefined()
+      expect(onSilentFailure).toHaveBeenCalledTimes(1)
+      expect(onSilentFailure.mock.calls[0]![0]).toEqual(expect.stringContaining('timed out'))
+    })
+
+    it('starts a fresh attempt on the next call after a timeout — the dead in-flight promise must not be latched forever (T006)', async () => {
+      // The half of the regression that makes the freeze permanent: T001's
+      // shared in-flight promise, never cleared by a play() that never
+      // settles, made every later tap resolve to the same dead promise.
+      // Even though a timed-out unlock() already reports success (above), a
+      // LATER Drill's own start-tap must still re-attempt for real — reusing
+      // a stale in-flight promise forever would mean no later tap ever
+      // actually calls play() again.
+      let calls = 0
+      const element = fakeAudioElement({
+        play: () => {
+          calls += 1
+          return calls === 1 ? new Promise<void>(() => {}) : Promise.resolve()
+        },
+      })
+      const player = createClipPlayer({
+        element,
+        clipCache: fakeClipCache(),
+        voices: [VOICE],
+        unlockTimeoutMs: 15,
+      })
+
+      const first = await player.unlock()
+      expect(first).toBe(true) // timed out, judged unlocked
+
+      const second = await player.unlock()
+
+      expect(second).toBe(true) // this one is a real, fresh success
+      expect(player.unlockStatus).toBe('unlocked')
+      expect(calls).toBe(2) // play() was actually called again, not skipped
+    })
+
+    it('still unlocks normally when play() resolves well within the timeout', async () => {
+      const element = fakeAudioElement()
+      const player = createClipPlayer({
+        element,
+        clipCache: fakeClipCache(),
+        voices: [VOICE],
+        unlockTimeoutMs: 15,
+      })
+
+      const ok = await player.unlock()
+
+      expect(ok).toBe(true)
+      expect(player.unlockStatus).toBe('unlocked')
+    })
   })
 
   describe('speak', () => {

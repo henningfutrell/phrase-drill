@@ -11,6 +11,23 @@ import type { ErrorLog } from './adapters/diagnostics'
 import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
 import { createSyncEngine, type SyncEngine, type SyncSnapshot } from './adapters/sync/sync-engine'
 import { createSyncedLibrary } from './adapters/sync/synced-library'
+import type { AudioElementLike } from './adapters/audio/clip-player'
+
+/** Stands in for the DOM `<audio>` element `main.tsx` reads from `index.html` (T006). */
+function fakeAudioElement(): AudioElementLike {
+  const listeners: Record<string, Array<() => void>> = {}
+  return {
+    src: '',
+    play: () => Promise.resolve(),
+    pause: () => {},
+    addEventListener(type, listener) {
+      ;(listeners[type] ??= []).push(listener)
+    },
+    removeEventListener(type, listener) {
+      listeners[type] = (listeners[type] ?? []).filter((l) => l !== listener)
+    },
+  }
+}
 
 /**
  * T083 — a storage failure at launch must not be a blank screen (T079 audit,
@@ -218,6 +235,7 @@ function render(deckStore: DeckStore, settingsStore: SettingsStore, syncEngine: 
         syncEngine={syncEngine}
         translator={noopTranslate}
         databaseTrouble={noopTrouble}
+        audioElement={fakeAudioElement()}
       />,
     )
   })

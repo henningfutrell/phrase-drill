@@ -304,6 +304,51 @@ describe('DrillScreen — the one-tap unlock', () => {
     await click(testid('drill-start'))
     expect(unlock).toHaveBeenCalledTimes(2)
   })
+
+  it('proceeds into the Drill when unlock resolves ok — late, but bounded — after standing in for a stalled play() (T006)', async () => {
+    // `unlock` here models what `clip-player.ts`'s own bounded timeout does
+    // for real (see clip-player.test.ts): a `play()` that never settles is
+    // judged unlocked, not failed, so a Drill she cannot get any help with
+    // still starts rather than dead-ending on an error. This screen needs no
+    // special-case code for that — any `unlock()` that eventually resolves
+    // `{ ok: true }`, however late, already clears `starting` and moves on
+    // to `running` through the existing `finally`. This proves it stays
+    // true once the outcome flows from a delayed resolution, not only an
+    // immediate one.
+    let resolveUnlock: (() => void) | undefined
+    const unlock = vi.fn(
+      () =>
+        new Promise<{ ok: true }>((resolve) => {
+          resolveUnlock = () => resolve({ ok: true })
+        }),
+    )
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={unlock}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    const button = testid('drill-start') as HTMLButtonElement
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      await flushMicrotasks()
+    })
+    expect(button.disabled).toBe(true)
+
+    await act(async () => {
+      resolveUnlock?.()
+      await flushMicrotasks()
+    })
+
+    expect(testid('drill-running')).not.toBeNull()
+    expect(testid('drill-unlock-error')).toBeNull()
+  })
 })
 
 describe('DrillScreen — running a Drill', () => {
