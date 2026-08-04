@@ -62,9 +62,18 @@ const ACTION_CLASS: Record<BackupAgeLevel, string> = {
   overdue: 'btn-primary',
 }
 
+/**
+ * `downloaded` says less than `shared` on purpose (T085). A share sheet
+ * reports back — the file reached Files, or Messages, or she backed out — and
+ * that answer is what lets the app say "saved" and start the Backup age
+ * again. A download reports nothing at all, so the age above this line does
+ * not move, and the copy has to explain that rather than leave her reading a
+ * warning that appears to have ignored what she just did.
+ */
 const RESULT_COPY: Record<'shared' | 'downloaded', string> = {
   shared: 'Backup saved.',
-  downloaded: 'Saved as a download — look in Files, or wherever this browser puts downloads.',
+  downloaded:
+    'Sent to downloads — look in Files, or wherever this browser puts them. This browser can’t tell the app whether it arrived, so check it is there.',
 }
 
 /**

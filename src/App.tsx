@@ -134,15 +134,39 @@ function playPreviewClip(bytes: ArrayBuffer, mime: string): void {
  * nothing in the Safari 26 release notes addresses it. So an installed app
  * gets the copy-the-text fallback instead: worse than a file, but visible,
  * dismissible, and it loses nothing.
+ *
+ * Returns whether the download was **handed to the browser without error**.
+ * That is the most this can ever report — a download fires no event, settles
+ * no promise, and raises nothing when the file does not land — so `true` here
+ * means "attempted", never "saved" (T085). `false` means it demonstrably did
+ * not happen and the caller must offer her something else.
  */
-function downloadFile(file: File): void {
-  const url = URL.createObjectURL(file)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = file.name
-  anchor.click()
-  URL.revokeObjectURL(url)
+function downloadFile(file: File): boolean {
+  let url: string | undefined
+  try {
+    url = URL.createObjectURL(file)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = file.name
+    anchor.click()
+    return true
+  } catch {
+    return false
+  } finally {
+    // NOT revoked synchronously after `click()` (T085). The browser fetches
+    // the blob URL on its own schedule, after the click returns; revoking
+    // first races that fetch and produces a download that quietly writes no
+    // file. Deferred instead — long enough that the browser is certainly
+    // finished, short enough that the bytes are not held for the session.
+    if (url !== undefined) {
+      const revoked = url
+      setTimeout(() => URL.revokeObjectURL(revoked), BLOB_URL_LIFETIME_MS)
+    }
+  }
 }
+
+/** How long a download's blob URL is left alive before it is revoked. */
+const BLOB_URL_LIFETIME_MS = 60_000
 
 /**
  * Composition root — the only place allowed to import from both `domain/`
@@ -569,8 +593,20 @@ function App({
       if (readInstallStateFromBrowser().installed) {
         return { kind: 'unavailable', text: await file.text(), filename: file.name }
       }
-      downloadFile(file)
-      recordExport()
+      // **No `recordExport()` on this path (T085).** A download reports
+      // nothing back: it fires no event, settles no promise, and raises
+      // nothing when the file fails to land, so there is no success path here
+      // to write an export time on. `lastSyncAt` is written only on the
+      // success path and nowhere else, for the reason that an age written on
+      // a failure silences the backup warning with nothing behind it — and
+      // this half of the same age was recorded on a guess. The guess is worth
+      // less than it costs: sync writes the other half after every save, so
+      // the age only stays loud when sync is failing too, which is exactly
+      // when she should hear about it. A warning shown once too often costs
+      // her a tap; a warning silenced wrongly costs her the library.
+      if (!downloadFile(file)) {
+        return { kind: 'unavailable', text: await file.text(), filename: file.name }
+      }
       return { kind: 'downloaded' }
     })
   }

@@ -564,6 +564,17 @@ only place that failure is visible at all.
   by itself the moment a sync or an export succeeds, so the loud state is always
   exactly one tap from ending — and cannot return for another week.
 - **It is silent when there is nothing to lose.** No Decks, no indicator.
+- **Only a proven export restarts it (T085).** A share sheet reports back —
+  the file went to Files or Messages, or she backed out — and that answer is
+  what writes `lastExportAt`. A **download reports nothing at all**: no event,
+  no promise, no error when the file fails to land, so the download path
+  writes no export time and the age does not move. This is the rule
+  `lastSyncAt` already follows, applied to the other half of the same number:
+  an age written on an unproven success silences the warning with nothing
+  behind it. The download's own confirmation line says so, so the unchanged
+  age does not read as the app ignoring her. She loses at most a repeated tap;
+  the alternative loses the only warning that would have told her to try
+  again.
 - **Thresholds:** 7 days, because a week of practice is the smallest amount of
   work worth its own warning; 30 days, because a month of it is a loss she would
   feel for a long time. Under a week, sync covers it.
