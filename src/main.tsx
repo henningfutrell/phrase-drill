@@ -26,6 +26,21 @@ if (!rootElement) {
   throw new Error('root element not found')
 }
 
+// The shared unlock/playback element, attached to the document by
+// index.html rather than constructed here (T006 — see the comment there for
+// why: `new Audio()` built and given a `src` in the same tap is the
+// documented iOS Safari anti-pattern that this element existing ahead of
+// time, with no initial `src`, avoids).
+const audioElementCandidate = document.getElementById('unlock-audio')
+if (!(audioElementCandidate instanceof HTMLAudioElement)) {
+  throw new Error('unlock-audio element not found')
+}
+// Rebound to its own explicitly-typed const, not just narrowed in place:
+// `showApp` below is a `function` declaration referencing this from a
+// closure, and TS's control-flow narrowing of `audioElementCandidate` does
+// not carry into it — only the declared type of a binding does.
+const audioElement: HTMLAudioElement = audioElementCandidate
+
 const deckStore = createIndexedDbDeckStore()
 const mixStore = createIndexedDbMixStore()
 const settingsStore = createIndexedDbSettingsStore()
@@ -132,6 +147,7 @@ function showApp(): void {
       syncEngine={syncEngine}
       translator={translator}
       databaseTrouble={databaseTrouble}
+      audioElement={audioElement}
     />,
   )
 }
