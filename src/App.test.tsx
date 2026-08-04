@@ -2,7 +2,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import type { Deck, DeckStore, DraftPhrase, Library, ScanReader } from './domain'
+import type { Deck, DeckStore, DraftPhrase, Library, PhraseCandidate, ScanReader, Translator } from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
 import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
@@ -142,6 +142,15 @@ function createFakeScanReader(): ScanReader & { read: ReturnType<typeof vi.fn> }
   return { read }
 }
 
+/** In-memory Translator fake — the real server adapter is exercised in
+ * src/adapters/translation; App's wiring (candidate acceptance routed to the
+ * right Deck(s)) is what these tests care about. Never resolves by default,
+ * mirroring createFakeScanReader — most tests here don't exercise it at all. */
+function createFakeTranslator(): Translator & { translate: ReturnType<typeof vi.fn> } {
+  const translate = vi.fn<Translator['translate']>()
+  return { translate }
+}
+
 /** In-memory ErrorLog fake — the real IndexedDB-backed ring buffer is
  * exercised in src/adapters/diagnostics; App's wiring (does Diagnostics show
  * what's in the log) is what these tests care about. */
@@ -199,6 +208,7 @@ async function renderApp(
   scanReader: ScanReader = createFakeScanReader(),
   errorLog: ErrorLog = createFakeErrorLog(),
   librarySyncClient: LibrarySyncClient = createFakeLibrarySyncClient(),
+  translator: Translator = createFakeTranslator(),
 ) {
   await act(async () => {
     root.render(
@@ -211,6 +221,7 @@ async function renderApp(
         scanReader={scanReader}
         errorLog={errorLog}
         librarySyncClient={librarySyncClient}
+        translator={translator}
       />,
     )
   })
@@ -632,6 +643,101 @@ describe('App wired to Import', () => {
     expect(generationQueue.enqueued.map((p) => ({ french: p.french, english: p.english }))).toEqual(drafts)
     // Import is left behind — she lands somewhere that shows the result, not back on the capture screen.
     expect(container.querySelector('[data-testid="take-photo"]')).toBeNull()
+  })
+})
+
+describe('App wired to translate-and-add candidates (T057 scope addition)', () => {
+  it('accepting candidates routed to two different Decks persists each into its own Deck through DeckStore, and queues generation for each', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = createFakeDeckStore([
+        { id: 'd1', name: 'Home', phrases: [] },
+        { id: 'd2', name: 'Formal', phrases: [] },
+      ])
+      const translator = createFakeTranslator()
+      const candidates: PhraseCandidate[] = [
+        { text: 'Tu peux venir?', register: 'tu' },
+        { text: 'Pouvez-vous venir?', register: 'vous' },
+      ]
+      translator.translate.mockResolvedValue(candidates)
+      const generationQueue = createFakeGenerationQueue()
+      await renderApp(
+        store,
+        createFakeSettingsStore(),
+        createFakeSynthClient(),
+        generationQueue,
+        createFakeClipCache(),
+        createFakeScanReader(),
+        createFakeErrorLog(),
+        createFakeLibrarySyncClient(),
+        translator,
+      )
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+      const english = container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement
+      act(() => typeInto(english, 'Can you come?'))
+
+      await act(async () => {
+        vi.advanceTimersByTime(600)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(translator.translate).toHaveBeenCalledWith('Can you come?', 'en-to-fr', 'Home')
+
+      act(() => click(container.querySelector('[data-testid="candidate-checkbox-0"]')!))
+      act(() => click(container.querySelector('[data-testid="candidate-checkbox-1"]')!))
+      const deckSelect1 = container.querySelector('[data-testid="candidate-deck-1"]') as HTMLSelectElement
+      act(() => {
+        deckSelect1.value = 'd2'
+        deckSelect1.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      await act(async () => click(container.querySelector('[data-testid="add-candidates"]')!))
+
+      const home = store.decks.get('d1')!
+      const formal = store.decks.get('d2')!
+      expect(home.phrases).toEqual([expect.objectContaining({ french: 'Tu peux venir?', english: 'Can you come?' })])
+      expect(formal.phrases).toEqual([
+        expect.objectContaining({ french: 'Pouvez-vous venir?', english: 'Can you come?' }),
+      ])
+      expect(generationQueue.enqueued.map((p) => ({ french: p.french, english: p.english }))).toEqual([
+        { french: 'Tu peux venir?', english: 'Can you come?' },
+        { french: 'Pouvez-vous venir?', english: 'Can you come?' },
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("handleAddCandidates groups selections by destination Deck, matching handleImportSave's established pattern", async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [] },
+      { id: 'd2', name: 'Formal', phrases: [] },
+    ])
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      generationQueue,
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      createFakeLibrarySyncClient(),
+      createFakeTranslator(),
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+    // Manual save still works exactly as before with a Translator wired —
+    // the addition is additive, never a replacement of the existing path.
+    const french = container.querySelector('[data-testid="phrase-french-input"]') as HTMLInputElement
+    const english = container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement
+    act(() => typeInto(french, 'Bonjour'))
+    act(() => typeInto(english, 'Hello'))
+    await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
+
+    const saved = store.decks.get('d1')!
+    expect(saved.phrases).toHaveLength(1)
+    expect(saved.phrases[0]).toMatchObject({ french: 'Bonjour', english: 'Hello' })
   })
 })
 

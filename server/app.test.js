@@ -87,6 +87,18 @@ function fetchAnthropicOk(phrases) {
   }
 }
 
+/** Same fake upstream, but for the structured-output shape `/api/translate`
+ * expects back (`candidates`, not `phrases`) — kept distinct from
+ * `fetchAnthropicOk` because the two routes ask the model different
+ * questions and get different response shapes, even though both go through
+ * the one `anthropic` provider/queue. */
+function fetchAnthropicTranslateOk(candidates) {
+  return async (url, init) => {
+    if (init.headers['x-api-key'] !== SECRET_ANTHROPIC_KEY) throw new Error('wrong key used against fake upstream')
+    return { ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: JSON.stringify({ candidates }) }] }) }
+  }
+}
+
 /** In-memory stand-in for a `pg` pool, same shape `db.test.js` uses — see its own comment. */
 function fakePool() {
   let tableCreated = false
@@ -159,6 +171,7 @@ describe('server app (integration, fake upstreams)', () => {
       scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       loginLimiter: createRateLimiter({ capacity: 5, refillMs: 60_000 }),
+      translateLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       distDir,
       logger,
       sessionAuth: fakeSessionAuth(),
@@ -265,6 +278,7 @@ describe('server app (integration, fake upstreams)', () => {
         scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         loginLimiter: createRateLimiter({ capacity: 5, refillMs: 60_000 }),
+        translateLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         distDir,
         logger,
         sessionAuth: fakeSessionAuth(),
@@ -340,6 +354,119 @@ describe('server app (integration, fake upstreams)', () => {
     })
   })
 
+  describe('POST /api/translate', () => {
+    it('returns candidates for a valid request', async () => {
+      await boot({
+        anthropicFetch: fetchAnthropicTranslateOk([
+          { text: 'Tu peux venir?', register: 'tu' },
+          { text: 'Pouvez-vous venir?', register: 'vous' },
+        ]),
+      })
+      const res = await fetch(`${baseUrl}/api/translate`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'Can you come?', direction: 'en-to-fr', deckName: 'friends' }),
+      })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({
+        candidates: [
+          { text: 'Tu peux venir?', register: 'tu' },
+          { text: 'Pouvez-vous venir?', register: 'vous' },
+        ],
+      })
+    })
+
+    it('rejects a request missing text with 400', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/translate`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ direction: 'en-to-fr', deckName: 'home' }),
+      })
+      expect(res.status).toBe(400)
+    })
+
+    it('rejects an invalid direction with 400', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/translate`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'hello', direction: 'sideways', deckName: 'home' }),
+      })
+      expect(res.status).toBe(400)
+    })
+
+    it('rejects an oversized body with 413', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/translate`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'x'.repeat(20_000), direction: 'en-to-fr', deckName: 'home' }),
+      })
+      expect(res.status).toBe(413)
+    })
+
+    it('enforces the per-key rate limit', async () => {
+      await boot({ anthropicFetch: fetchAnthropicTranslateOk([{ text: 'Bonjour' }]) })
+      const request = () =>
+        fetch(`${baseUrl}/api/translate`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ text: 'hello', direction: 'en-to-fr', deckName: 'home' }),
+        })
+      await request()
+      await request()
+      await request()
+      const fourth = await request()
+      expect(fourth.status).toBe(429)
+    })
+
+    it('returns 503 when the upstream key is missing', async () => {
+      libraryStore = await newLibraryStore()
+      distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-dist-'))
+      writeFileSync(join(distDir, 'index.html'), '<!doctype html>')
+      logger = collectingLogger()
+      const elevenLabs = createElevenLabsProvider({ apiKey: null, queue: createBoundedQueue({ concurrency: 4 }) })
+      const anthropic = createAnthropicProvider({ apiKey: null, queue: createBoundedQueue({ concurrency: 2 }) })
+      const handleRequest = createApp({
+        libraryStore,
+        elevenLabs,
+        anthropic,
+        ttsLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+        scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+        libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+        loginLimiter: createRateLimiter({ capacity: 5, refillMs: 60_000 }),
+        translateLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+        distDir,
+        logger,
+        sessionAuth: fakeSessionAuth(),
+      })
+      server = createServer(handleRequest)
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+      baseUrl = `http://127.0.0.1:${server.address().port}`
+
+      const res = await fetch(`${baseUrl}/api/translate`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'hello', direction: 'en-to-fr', deckName: 'home' }),
+      })
+      expect(res.status).toBe(503)
+    })
+
+    it('never logs the phrase text alongside anything identifying', async () => {
+      await boot({ anthropicFetch: fetchAnthropicTranslateOk([{ text: 'Bonjour tout le monde' }]) })
+      const secretPhrase = 'a very particular english phrase she typed'
+      await fetch(`${baseUrl}/api/translate`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text: secretPhrase, direction: 'en-to-fr', deckName: 'home' }),
+      })
+      for (const line of logger.lines) {
+        expect(line).not.toContain(secretPhrase)
+      }
+    })
+  })
+
   describe('library sync', () => {
     it('GET returns 404 before anything has been pushed', async () => {
       await boot()
@@ -404,6 +531,11 @@ describe('server app (integration, fake upstreams)', () => {
           method: 'POST',
           headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'image/jpeg' },
           body: Buffer.from([0xff, 0xd8]),
+        }),
+        fetch(`${baseUrl}/api/translate`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ text: 'hello', direction: 'en-to-fr', deckName: 'home' }),
         }),
         fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } }),
         fetch(`${baseUrl}/api/tts`, { headers: { authorization: 'Bearer bad' } }),
