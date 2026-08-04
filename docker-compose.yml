@@ -1,11 +1,15 @@
-# phrase-drill server (T041/T050). `docker compose up --build` runs the
-# whole stack locally with no cloud account: the app and Postgres, nothing
-# else — the app authenticates its one user itself (T050), so there is no
-# third service to run or an account with a vendor to hold. Set provider
-# keys in a `.env` file next to this one (git-ignored) — `.env.example`
-# documents every variable. The same file deploys unchanged on Coolify:
-# point it at this repo, set the secrets in Coolify's env UI, attach a
-# volume for the Postgres data volume below.
+# phrase-drill server (T041/T050) — LOCAL DEV ONLY. Production runs on
+# Render from render.yaml (T053), which this file has no bearing on: Render
+# does not run docker-compose. `docker compose up --build` runs the whole
+# stack locally with no cloud account: the app and Postgres, nothing else —
+# the app authenticates its one user itself (T050), so there is no third
+# service to run or an account with a vendor to hold. Set provider keys in a
+# `.env` file next to this one (git-ignored) — `.env.example` documents
+# every variable.
+#
+# `docker compose down` alone leaves a container running if its service has
+# since been deleted from this file — pass `--remove-orphans` (or use `down
+# --remove-orphans` habitually) to actually stop everything.
 
 services:
   postgres:
