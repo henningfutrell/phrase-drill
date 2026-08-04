@@ -79,14 +79,30 @@ function fakeSessionStore() {
   }
 }
 
+/** Wraps the real `verifyPassword` and counts how many times it actually ran the KDF. */
+function countingVerifyPassword() {
+  let calls = 0
+  const fn = (password, stored) => {
+    calls++
+    return verifyPassword(password, stored)
+  }
+  fn.calls = () => calls
+  return fn
+}
+
 describe('createSessionAuth', () => {
-  function setup({ now = () => 1_000_000 } = {}) {
+  function setup({ now = () => 1_000_000, verifyPassword: verifyPasswordImpl } = {}) {
     const users = new Map([
       ['her', { id: 'user-1', username: 'her', passwordHash: hashPassword('correct-password') }],
     ])
     const userStore = fakeUserStore(users)
     const sessionStore = fakeSessionStore()
-    const auth = createSessionAuth({ userStore, sessionStore, now })
+    const auth = createSessionAuth({
+      userStore,
+      sessionStore,
+      now,
+      ...(verifyPasswordImpl ? { verifyPassword: verifyPasswordImpl } : {}),
+    })
     return { auth, userStore, sessionStore, now }
   }
 
@@ -107,12 +123,23 @@ describe('createSessionAuth', () => {
       expect(await auth.login('her', 'wrong-password')).toBeNull()
     })
 
-    it('returns null for a nonexistent username, identically to a wrong password (no user-enumeration signal)', async () => {
+    it('returns null for a nonexistent username, identically to a wrong password (no user-enumeration signal in the response)', async () => {
       const { auth } = setup()
       const noSuchUser = await auth.login('nobody', 'anything')
       const wrongPassword = await auth.login('her', 'wrong-password')
       expect(noSuchUser).toBeNull()
       expect(wrongPassword).toBeNull()
+    })
+
+    it('performs exactly one password verification (one KDF run) per attempt, whether or not the username exists — no timing side channel', async () => {
+      const verifyPasswordSpy = countingVerifyPassword()
+      const { auth } = setup({ verifyPassword: verifyPasswordSpy })
+
+      await auth.login('nobody', 'anything')
+      expect(verifyPasswordSpy.calls()).toBe(1)
+
+      await auth.login('her', 'wrong-password')
+      expect(verifyPasswordSpy.calls()).toBe(2)
     })
   })
 
