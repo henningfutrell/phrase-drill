@@ -24,6 +24,7 @@ import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/
 import { createSyncEngine, type PlatformPort, type Scheduler, type SyncEngine } from './adapters/sync/sync-engine'
 import { createSyncedLibrary } from './adapters/sync/synced-library'
 import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
+import type { DatabaseTrouble, DatabaseTroubleSource } from './adapters/storage'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
@@ -246,6 +247,24 @@ function createFakeErrorLog(entries: readonly LogEntry[] = []): ErrorLog {
   }
 }
 
+/**
+ * The database saying it cannot be opened (T072). A port rather than a global
+ * so a test can be the browser: `report` is another tab holding the old
+ * version open, or iOS closing the connection underneath the app.
+ */
+function createFakeDatabaseTrouble(): DatabaseTroubleSource & { report(trouble: DatabaseTrouble): void } {
+  const listeners = new Set<(trouble: DatabaseTrouble) => void>()
+  return {
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    report(trouble) {
+      for (const listener of [...listeners]) listener(trouble)
+    },
+  }
+}
+
 const FAKE_VOICE: Voice = { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }
 
 function typeInto(input: HTMLInputElement, value: string): void {
@@ -355,6 +374,7 @@ async function renderApp(
   translator: Translator = createFakeTranslator(),
   mixStore: MixStore = createFakeMixStore(),
   syncEngine: SyncEngine = createTestSyncEngine(store, settingsStore, librarySyncClient),
+  databaseTrouble: DatabaseTroubleSource = createFakeDatabaseTrouble(),
 ) {
   await act(async () => {
     root.render(
@@ -369,6 +389,7 @@ async function renderApp(
         errorLog={errorLog}
         syncEngine={syncEngine}
         translator={translator}
+        databaseTrouble={databaseTrouble}
       />,
     )
   })
@@ -2035,4 +2056,123 @@ describe('App when a local write fails (T069)', () => {
     await act(async () => click(container.querySelector('[data-testid="write-failure-dismiss"]')!))
 
     expect(notice()).toBeNull()  })
+})
+
+/**
+ * A restore is the most deliberate act in this app, and it used to undo
+ * itself (T072).
+ *
+ * `importAll` clears this device's Tombstones; the server keeps its own. The
+ * next round-trip pulls the server's back, and a Tombstone deletes a record
+ * that is unchanged from the last state both sides agreed on (T070) — which is
+ * exactly what a restored Deck looks like when this phone had not yet picked
+ * up the deletion made on the other one. She watches the restore work, and
+ * then watches the Deck disappear a couple of seconds later.
+ */
+describe('App — a restore is not undone by the deletion the server still holds (T072)', () => {
+  it('keeps the restored Deck through the sync that follows the restore', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const client = createFakeLibrarySyncClient()
+    await renderApp(store, createFakeSettingsStore(), undefined, undefined, undefined, undefined, undefined, client)
+    // The launch sync has now agreed a state that HOLDS d1 — that agreement is
+    // what makes the Tombstone below applicable.
+    await flushMicrotasks()
+
+    // The other device deletes the Deck. This phone has not picked that up.
+    client.pull = async () => ({
+      ok: true,
+      library: {
+        format: LIBRARY_FORMAT,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        exportedAt: 900,
+        decks: [],
+        mixes: [],
+        tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 900 }],
+      },
+    })
+
+    await openSettings()
+    const backup: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 100,
+      decks: [{ id: 'd1', name: 'Home', phrases: [], createdAt: 1, updatedAt: 100 }],
+      mixes: [],
+      tombstones: [],
+    }
+    const file = new File([JSON.stringify(backup)], 'phrase-drill-backup-2026-08-02.json', {
+      type: 'application/json',
+    })
+    const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
+    Object.defineProperty(input, 'files', {
+      value: { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList,
+      configurable: true,
+    })
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+    await act(async () => click(container.querySelector('[data-testid="restore-confirm"]')!))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(store.decks.get('d1')).toMatchObject({ name: 'Home' })
+    expect(container.textContent).toContain('Home')
+    // And the deletion is gone from the server too, so it cannot come back on
+    // the next launch.
+    expect(client.pushed.at(-1)?.decks.map((d) => d.id)).toEqual(['d1'])
+    expect(client.pushed.at(-1)?.tombstones).toEqual([])
+  })
+})
+
+/**
+ * The database itself refusing to open, said out loud (T072).
+ *
+ * `blocked` is another tab or a stale service-worker client holding the old
+ * version open, so an upgrade can never start: the app simply never finishes
+ * loading, with nothing on screen to say why or what to do. `terminated` is
+ * the browser closing the connection underneath us. Both used to be swallowed
+ * entirely. They reuse the T069 notice, because "this phone could not do what
+ * you asked with your phrases" is one thing to her, not three.
+ */
+describe('App — a database that will not open says so (T072)', () => {
+  function notice(): HTMLElement | null {
+    return container.querySelector('[data-testid="write-failure"]')
+  }
+
+  it('says another window is holding her phrases open, and what to do about it', async () => {
+    const trouble = createFakeDatabaseTrouble()
+    await renderApp(
+      createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }]),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      trouble,
+    )
+
+    await act(async () => trouble.report('blocked'))
+
+    expect(notice()?.textContent).toContain('another window')
+  })
+
+  it('says the connection to her phrases was closed, rather than failing silently', async () => {
+    const trouble = createFakeDatabaseTrouble()
+    await renderApp(
+      createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }]),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      trouble,
+    )
+
+    await act(async () => trouble.report('terminated'))
+
+    expect(notice()?.textContent).toContain('open it again')
+  })
+
+  it('does not claim the phone may be out of space, which is a different failure', async () => {
+    const trouble = createFakeDatabaseTrouble()
+    await renderApp(
+      createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }]),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      trouble,
+    )
+
+    await act(async () => trouble.report('blocked'))
+
+    expect(notice()?.textContent).not.toContain('out of space')
+  })
 })
