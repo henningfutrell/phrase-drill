@@ -269,10 +269,13 @@ first-class state, not an error:
 - Header: Deck name (tap to rename via sheet), phrase count, `Drill this Deck`
   primary button pinned under the header — starting a Drill from the Deck she is
   looking at should never require scrolling past its Phrase list first.
-- List rows, one per Phrase, author order: French text (`--text-base`, weight
-  600) over English text (`--text-sm`, `--ink-dim`) — the two lines stacked, not
-  side by side, because side-by-side on a narrow phone column forces truncation
-  on longer phrases and this list is read, not glanced at.
+- List rows, one per Phrase, author order: **English over French** (T062) — she
+  works English → French, so the English is the entry she scans for and the
+  French is the answer under it. Both lines are EB Garamond at `--text-base`:
+  English roman in `--ink`, French italic in `--ink-soft`, i.e. a dictionary
+  entry and its foreign headword, not a phrase and a dimmed gloss. The two lines
+  are stacked, not side by side, because side-by-side on a narrow phone column
+  forces truncation on longer phrases and this list is read, not glanced at.
 - **What shipped instead of a drag handle: `Move up` / `Move down` buttons**,
   one pair per row, each disabled at its end of the list. A deliberate
   substitution, not an oversight — the worktree that built this screen could not
@@ -287,7 +290,7 @@ first-class state, not an error:
   undo toast. Deleting is still two deliberate taps, just not the sketched
   pattern.
 - `+ Add phrase` row pinned at the list's end, opens a **sheet** with two fields,
-  French / English, `Save`.
+  English / French (T061 put English first there too), `Save`.
 - Tap a row to edit the same two fields in the same sheet shape (add and edit
   share one component).
 - **Empty (0 phrases):** list is replaced by `Add phrases to drill this Deck.`
@@ -403,7 +406,7 @@ thumbnail and no beat-row animation, just the status line above.
   `ScanError` failures, not an empty-but-successful read.
 
 **Step 3 — Review & assign.** A list of **Draft Phrase** rows — same visual
-shape as a Phrase row (French over English) but with a distinct left-edge
+shape as a Phrase row (English over French, T062) but with a distinct left-edge
 treatment (a thin `--accent` bar) marking them as unconfirmed, never silently
 identical to a saved Phrase, per the domain model's explicit distinction. Each
 row is directly editable inline (tap either line to correct OCR misreads) and
