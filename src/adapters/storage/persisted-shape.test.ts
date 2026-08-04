@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { DeckRecord, PhraseRecord } from '../../domain'
+import type { DeckRecord, MixRecord, PhraseRecord } from '../../domain'
 import { CURRENT_SCHEMA_VERSION, DECK_MIGRATIONS } from './migrations'
 
 /**
@@ -16,6 +16,20 @@ const CANONICAL_DECK_RECORD: DeckRecord = {
   id: 'd1',
   name: 'Home',
   phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' } satisfies PhraseRecord],
+  createdAt: 1_700_000_000_000,
+  updatedAt: 1_700_000_100_000,
+}
+
+/**
+ * The same, for a saved Mix (T059, schema v4). It holds Deck *ids*, never a
+ * copy of their Phrases — a Mix that copied Phrases would go stale the
+ * moment a Deck was edited, and would make deleting a Deck a data loss
+ * question instead of a resolution one.
+ */
+const CANONICAL_MIX_RECORD: MixRecord = {
+  id: 'm1',
+  name: 'Mornings',
+  deckIds: ['d1', 'd2'],
   createdAt: 1_700_000_000_000,
   updatedAt: 1_700_000_100_000,
 }
@@ -62,6 +76,16 @@ describe('persisted DeckRecord/PhraseRecord shape', () => {
       expect(describeShape(CANONICAL_DECK_RECORD)).toMatchSnapshot()
     } catch (error) {
       throw new Error(shapeChangedHelp('DeckRecord'), { cause: error })
+    }
+  })
+})
+
+describe('persisted MixRecord shape', () => {
+  it('pins the exact field names and types written to IndexedDB and to the export file', () => {
+    try {
+      expect(describeShape(CANONICAL_MIX_RECORD)).toMatchSnapshot()
+    } catch (error) {
+      throw new Error(shapeChangedHelp('MixRecord'), { cause: error })
     }
   })
 })

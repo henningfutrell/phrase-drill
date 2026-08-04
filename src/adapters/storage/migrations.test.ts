@@ -55,4 +55,19 @@ describe('migrateDeckRecord', () => {
   it('carries a v1 deck record through to the current schema untouched — the clips store landed beside it, not inside it', () => {
     expect(migrateDeckRecord(currentRecord, 1)).toEqual(currentRecord)
   })
+
+  it('carries a v3 deck record through v3 -> v4 untouched — the mixes store landed beside decks, not inside them (T059)', () => {
+    expect(migrateDeckRecord(currentRecord, 3)).toEqual(currentRecord)
+  })
+
+  it('keeps every Phrase of an existing Deck across the v1 -> current chain', () => {
+    const full = {
+      ...currentRecord,
+      phrases: [
+        { id: 'p1', french: 'Bonjour', english: 'Hello' },
+        { id: 'p2', french: 'Merci', english: 'Thank you' },
+      ],
+    }
+    expect(migrateDeckRecord(full, 1)).toEqual(full)
+  })
 })
