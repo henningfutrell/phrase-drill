@@ -1,7 +1,7 @@
 import { StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
-import { createIndexedDbClipCache, createIndexedDbDeckStore, createIndexedDbSettingsStore } from './adapters/storage'
+import { createIndexedDbClipCache, createIndexedDbDeckStore, createIndexedDbMixStore, createIndexedDbSettingsStore } from './adapters/storage'
 import { createServerSynthClient } from './adapters/audio/server-synth-client'
 import { createGenerationQueue } from './adapters/audio/generation-queue'
 import { createServerScanReader } from './adapters/vision/server-scan-reader'
@@ -17,6 +17,7 @@ if (!rootElement) {
 }
 
 const deckStore = createIndexedDbDeckStore()
+const mixStore = createIndexedDbMixStore()
 const settingsStore = createIndexedDbSettingsStore()
 const clipCache = createIndexedDbClipCache()
 
@@ -93,6 +94,7 @@ function showApp(): void {
   renderRoot(
     <App
       deckStore={deckStore}
+      mixStore={mixStore}
       settingsStore={settingsStore}
       synthClient={synthClient}
       generationQueue={generationQueue}
