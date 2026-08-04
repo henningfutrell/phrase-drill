@@ -345,7 +345,7 @@ describe('createSyncEngine — a restore whose local write fails (T081)', () => 
     // empty baseline over an unchanged library does.
     expect(h.local.decks).toEqual([])
     expect(h.server?.decks).toEqual([])
-    expect(h.server?.tombstones.map((t) => t.id)).toEqual(['d1'])
+    expect(h.server?.tombstones?.map((t) => t.id)).toEqual(['d1'])
   })
 
   it('refuses the restore outright when the empty baseline cannot be written, and applies nothing', async () => {
