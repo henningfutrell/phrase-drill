@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { createApp } from './app.js'
-import { createLibraryStore, createAuthStore, createClipStore, createPool, waitForDatabase, extractPassword, DEFAULT_CLIP_STORE_MAX_BYTES } from './db.js'
+import { createLibraryStore, createAuthStore, createClipStore, createPool, waitForDatabase, extractPassword, clipStoreMaxBytesFrom } from './db.js'
 import { createSessionAuth } from './session-auth.js'
 import { createLogger } from './logger.js'
 import { createRateLimiter } from './rate-limiter.js'
@@ -45,7 +45,11 @@ export async function buildServer(env = process.env) {
   // derived and regenerable, her phrases are not, and both live on the same
   // 1 GB instance — so the table that grows without limit is the one that
   // gets a ceiling. `CLIP_STORE_MAX_BYTES` overrides it if the plan changes.
-  const clipStoreMaxBytes = Number(env.CLIP_STORE_MAX_BYTES ?? DEFAULT_CLIP_STORE_MAX_BYTES)
+  // T082: parsed, not `Number(...)`d. A typo in the Render dashboard field
+  // used to make this store either unbounded (`NaN`) or permanently empty
+  // (`''`), and the first of those ends with `libraryStore.put` as the write
+  // that fails. `clipStoreMaxBytesFrom` falls back to the default, loudly.
+  const clipStoreMaxBytes = clipStoreMaxBytesFrom(env.CLIP_STORE_MAX_BYTES, logger)
   const clipStore = createClipStore(pool, { maxBytes: clipStoreMaxBytes })
   await clipStore.init()
 

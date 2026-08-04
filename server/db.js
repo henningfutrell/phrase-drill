@@ -24,45 +24,115 @@ const { Pool } = pg
  * against a live server, opt-in via `SMOKE_DATABASE_URL`, and it is where the
  * dialect (`ANY($1::bigint[])`, `octet_length`, the `byte_size` backfill) is
  * actually verified.
+ *
+ * T082 added the part a fake is least able to speak for: `put` runs in a
+ * transaction and takes `SELECT … FOR UPDATE` on the row before it reads. The
+ * fake serializes at `BEGIN`, in one process, which is coarser than a row
+ * lock and cannot show that Postgres blocks the second writer at all.
+ * `db.postgres.test.js` checks the lock semantics directly and drives two
+ * genuinely concurrent `put`s over pre-warmed pooled connections — pre-warmed
+ * because `pool.connect()` latency on a cold pool is enough to make two
+ * "concurrent" puts run one after another by accident, and a race test that
+ * passes because nothing raced is worse than no test.
  */
-export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, versionMaxBytes } = {}) {
+export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, versionMaxBytes, versionRecentCount } = {}) {
   const intervalMs = snapshotIntervalMs ?? LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS
   const maxCount = versionMaxCount ?? LIBRARY_VERSION_MAX_COUNT
   const maxBytes = versionMaxBytes ?? LIBRARY_VERSION_MAX_BYTES
+  const recentCount = versionRecentCount ?? LIBRARY_VERSION_RECENT_COUNT
 
-  async function get(key) {
-    const { rows } = await pool.query('SELECT data, updated_at AS "updatedAt" FROM libraries WHERE library_key = $1', [key])
+  /**
+   * `db` is anything with `pg`'s `query` — the pool for a plain read, or a
+   * single checked-out client when the caller is inside a transaction (T082).
+   * A statement that runs on the pool inside a transaction silently runs
+   * OUTSIDE it, on a different connection, so every helper `put` calls takes
+   * its connection as an argument rather than closing over `pool`.
+   */
+  async function readLibrary(db, key, { forUpdate = false } = {}) {
+    const { rows } = await db.query(
+      `SELECT data, updated_at AS "updatedAt" FROM libraries WHERE library_key = $1${forUpdate ? ' FOR UPDATE' : ''}`,
+      [key],
+    )
     if (rows.length === 0) return null
     return { data: rows[0].data, updatedAt: Number(rows[0].updatedAt) }
   }
 
-  /** Milliseconds since the newest archived version for this key, or `null` if there is none. */
-  async function lastArchivedAt(key) {
-    const { rows } = await pool.query('SELECT archived_at AS "archivedAt" FROM library_versions WHERE library_key = $1 ORDER BY id DESC LIMIT 1', [
-      key,
-    ])
-    return rows.length === 0 ? null : Number(rows[0].archivedAt)
+  async function get(key) {
+    return readLibrary(pool, key)
   }
 
   /**
-   * Drops the oldest archived versions for one key until both budgets hold.
-   * The arithmetic is here rather than in a window function so that what is
-   * kept is readable, testable and obviously bounded — at a few dozen rows
-   * the round trip costs nothing, and it only runs on the puts that archived.
+   * Brings one key's archived versions back inside the retention policy
+   * (T071, reshaped by T082). Two rules, applied in order:
    *
-   * The newest version is never a candidate, however large it is: a budget
-   * that can delete the last copy is the defect this table exists to fix.
+   * **1. Thinning.** The newest `recentCount` rows are kept whatever the push
+   * rate. Everything older collapses to the OLDEST row per `intervalMs`
+   * bucket. This is where the snapshot throttle now lives.
+   *
+   * *Why it moved off the write.* T071 put the throttle on `put`: at most one
+   * archive per hour. Its reasoning was right and is kept — a content-aware
+   * trigger ("archive when the push shrinks") lets a bad push repeated archive
+   * its own shrunken states and prune the good one out of the window, and an
+   * interval nothing can accelerate is immune to that. What was wrong was the
+   * *place*. The client debounces at 2 s and pushes per edit, so an hour of
+   * ordinary editing is ~1,800 pushes and exactly one archive — of the OLDEST
+   * state in the window. Everything she typed after the first push of the hour
+   * was in the live row and nowhere else, and a wipe inside the window took
+   * the lot, with two 204s and no log line. Archiving every replaced version
+   * and thinning on retention gives both properties at once: nothing a wipe
+   * replaces is unarchived, and a flood still cannot flush the aged history,
+   * because the aged rows are one per interval however many arrived.
+   *
+   * *Oldest per bucket, not newest.* The row worth keeping from a burst is the
+   * state it started from — what the burst has not yet touched.
+   *
+   * **2. The budgets.** Count and bytes, oldest first. They apply to the
+   * thinned set including the recent rows, so `recentCount` buys exemption
+   * from thinning and never from the disk ceiling. The newest version is never
+   * a candidate however large it is: a budget that can delete the last copy is
+   * the defect this table exists to fix.
+   *
+   * The arithmetic is here rather than in a window function so that what is
+   * kept is readable, testable and obviously bounded — at a few dozen rows the
+   * round trip costs nothing.
    */
-  async function pruneVersions(key) {
-    const { rows } = await pool.query('SELECT id, octet_length(data) AS bytes FROM library_versions WHERE library_key = $1 ORDER BY id DESC', [key])
+  async function pruneVersions(db, key) {
+    const { rows } = await db.query(
+      'SELECT id, archived_at AS "archivedAt", octet_length(data) AS bytes FROM library_versions WHERE library_key = $1 ORDER BY id DESC',
+      [key],
+    )
     const doomed = []
+
+    // Oldest first, so the survivor of a bucket is the state the burst began from.
+    const oldestFirst = [...rows].reverse()
+    // A non-positive interval means "do not thin" rather than a division by
+    // zero — `snapshotIntervalMs: 0` is how a test asks for every version.
+    const agedCount = intervalMs > 0 ? Math.max(0, rows.length - recentCount) : 0
+    const seenBuckets = new Set()
+    const kept = []
+    oldestFirst.forEach((row, index) => {
+      if (index >= agedCount) {
+        kept.push(row)
+        return
+      }
+      const bucket = Math.floor(Number(row.archivedAt) / intervalMs)
+      if (seenBuckets.has(bucket)) {
+        doomed.push(Number(row.id))
+        return
+      }
+      seenBuckets.add(bucket)
+      kept.push(row)
+    })
+
+    kept.reverse()
     let running = 0
-    rows.forEach((row, index) => {
+    kept.forEach((row, index) => {
       running += Number(row.bytes)
       if (index === 0) return
       if (index >= maxCount || running > maxBytes) doomed.push(Number(row.id))
     })
-    if (doomed.length > 0) await pool.query('DELETE FROM library_versions WHERE id = ANY($1::bigint[])', [doomed])
+
+    if (doomed.length > 0) await db.query('DELETE FROM library_versions WHERE id = ANY($1::bigint[])', [doomed])
   }
 
   return {
@@ -97,10 +167,27 @@ export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, 
      *
      * **Archiving is not the caller's job.** It happens inside `put`, before
      * the overwrite, so there is no route or script that can replace the only
-     * off-device copy of her library by forgetting a step. A crash between
-     * the two statements leaves the previous version archived and the new one
-     * unwritten — a duplicate at worst, never a loss, which is why they are
-     * in this order and why they do not need a transaction.
+     * off-device copy of her library by forgetting a step.
+     *
+     * **One transaction, and the row is locked before it is read (T082).**
+     * This used to be three autocommitted `pool.query` calls, and the comment
+     * here claimed no code path could replace the only copy. That claim was
+     * about a *crash* between the statements and it did not survive
+     * *interleaving*: two requests both read the same `previous`, both
+     * archived it, and the second overwrote the first — so one device's push
+     * was in neither `libraries` nor `library_versions`. Both her phones sync
+     * on the same triggers (launch, reconnect, the phone being locked), so
+     * that is the ordinary case, not the exotic one. `SELECT … FOR UPDATE`
+     * makes the second request read what the first wrote, and archive it.
+     *
+     * The statement ORDER still matters and is unchanged — archive, then
+     * overwrite — so a crash or a rollback anywhere in here leaves the
+     * previous version in place, never both gone.
+     *
+     * *Residual, bounded:* `FOR UPDATE` locks a row that exists. Two
+     * concurrent puts for a key with no row yet both see nothing to archive
+     * and one insert wins. Nothing is lost that the server ever held, and it
+     * is reachable only on the first-ever write for an account.
      *
      * **What this deliberately does not do is refuse.** The server cannot
      * tell a client bug from her genuinely deleting a deck, and the device
@@ -109,34 +196,43 @@ export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, 
      * "waiting" and never finishes, which is a worse failure than the one it
      * guards. Accept the push; keep what it replaced.
      *
-     * **Snapshots are throttled by time, not by content.** A content-aware
-     * trigger ("archive when the push shrinks") is the tempting version and
-     * is worse: a bad push repeated then archives its own shrunken states and
-     * prunes the good one out of the window. At most one snapshot per
-     * `snapshotIntervalMs` cannot be accelerated by any push pattern, so the
-     * worst case is bounded at "lose up to an hour of edits" whatever the
-     * client does.
+     * **Every replaced version is archived; the interval throttle lives in
+     * retention now.** See `pruneVersions` for why it moved and what T071's
+     * reasoning it keeps. A push whose bytes are identical to what is stored
+     * still archives nothing — there is nothing to keep.
      */
     async put(key, data, updatedAt, { now = Date.now() } = {}) {
-      const previous = await get(key)
-      if (previous && previous.data !== data) {
-        const archivedAt = await lastArchivedAt(key)
-        if (archivedAt === null || now - archivedAt >= intervalMs) {
-          await pool.query('INSERT INTO library_versions (library_key, data, updated_at, archived_at) VALUES ($1, $2, $3, $4)', [
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+
+        const previous = await readLibrary(client, key, { forUpdate: true })
+        if (previous && previous.data !== data) {
+          await client.query('INSERT INTO library_versions (library_key, data, updated_at, archived_at) VALUES ($1, $2, $3, $4)', [
             key,
             previous.data,
             previous.updatedAt,
             now,
           ])
-          await pruneVersions(key)
+          await pruneVersions(client, key)
         }
-      }
 
-      await pool.query(
-        `INSERT INTO libraries (library_key, data, updated_at) VALUES ($1, $2, $3)
-         ON CONFLICT (library_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
-        [key, data, updatedAt],
-      )
+        await client.query(
+          `INSERT INTO libraries (library_key, data, updated_at) VALUES ($1, $2, $3)
+           ON CONFLICT (library_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
+          [key, data, updatedAt],
+        )
+
+        await client.query('COMMIT')
+      } catch (err) {
+        // A rollback that itself fails must not replace the real error: the
+        // caller needs to know the push did not land, and 500 is what makes
+        // the device retry it.
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
+      }
     },
 
     /**
@@ -160,11 +256,19 @@ export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, 
 }
 
 /**
- * How often a prior version is snapshotted, at most (T071). One hour: the
- * worst case a bad push can cost is an hour of edits, and no burst of pushes
- * can consume the retention window faster than the clock.
+ * The interval the AGED history is thinned to, at most one row each (T071,
+ * moved from the write path to retention by T082). One hour, so no burst of
+ * pushes can consume the retention window faster than the clock.
  */
 export const LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000
+/**
+ * How many of the newest archived versions are exempt from interval thinning
+ * (T082). Eight, at the client's 2 s debounce, is the last ~16 seconds of
+ * editing kept at full resolution — enough that the version a wipe replaced
+ * is always still there, and small enough that a flood cannot use it to push
+ * older history out (the aged rows below it are one per interval regardless).
+ */
+export const LIBRARY_VERSION_RECENT_COUNT = 8
 /** Retained snapshots per key — 72 hourly snapshots is three days of history. */
 export const LIBRARY_VERSION_MAX_COUNT = 72
 /**
@@ -317,6 +421,42 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
  * `CLIP_STORE_MAX_BYTES` if the plan changes.
  */
 export const DEFAULT_CLIP_STORE_MAX_BYTES = 300 * 1024 * 1024
+/**
+ * Reads `CLIP_STORE_MAX_BYTES` into a ceiling `createClipStore` can actually
+ * hold itself to (T082). It used to reach the store through a bare
+ * `Number(...)`, which has two bad answers for a typo in a deploy dashboard
+ * field — the only way this value is ever set:
+ *
+ * - `NaN` (`'300MB'`, `'abc'`) — every comparison against it is false, so the
+ *   store is UNBOUNDED. `clips` then fills the 1 GB instance and the write
+ *   that starts failing is `libraryStore.put`: her phrases stop reaching the
+ *   server while the sync line still reads "waiting".
+ * - `0` (`''`, `'0'`) — every put evicts everything, so the drill has no
+ *   audio to play offline.
+ *
+ * **It falls back rather than refusing to boot.** This process holds the only
+ * off-device copy of her library, and serving `GET /api/library` is exactly
+ * what she needs most if a deploy is misconfigured; a typo that takes the app
+ * down is a worse outcome than a typo that runs on the documented default.
+ * The fallback is logged at error level, once, at boot.
+ *
+ * The floor is one clip: a ceiling below that would evict every clip on the
+ * put that wrote it, which is the `0` failure wearing a plausible number.
+ */
+export function clipStoreMaxBytesFrom(raw, logger) {
+  if (raw === undefined || raw === null) return DEFAULT_CLIP_STORE_MAX_BYTES
+  const value = Number(raw)
+  if (Number.isInteger(value) && value >= MIN_CLIP_STORE_MAX_BYTES) return value
+  logger.error('CLIP_STORE_MAX_BYTES is not a whole number of bytes above the floor — using the default', {
+    provided: String(raw),
+    using: DEFAULT_CLIP_STORE_MAX_BYTES,
+    floor: MIN_CLIP_STORE_MAX_BYTES,
+  })
+  return DEFAULT_CLIP_STORE_MAX_BYTES
+}
+
+/** One clip, generously (docs/scale.md §1 models ~45 KB each). Below this the ceiling is the `0` failure with a plausible number on it. */
+const MIN_CLIP_STORE_MAX_BYTES = 128 * 1024
 /** Evict past the ceiling, not to it — the same 90% hysteresis the device's cache uses (docs/scale.md §6), so one sweep is not one delete per put. */
 const CLIP_EVICT_TO_FRACTION = 0.9
 /** Rows read per eviction sweep: bounded so a badly over-budget table is drained in passes rather than one unbounded result set. */

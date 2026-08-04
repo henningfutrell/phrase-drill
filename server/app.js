@@ -13,6 +13,40 @@ const TRANSLATE_MAX_TEXT_CHARS = 500
 const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
+ * The highest `schemaVersion` this build will accept in a push (T082).
+ *
+ * **Keep this equal to `src/adapters/storage/migrations.ts`'s
+ * `CURRENT_SCHEMA_VERSION`.** The server and the PWA it serves are one Render
+ * service and one build, so no device can ever hold a bundle newer than this
+ * process — an older cached bundle pushing a lower version is the only skew
+ * that exists, and the T060 gate below is what handles that.
+ * `server/library-envelope.test.js` fails if a schema bump forgets this line.
+ *
+ * **Why an upper bound at all.** `schemaVersion` gates every push (the T060
+ * stale-client 409). Unbounded, one stored rogue value — a buggy build, a
+ * replayed body, a hand `curl` with her token — 409s every honest push from
+ * both of her phones for good, and `sync-engine.ts:313-315` maps 409 to
+ * `needs-update`, the one state that deliberately never retries. She is then
+ * told to update an app for which no update exists, and her library has
+ * already been overwritten by the push that did it.
+ */
+export const LIBRARY_MAX_SCHEMA_VERSION = 6
+
+/**
+ * Whether a `schemaVersion` is one this server can store, serve and compare.
+ *
+ * The set `typeof value === 'number'` admits is wider than that: `1e999` is
+ * legal JSON, parses to `Infinity`, and `JSON.stringify` writes it back as
+ * `null`. That is the whole of audit finding 2 — validate the parsed value,
+ * store a re-serialization of it, and the two are not the same value. The
+ * bound is applied here, on the way in, and the row is stored as the bytes
+ * that were checked (see `handleLibraryPut`), so neither half can drift again.
+ */
+function isAcceptableSchemaVersion(value) {
+  return Number.isInteger(value) && value >= 1 && value <= LIBRARY_MAX_SCHEMA_VERSION
+}
+
+/**
  * The one way this server refuses a request for being too fast (T035).
  *
  * It answers 429 with `Retry-After`, and it is the *only* thing here that
@@ -58,14 +92,21 @@ function isLibraryEnvelope(value) {
 
 /**
  * The schema version of a stored envelope, read back out of the JSON the
- * server keeps opaque otherwise. `0` for anything unreadable or missing a
- * numeric version — the permissive answer, so a corrupt or ancient stored
- * row can never lock a client out of syncing.
+ * server keeps opaque otherwise. `0` for anything unreadable, missing a
+ * numeric version, *or carrying one outside the range this build accepts* —
+ * the permissive answer, so a corrupt, ancient or rogue stored row can never
+ * lock a client out of syncing.
+ *
+ * The out-of-range clause is the repair path for a row an already-deployed
+ * server may be holding right now (T082): a stored `999` or `Infinity` used
+ * to out-rank every honest push and 409 it forever. Reading it as 0 lets her
+ * phone's next push through, and that push archives the bad bytes on the way
+ * past. No migration script, no `psql`.
  */
 function storedSchemaVersion(data) {
   try {
     const version = JSON.parse(data).schemaVersion
-    return typeof version === 'number' ? version : 0
+    return isAcceptableSchemaVersion(version) ? version : 0
   } catch {
     return 0
   }
@@ -317,6 +358,8 @@ export function createApp({
 
     // Served byte for byte, not re-serialized: what she gets back is exactly
     // what was stored, so nothing this server does can quietly reshape it.
+    // True of the write path too since T082 — `handleLibraryPut` stores the
+    // request's own bytes, so the round trip is byte for byte end to end.
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(row.data)
   }
@@ -333,13 +376,26 @@ export function createApp({
       throw err
     }
 
+    // The exact bytes that will be stored, if this request is accepted. What
+    // is validated below and what is written must be the same value — the
+    // old path validated `parsed` and stored `JSON.stringify(parsed)`, and a
+    // `schemaVersion` of `1e999` is the demonstration that those differ
+    // (T082, audit finding 2).
+    const raw = body.toString('utf8')
+
     let parsed
     try {
-      parsed = JSON.parse(body.toString('utf8'))
+      parsed = JSON.parse(raw)
     } catch {
       return sendJson(res, 400, { error: 'invalid-json' })
     }
     if (!isLibraryEnvelope(parsed)) return sendJson(res, 400, { error: 'invalid-request' })
+
+    // Bounded, and an integer (T082). Note this is NOT folded into
+    // `isLibraryEnvelope`: that test also runs on the way out, and a row
+    // written before this bound existed must still be *served*, not turned
+    // into a 500. Refuse on the way in; stay permissive on the way out.
+    if (!isAcceptableSchemaVersion(parsed.schemaVersion)) return sendJson(res, 400, { error: 'invalid-request' })
 
     // A client older than the stored envelope may not overwrite it (T060).
     //
@@ -366,7 +422,14 @@ export function createApp({
     // cannot get past is its own failure. What makes a bad push survivable is
     // that `libraryStore.put` archives the version it replaces (T071); it is
     // the store's invariant, not a step this route can forget.
-    await libraryStore.put(key, JSON.stringify(parsed), Date.now())
+    //
+    // Stored as the bytes that were validated, not as a re-serialization of
+    // them (T082). GET already promised "byte for byte, not re-serialized";
+    // that was true of the read path and false of the write path, and the gap
+    // between the two is where a value could change between being checked and
+    // being written. Both paths keep the client's bytes now, so the promise
+    // holds end to end and this server reshapes nothing it is given.
+    await libraryStore.put(key, raw, Date.now())
     res.writeHead(204)
     res.end()
   }
