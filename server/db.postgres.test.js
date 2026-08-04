@@ -105,42 +105,57 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
    * T082's SQL, which the fake cannot speak for: `BEGIN`/`COMMIT`/`ROLLBACK`
    * on a checked-out client, `SELECT … FOR UPDATE`, and a prune that now also
    * selects `archived_at`. The fake serializes at `BEGIN` on one process; only
-   * a real server can show the row lock actually holds.
+   * a real server can show what the row lock buys.
+   *
+   * **This test drives `libraryStore.put` (T094).** It used to issue its own
+   * `SELECT … FOR UPDATE` on two raw pooled clients and never touch the store
+   * at all, which made it a test of Postgres rather than of this codebase:
+   * deleting `FOR UPDATE` from `readLibrary` left it green. What `FOR UPDATE`
+   * actually buys is stated below, and deleting it turns this red.
    */
-  it('SELECT … FOR UPDATE really blocks the second writer until the first commits', async () => {
-    // The lock semantics themselves — the one thing no fake can speak for,
-    // and the whole reason `put` runs in a transaction. Both connections are
-    // checked out up front: `pool.connect()` latency on a cold pool is enough
-    // to make two "concurrent" puts run one after the other by accident, and
-    // a race test that passes because nothing raced is worse than none.
-    const lib = createLibraryStore(pool)
+  it('put re-reads under the row lock, so a version committed while it waited is archived instead of overwritten', async () => {
+    const lib = createLibraryStore(pool, { snapshotIntervalMs: 3_600_000 })
     await lib.init()
-    await lib.put('lock', 'the row', 1, { now: 0 })
+    await lib.put('lock', 'v1', 1, { now: 0 })
 
-    const first = await pool.connect()
-    const second = await pool.connect()
+    // Another writer holds the row: it has replaced `v1` with `v2` and has not
+    // committed. This is one half of the interleaving T082 closed, made
+    // deterministic — a real second `put` would race and prove nothing on the
+    // runs where it happened to serialize by itself.
+    const holder = await pool.connect()
+    // Warm the connection `put` will check out. `pool.connect()` latency on a
+    // cold pool is enough for the assertion below to pass because nothing
+    // raced, which is worse than no assertion.
+    ;(await pool.connect()).release()
     try {
-      await first.query('BEGIN')
-      await first.query('SELECT data FROM libraries WHERE library_key = $1 FOR UPDATE', ['lock'])
+      await holder.query('BEGIN')
+      await holder.query('UPDATE libraries SET data = $1, updated_at = $2 WHERE library_key = $3', ['v2', 2, 'lock'])
 
-      let secondGotTheLock = false
-      const secondTurn = (async () => {
-        await second.query('BEGIN')
-        await second.query('SELECT data FROM libraries WHERE library_key = $1 FOR UPDATE', ['lock'])
-        secondGotTheLock = true
-        await second.query('COMMIT')
-      })()
+      let settled = false
+      const put = lib.put('lock', 'v3', 3, { now: 10 }).then(() => {
+        settled = true
+      })
 
+      // Genuine contention, not an accident of scheduling: without it the
+      // assertion after the commit would be about two writes that never
+      // overlapped.
       await new Promise((resolve) => setTimeout(resolve, 200))
-      expect(secondGotTheLock, 'the second writer must wait on the row lock, not read past it').toBe(false)
+      expect(settled, 'the second writer must block on the row lock, not read past it').toBe(false)
 
-      await first.query('COMMIT')
-      await secondTurn
-      expect(secondGotTheLock).toBe(true)
+      await holder.query('COMMIT')
+      await put
     } finally {
-      first.release()
-      second.release()
+      holder.release()
     }
+
+    // The load-bearing assertion. Without `FOR UPDATE` on `put`'s read, `put`
+    // reads `v1` from its own snapshot, archives THAT, and then overwrites —
+    // so `v2` exists in neither table and one device's push is simply gone.
+    expect((await lib.get('lock')).data).toBe('v3')
+    expect(
+      (await lib.versions('lock')).map((v) => v.data),
+      'the version committed while put waited must be the one it archived',
+    ).toContain('v2')
   })
 
   it('serializes two concurrent puts on the row lock, archiving the loser instead of dropping it', async () => {
