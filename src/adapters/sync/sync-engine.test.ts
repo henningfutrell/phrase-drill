@@ -783,7 +783,7 @@ describe('createSyncEngine — a restore outranks a deletion the server still ho
     await settle()
     expect(h.baseline.value?.decks).toHaveLength(1)
 
-    await h.engine.libraryRestored()
+    await h.engine.libraryRestored(async () => {})
 
     expect(h.baseline.value).toMatchObject({
       schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -803,8 +803,7 @@ describe('createSyncEngine — a restore outranks a deletion the server still ho
     })
     const h = createHarness({ local: library([]), server })
 
-    await h.engine.libraryRestored()
-    h.setLocal(library([deck('d1', 'Home', 100)]))
+    await h.engine.libraryRestored(async () => h.setLocal(library([deck('d1', 'Home', 100)])))
     h.engine.start()
     await settle()
 
@@ -824,8 +823,7 @@ describe('createSyncEngine — a restore outranks a deletion the server still ho
     expect(h.baseline.value?.decks).toHaveLength(1)
 
     h.server.library = { ...library([]), tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 500 }] }
-    await h.engine.libraryRestored()
-    h.setLocal(library([deck('d1', 'Home', 100)]))
+    await h.engine.libraryRestored(async () => h.setLocal(library([deck('d1', 'Home', 100)])))
     h.engine.syncNow()
     await settle()
 
