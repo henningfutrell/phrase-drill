@@ -12,6 +12,16 @@
       to a Safari-chrome tab instead of a standalone app. See docs/pwa.md.
     -->
     <link rel="apple-touch-icon" href="%BASE_URL%icons/apple-touch-icon-180.png" />
+    <!--
+      Both spellings, deliberately. `mobile-web-app-capable` is the standard
+      name and the only one that does not log a deprecation warning, but iOS
+      Safari still reads the `apple-` prefixed one for "Add to Home Screen" —
+      dropping it would silently demote the installed app back to a Safari tab
+      with chrome, which is the exact failure this tag exists to prevent.
+      Remove the prefixed one only after confirming standalone launch on a real
+      iPhone without it.
+    -->
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <!--
       `default` renders a light status bar with dark text — wrong against
