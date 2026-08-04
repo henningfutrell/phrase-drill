@@ -56,6 +56,7 @@ function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> =
     onConfirmRestore: vi.fn().mockResolvedValue(undefined),
     onCancelRestore: vi.fn(),
     onOpenDiagnostics: vi.fn(),
+    savedAudio: undefined as { bytes: number; clipCount: number; maxBytes: number } | undefined,
     ...overrides,
   }
   act(() => {
@@ -341,6 +342,46 @@ describe('SettingsScreen', () => {
 
       const error = container.querySelector('[data-testid="restore-error"]')
       expect(error).not.toBeNull()
+    })
+  })
+
+  /**
+   * T036 — the clip cache is bounded and evicts, so the app has to say what
+   * it is holding, what it will throw away, and what she will notice when it
+   * does. Every one of those is a thing she would otherwise discover as a
+   * phrase that mysteriously went quiet.
+   */
+  describe('saved audio', () => {
+    const USAGE = { bytes: 149_100_000, clipCount: 3190, maxBytes: 209_715_200 }
+
+    it('states how much audio it is holding, against the ceiling', () => {
+      renderScreen({ savedAudio: USAGE })
+      const usage = container.querySelector('[data-testid="saved-audio-usage"]')
+      expect(usage?.textContent).toMatch(/142 MB/)
+      expect(usage?.textContent).toMatch(/200 MB/)
+      expect(usage?.textContent).toMatch(/3,190/)
+    })
+
+    it('says the least-drilled audio goes first, and that her library never does', () => {
+      renderScreen({ savedAudio: USAGE })
+      const section = container.querySelector('[data-testid="saved-audio-section"]')
+      expect(section?.textContent).toMatch(/longest|least/i)
+      expect(section?.textContent).toMatch(/never/i)
+      expect(section?.textContent).toMatch(/phrases/i)
+    })
+
+    it('answers what happens offline when the audio she needs was cleared', () => {
+      renderScreen({ savedAudio: USAGE })
+      const note = container.querySelector('[data-testid="saved-audio-offline-note"]')
+      expect(note?.textContent).toMatch(/offline/i)
+      expect(note?.textContent).toMatch(/back|again|online/i)
+    })
+
+    it('says it does not know yet rather than showing a fabricated zero', () => {
+      renderScreen({ savedAudio: undefined })
+      expect(container.querySelector('[data-testid="saved-audio-usage"]')?.textContent).toMatch(
+        /checking|working|yet/i,
+      )
     })
   })
 })

@@ -24,9 +24,20 @@ type FakeDatabase = {
 
 const databases = new Map<string, FakeDatabase>()
 
+/**
+ * Every destructive operation this fake has been asked to perform, in order.
+ * `delete` and `clear` are the only two ways a record can leave IndexedDB, so
+ * this array is the complete record of what a code path was able to destroy —
+ * which is what lets a test prove that clip eviction can never reach the
+ * `decks`, `mixes`, `settings` or `tombstones` stores (T036). Mutable on
+ * purpose: a test that cares about one stretch of work splices it empty first.
+ */
+export const idbDestructiveOperations: { op: 'delete' | 'clear'; store: string }[] = []
+
 /** Call between tests — the equivalent of deleting every IndexedDB database. */
 export function resetFakeIdb(): void {
   databases.clear()
+  idbDestructiveOperations.length = 0
 }
 
 function recordKey(db: FakeDatabase, storeName: string, value: unknown): unknown {
@@ -55,9 +66,11 @@ function storeOps(db: FakeDatabase, storeName: string): StoreOps {
       return resolvedKey
     },
     async delete(key) {
+      idbDestructiveOperations.push({ op: 'delete', store: storeName })
       store.delete(key)
     },
     async clear() {
+      idbDestructiveOperations.push({ op: 'clear', store: storeName })
       store.clear()
     },
   }

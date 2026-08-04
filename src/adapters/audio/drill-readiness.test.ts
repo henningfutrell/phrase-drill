@@ -96,4 +96,30 @@ describe('computeDrillReadiness', () => {
     expect(result.reason).toBeUndefined()
     expect(generationQueue.enqueue).not.toHaveBeenCalled()
   })
+
+  /**
+   * T036 — once Clips can be evicted, "this Phrase has no audio" stops being
+   * "it is still being made" and becomes "it was thrown away and cannot come
+   * back until there is a network." The screen has to tell those apart, so
+   * the readiness result carries whether there was a network at all.
+   */
+  it('reports whether it was online, so the screen never promises audio it cannot fetch', async () => {
+    const generationQueue = fakeQueue()
+
+    const online = await computeDrillReadiness(PHRASES, {
+      clipCache: fakeClipCache(['p1']),
+      generationQueue,
+      voice: VOICE,
+      isOnline: () => true,
+    })
+    const offline = await computeDrillReadiness(PHRASES, {
+      clipCache: fakeClipCache(['p1']),
+      generationQueue,
+      voice: VOICE,
+      isOnline: () => false,
+    })
+
+    expect(online.online).toBe(true)
+    expect(offline.online).toBe(false)
+  })
 })
