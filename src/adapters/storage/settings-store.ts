@@ -22,11 +22,15 @@ export interface Voice {
 export interface Settings {
   readonly voice: Voice | null
   /**
-   * Epoch ms of the last successful Library push to the server, or `null` if
-   * none has ever completed. Half of the Backup age (`domain/backup-age`);
-   * Diagnostics (T039) also reads it. Additive field: missing in
-   * previously-stored settings reads as `null`, so existing data needs no
-   * migration.
+   * Epoch ms of the last Library sync the server ACCEPTED (`docs/sync.md`),
+   * or `null` if none has ever completed. Written only by the sync engine, on
+   * the success path and nowhere else, which is what makes it safe for the
+   * sync line and Diagnostics (T039) to read it as proof a sync happened. It
+   * is also half of the Backup age (`domain/backup-age`), which is why the
+   * success-path-only rule matters twice over: a `lastSyncAt` written on a
+   * failed push would silence the backup warning with nothing behind it.
+   * Additive field: missing in previously-stored settings reads as `null`, so
+   * existing data needs no migration.
    */
   readonly lastSyncAt: number | null
   /**

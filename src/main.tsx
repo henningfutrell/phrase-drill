@@ -1,12 +1,19 @@
 import { StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
-import { createIndexedDbClipCache, createIndexedDbDeckStore, createIndexedDbMixStore, createIndexedDbSettingsStore } from './adapters/storage'
+import {
+  createIndexedDbClipCache,
+  createIndexedDbDeckStore,
+  createIndexedDbMixStore,
+  createIndexedDbSettingsStore,
+  createIndexedDbSyncBaselineStore,
+} from './adapters/storage'
 import { createServerSynthClient } from './adapters/audio/server-synth-client'
 import { createGenerationQueue } from './adapters/audio/generation-queue'
 import { createServerScanReader } from './adapters/vision/server-scan-reader'
 import { createServerTranslator } from './adapters/translation/server-translator'
 import { createLibrarySyncClient } from './adapters/sync/library-sync-client'
+import { createSyncEngine } from './adapters/sync/sync-engine'
 import { createSessionAuth, AuthRequiredError } from './adapters/auth/session-auth'
 import { LoginScreen } from './ui/LoginScreen'
 import { createIndexedDbErrorLog, installErrorCapture, withAdapterErrorLogging } from './adapters/diagnostics'
@@ -21,6 +28,7 @@ const deckStore = createIndexedDbDeckStore()
 const mixStore = createIndexedDbMixStore()
 const settingsStore = createIndexedDbSettingsStore()
 const clipCache = createIndexedDbClipCache()
+const syncBaselineStore = createIndexedDbSyncBaselineStore()
 
 // Diagnostics (T039): the ring buffer that backs Diagnostics and the two
 // global error hooks that feed it. Installed here, at the composition root,
@@ -90,7 +98,17 @@ function showApp(): void {
     ...rawScanReader,
     read: withAdapterErrorLogging('scan', rawScanReader.read.bind(rawScanReader), errorLog),
   }
-  const librarySyncClient = createLibrarySyncClient({ getAccessToken, fetchImpl: auth.authFetch })
+  // T034: the engine, not the app, decides when a sync happens — launch,
+  // after a change (debounced), on reconnect, and when the phone is locked.
+  // Built once here, at the composition root, and handed to App as a port.
+  const syncEngine = createSyncEngine({
+    client: createLibrarySyncClient({ getAccessToken, fetchImpl: auth.authFetch }),
+    readLocal: () => deckStore.exportAll(),
+    writeLocal: (library) => deckStore.importAll(library),
+    baseline: syncBaselineStore,
+    readLastSyncAt: () => settingsStore.load().then((settings) => settings.lastSyncAt),
+    recordSync: (timestamp) => settingsStore.recordSync(timestamp),
+  })
   const rawTranslator = createServerTranslator({ getAccessToken, fetchImpl: auth.authFetch })
   const translator = {
     ...rawTranslator,
@@ -107,7 +125,7 @@ function showApp(): void {
       clipCache={clipCache}
       scanReader={scanReader}
       errorLog={errorLog}
-      librarySyncClient={librarySyncClient}
+      syncEngine={syncEngine}
       translator={translator}
     />,
   )
