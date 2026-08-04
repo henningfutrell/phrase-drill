@@ -24,7 +24,7 @@ falls out of sync with `CURRENT_SCHEMA_VERSION`.
 
 ## The stores
 
-One database (`phrase-drill`), one version number, five stores — all declared
+One database (`phrase-drill`), one version number, six stores — all declared
 in the single `openDatabase()` upgrade path (`database.ts`):
 
 | Store | Holds | Added |
@@ -34,6 +34,7 @@ in the single `openDatabase()` upgrade path (`database.ts`):
 | `clips` | content-addressed audio cache — derived, never exported | v2 |
 | `errors` | diagnostics ring buffer | v3 |
 | `mixes` | saved Mixes — Deck **ids**, never Phrases | v4 (T059) |
+| `tombstones` | what was deleted, and when — so sync can merge | v5 (T060) |
 
 `decks` and `mixes` are separate stores on purpose: it makes "deleting a Mix
 never touches its source Decks" — and its converse — structural rather than a
@@ -41,3 +42,13 @@ rule someone has to remember. The one place they meet is the `Library`
 envelope (`exportAll`/`importAll`, `/api/library`), which carries both,
 because a backup or a new phone that restored only half of her data would be
 worse than one that restored none.
+
+`tombstones` is the exception to that separation, and deliberately so: both
+the deck store and the mix store write to it, each only its own `kind`, and
+neither ever reads the other's rows. It exists because sync **merges** two
+devices' libraries rather than overwriting one with the other (T060 —
+`domain/library-merge.ts` holds the rule), and a merge cannot tell "she
+deleted this" from "this device has never seen it" unless the deletion is
+itself recorded. Removing a Deck or a Mix writes its Tombstone in the *same*
+transaction as the delete: a delete without one is a delete every other
+device undoes at the next sync.

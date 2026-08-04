@@ -12,6 +12,21 @@ const TRANSLATE_MAX_TEXT_CHARS = 500
 const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
+ * The schema version of a stored envelope, read back out of the JSON the
+ * server keeps opaque otherwise. `0` for anything unreadable or missing a
+ * numeric version — the permissive answer, so a corrupt or ancient stored
+ * row can never lock a client out of syncing.
+ */
+function storedSchemaVersion(data) {
+  try {
+    const version = JSON.parse(data).schemaVersion
+    return typeof version === 'number' ? version : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
  * Builds the one request handler this server runs — every `/api/*` route
  * plus the static PWA fallback. Pure composition: every dependency (the
  * providers, the rate limiters, the library store, the logger) is injected,
@@ -208,9 +223,31 @@ export function createApp({
       typeof parsed !== 'object' ||
       parsed.format !== LIBRARY_FORMAT ||
       typeof parsed.schemaVersion !== 'number' ||
-      !Array.isArray(parsed.decks)
+      !Array.isArray(parsed.decks) ||
+      (parsed.mixes !== undefined && !Array.isArray(parsed.mixes)) ||
+      (parsed.tombstones !== undefined && !Array.isArray(parsed.tombstones))
     ) {
       return sendJson(res, 400, { error: 'invalid-request' })
+    }
+
+    // A client older than the stored envelope may not overwrite it (T060).
+    //
+    // Her devices do not update together: one runs the bundle just
+    // deployed, the other the bundle it last installed. An old client's
+    // whole-library push is honest about what it knows and silent about
+    // what it does not — it cannot carry a field its build has never heard
+    // of. Letting it write would strip the newer envelope's merge metadata
+    // (the Tombstones) off the server copy, and every Deck she deleted
+    // would come back on the next sync.
+    //
+    // Refusing costs that device its sync until it updates — hours, and its
+    // own changes stay safe on the device and go up afterwards. Accepting
+    // costs her data. This is the one place both devices' pushes pass
+    // through, so it is the only place the rule can be enforced for a
+    // client that does not know the rule exists.
+    const stored = await libraryStore.get(key)
+    if (stored && parsed.schemaVersion < storedSchemaVersion(stored.data)) {
+      return sendJson(res, 409, { error: 'stale-client' })
     }
 
     await libraryStore.put(key, JSON.stringify(parsed), Date.now())

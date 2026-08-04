@@ -1,8 +1,8 @@
 import type { IDBPDatabase } from 'idb'
 import type { Mix, MixId, MixStore } from '../../domain'
-import { MIXES_STORE, openDatabase } from './database'
+import { MIXES_STORE, TOMBSTONES_STORE, openDatabase } from './database'
 import { fromMixRecord, toMixRecord } from './mapping'
-import type { MixRecord } from './migrations'
+import type { MixRecord, Tombstone } from './migrations'
 
 /**
  * The IndexedDB implementation of `MixStore` (T059), via `idb`. Every write
@@ -34,9 +34,21 @@ export function createIndexedDbMixStore(): MixStore {
       await db.put(MIXES_STORE, toMixRecord(mix, { createdAt: existing?.createdAt ?? now, updatedAt: now }))
     },
 
+    /**
+     * Deleting a Mix writes a Tombstone in the same transaction (T060), for
+     * the same reason the deck store does: without it, every device that
+     * still holds the Mix pushes it back on the next sync. It writes only
+     * `kind: 'mix'` rows and never reads the deck store's — the `decks`
+     * store is still untouched by anything here.
+     */
     async remove(id: MixId): Promise<void> {
       const db = await getDatabase()
-      await db.delete(MIXES_STORE, id)
+      const tx = db.transaction([MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
+      await tx.objectStore(MIXES_STORE).delete(id)
+      await tx
+        .objectStore(TOMBSTONES_STORE)
+        .put({ id, kind: 'mix', deletedAt: Date.now() } satisfies Tombstone)
+      await tx.done
     },
   }
 }

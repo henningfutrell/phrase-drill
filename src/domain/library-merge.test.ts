@@ -207,12 +207,39 @@ describe('mergeLibraries — the Tombstone half (a delete must still delete)', (
     expect(merged.tombstones?.map((t) => t.id).sort()).toEqual(['a', 'b'])
   })
 
-  it('treats a library from before Tombstones existed as having none, never as having deleted everything', () => {
+  it('treats a remote library from before Mixes and Tombstones existed as having none of either', () => {
     const before: Library = { format: LIBRARY_FORMAT, schemaVersion: VERSION, exportedAt: 0, decks: [deck({ id: 'd2' })] }
 
-    const merged = mergeLibraries(library({ decks: [deck({ id: 'd1' })] }), before)
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1' })], mixes: [mix({ id: 'm1' })] }),
+      before,
+    )
 
     expect(merged.decks.map((d) => d.id).sort()).toEqual(['d1', 'd2'])
+    expect(merged.mixes).toEqual([mix({ id: 'm1' })])
+    expect(merged.tombstones).toEqual([])
+  })
+
+  it('treats a local library from before Mixes and Tombstones existed as having none of either', () => {
+    const before: Library = { format: LIBRARY_FORMAT, schemaVersion: VERSION, exportedAt: 0, decks: [deck({ id: 'd1' })] }
+
+    const merged = mergeLibraries(
+      before,
+      library({ decks: [deck({ id: 'd2' })], mixes: [mix({ id: 'm1' })] }),
+    )
+
+    expect(merged.decks.map((d) => d.id).sort()).toEqual(['d1', 'd2'])
+    expect(merged.mixes).toEqual([mix({ id: 'm1' })])
+    expect(merged.tombstones).toEqual([])
+  })
+
+  it('keeps a Mix written again after the delete, and discards the Tombstone it outlived', () => {
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'm1', updatedAt: 30 })] }),
+      library({ tombstones: [{ id: 'm1', kind: 'mix', deletedAt: 20 }] }),
+    )
+
+    expect(merged.mixes).toEqual([mix({ id: 'm1', updatedAt: 30 })])
     expect(merged.tombstones).toEqual([])
   })
 })
