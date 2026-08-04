@@ -211,6 +211,22 @@ Two Phrases sharing an id are both kept, never folded into one. No write path
 enforces uniqueness, so a duplicate id is already a defect — answering it by
 dropping one of her phrases would make it a loss.
 
+**The same holds one level up, for Decks and Mixes (T086).** Two records
+sharing an id cannot be paired up, so neither is reconciled against the other:
+both sides are kept whole, and only exact repeats — same name, same Phrases —
+are folded, so the merge still converges instead of growing on every sync.
+Until T086 the other side was indexed by id with a `Map`, which kept the last
+record under a repeated id, and the pass carrying remote-only records then
+skipped that id because this device held it: the unpaired **Deck was dropped
+whole, with every Phrase in it**. A baseline that holds an id twice is read as
+one that never held it — it cannot say which of the two a later record came
+from, and a coin toss must not decide whether a Tombstone deletes a Deck.
+
+The app mints uuids, so this shape reaches the merge only from a hand-edited
+backup file — which `parseLibraryFile` accepts, and which is a real path
+(`docs/backup.md`). She fixes the visible duplicate with one tap; a Deck
+deleted to tidy it up is handwriting that exists nowhere else.
+
 **With no baseline** (the first sync ever, after IndexedDB eviction, or one
 written under a schema version this build does not read — see below) a Deck
 held by both sides keeps the later record's name and dates and the **union** of

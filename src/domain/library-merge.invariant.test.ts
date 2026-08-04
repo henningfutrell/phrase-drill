@@ -72,7 +72,12 @@ function deck(random: Random, id: string, updatedAt: number): DeckRecord {
 
 function library(random: Random, clock: number): Library {
   const decks: DeckRecord[] = []
-  for (const id of DECK_IDS) if (random.chance(0.7)) decks.push(deck(random, id, clock + random.int(50)))
+  for (const id of DECK_IDS) {
+    if (random.chance(0.7)) decks.push(deck(random, id, clock + random.int(50)))
+    // A duplicate Deck id, for the same reason as a duplicate Phrase id above
+    // (T086): a hand-edited backup file is enough to produce one.
+    if (random.chance(0.08)) decks.push(deck(random, id, clock + random.int(50)))
+  }
   const mixes: MixRecord[] = []
   for (const id of ['m1', 'm2']) {
     if (random.chance(0.4)) {
@@ -107,15 +112,19 @@ function evolve(random: Random, from: Library, clock: number): Library {
       }
     })
   const added = random.chance(0.3) ? [deck(random, random.pick(DECK_IDS), clock)] : []
-  const byId = new Map([...decks, ...added].map((record) => [record.id, record]))
+  // Kept as a list, not indexed by id: an id held twice must survive an edit
+  // round intact, or the generator would quietly repair the shape under test
+  // (T086). An addition under an id already held is one more way to make one.
+  const kept = [...decks, ...added]
+  const heldIds = new Set(kept.map((record) => record.id))
 
   const tombstones: Tombstone[] = []
   for (const id of DECK_IDS) {
-    if (!byId.has(id) && from.decks.some((record) => record.id === id) && random.chance(0.7)) {
+    if (!heldIds.has(id) && from.decks.some((record) => record.id === id) && random.chance(0.7)) {
       tombstones.push({ id, kind: 'deck', deletedAt: clock + random.int(50) })
     }
   }
-  return { ...from, exportedAt: clock, decks: [...byId.values()], tombstones }
+  return { ...from, exportedAt: clock, decks: kept, tombstones }
 }
 
 /**
@@ -135,14 +144,49 @@ function rollBack(random: Random, from: Library, clock: number): Library {
   }
 }
 
-type PhraseKey = string
-
-function phraseKeys(record: DeckRecord): Set<PhraseKey> {
-  return new Set(record.phrases.map((held) => held.id))
+/**
+ * Every Deck under its id — a list, because an id held twice is a shape the
+ * merge must survive rather than collapse (T086). "Kept" therefore means kept
+ * under that id somewhere, not kept in one particular record: two records
+ * sharing an id cannot be paired up, so the merge keeps both whole.
+ */
+function decksById(from: Library | undefined): Map<string, DeckRecord[]> {
+  const grouped = new Map<string, DeckRecord[]>()
+  for (const record of from?.decks ?? []) {
+    const held = grouped.get(record.id)
+    if (held) held.push(record)
+    else grouped.set(record.id, [record])
+  }
+  return grouped
 }
 
-function deckById(from: Library | undefined): Map<string, DeckRecord> {
-  return new Map((from?.decks ?? []).map((record) => [record.id, record]))
+function phrasesUnder(records: readonly DeckRecord[]): PhraseRecord[] {
+  return records.flatMap((record) => record.phrases)
+}
+
+/** Everything about a Deck she can see — what makes two records the same Deck. */
+function contentOf(record: DeckRecord): string {
+  return JSON.stringify([record.name, record.phrases])
+}
+
+/**
+ * Deck ids where "did the id survive?" and "did THIS copy survive?" are
+ * different questions: a Tombstone names the id, and one side holds that id
+ * twice. The Tombstone removes the copy unchanged since the baseline and
+ * leaves the copy written after it (T070), so one copy of the id can go while
+ * another stays. The properties below ask about ids, so they cannot speak
+ * about these — that is a per-copy question, and the example tests own it.
+ */
+function partlyDeletable(local: Library, remote: Library): Set<string> {
+  const named = new Set(
+    [...(local.tombstones ?? []), ...(remote.tombstones ?? [])]
+      .filter((tombstone) => tombstone.kind === 'deck')
+      .map((tombstone) => tombstone.id),
+  )
+  const duplicated = [...decksById(local), ...decksById(remote)]
+    .filter(([, records]) => records.length > 1)
+    .map(([id]) => id)
+  return new Set(duplicated.filter((id) => named.has(id)))
 }
 
 /** One generated three-way scenario, and the merge of it. */
@@ -207,13 +251,15 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
 
   it('never removes a Phrase this device holds, unless a Tombstone removed its whole Deck', () => {
     for (const seed of seeds) {
-      const { local, merged } = scenario(seed)
-      const survivingDecks = deckById(merged)
+      const { local, remote, merged } = scenario(seed)
+      const survivingDecks = decksById(merged)
+      const partly = partlyDeletable(local, remote)
       const tombstoned = new Set((merged.tombstones ?? []).filter((t) => t.kind === 'deck').map((t) => t.id))
 
       for (const record of local.decks) {
-        const survivor = survivingDecks.get(record.id)
-        if (!survivor) {
+        const survivors = survivingDecks.get(record.id) ?? []
+        if (partly.has(record.id)) continue
+        if (survivors.length === 0) {
           expect({ seed, id: record.id, tombstoned: tombstoned.has(record.id) }).toEqual({
             seed,
             id: record.id,
@@ -221,7 +267,7 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
           })
           continue
         }
-        const kept = phraseKeys(survivor)
+        const kept = new Set(phrasesUnder(survivors).map((held) => held.id))
         for (const held of record.phrases) {
           expect({ seed, deck: record.id, phrase: held.id, kept: kept.has(held.id) }).toEqual({
             seed,
@@ -237,23 +283,24 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
   it('removes a Phrase the other device holds only when this device recorded the deletion', () => {
     for (const seed of seeds) {
       const { local, remote, base, merged } = scenario(seed)
-      const survivingDecks = deckById(merged)
-      const localDecks = deckById(local)
-      const baseDecks = deckById(base)
+      const survivingDecks = decksById(merged)
+      const localDecks = decksById(local)
+      const baseDecks = decksById(base)
+      const partly = partlyDeletable(local, remote)
 
       for (const record of remote.decks) {
-        const survivor = survivingDecks.get(record.id)
-        if (!survivor) continue
-        const kept = phraseKeys(survivor)
-        const mine = localDecks.get(record.id)
+        const survivors = survivingDecks.get(record.id) ?? []
+        if (survivors.length === 0 || partly.has(record.id)) continue
+        const kept = new Set(phrasesUnder(survivors).map((phrase) => phrase.id))
+        const mine = localDecks.get(record.id) ?? []
         for (const held of record.phrases) {
           if (kept.has(held.id)) continue
           // The only record of a Phrase deletion this build has: this device
           // held it at the last state both sides agreed on, and does not now.
           const deletedHere =
-            mine !== undefined &&
-            !phraseKeys(mine).has(held.id) &&
-            (baseDecks.get(record.id)?.phrases ?? []).some((before) => before.id === held.id)
+            mine.length > 0 &&
+            !phrasesUnder(mine).some((phrase) => phrase.id === held.id) &&
+            phrasesUnder(baseDecks.get(record.id) ?? []).some((before) => before.id === held.id)
           expect({ seed, deck: record.id, phrase: held.id, deletedHere }).toEqual({
             seed,
             deck: record.id,
@@ -267,22 +314,49 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
 
   it('keeps every Phrase this device holds under a duplicated id — two never collapse into one', () => {
     for (const seed of seeds) {
-      const { local, merged } = scenario(seed)
-      const survivingDecks = deckById(merged)
+      const { local, remote, merged } = scenario(seed)
+      const survivingDecks = decksById(merged)
+      const partly = partlyDeletable(local, remote)
 
       for (const record of local.decks) {
-        const survivor = survivingDecks.get(record.id)
-        if (!survivor) continue
+        const survivors = survivingDecks.get(record.id) ?? []
+        if (survivors.length === 0 || partly.has(record.id)) continue
         for (const id of new Set(record.phrases.map((held) => held.id))) {
           const mineAlike = record.phrases.filter((held) => held.id === id).length
           if (mineAlike < 2) continue
-          const keptAlike = survivor.phrases.filter((held) => held.id === id).length
+          const keptAlike = phrasesUnder(survivors).filter((held) => held.id === id).length
           expect({ seed, deck: record.id, phrase: id, enough: keptAlike >= mineAlike }).toEqual({
             seed,
             deck: record.id,
             phrase: id,
             enough: true,
           })
+        }
+      }
+    }
+  })
+
+  it('keeps every Deck held under a duplicated id — two never collapse into one (T086)', () => {
+    for (const seed of seeds) {
+      const { local, remote, merged } = scenario(seed)
+      const survivingDecks = decksById(merged)
+      const partly = partlyDeletable(local, remote)
+
+      for (const side of [local, remote]) {
+        for (const [id, records] of decksById(side)) {
+          if (records.length < 2 || partly.has(id)) continue
+          const survivors = survivingDecks.get(id) ?? []
+          // Gone entirely is a Tombstone's business, checked above.
+          if (survivors.length === 0) continue
+          const kept = new Set(survivors.map(contentOf))
+          for (const record of records) {
+            expect({ seed, id, content: contentOf(record), kept: kept.has(contentOf(record)) }).toEqual({
+              seed,
+              id,
+              content: contentOf(record),
+              kept: true,
+            })
+          }
         }
       }
     }
@@ -332,5 +406,7 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
       ),
     ).toBe(true)
     expect(shapes.some(({ merged }) => (merged.tombstones ?? []).length > 0)).toBe(true)
+    expect(shapes.some(({ local }) => new Set(local.decks.map((d) => d.id)).size !== local.decks.length)).toBe(true)
+    expect(shapes.some(({ remote }) => new Set(remote.decks.map((d) => d.id)).size !== remote.decks.length)).toBe(true)
   })
 })
