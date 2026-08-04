@@ -1,0 +1,59 @@
+# Render Blueprint (T053). Render does not run docker-compose.yml — that
+# file is local-dev only (see its own header). This is the production
+# topology: one web service built from the existing Dockerfile, one managed
+# Postgres, wired together by Render itself. See docs/deploy.md for the
+# one-time setup this file does not cover (connecting the repo, setting the
+# two secrets, creating the account).
+#
+# Plans, and why:
+#   - web service `starter` ($7/mo, 512 MB RAM): the app is ~23 MiB RSS
+#     measured locally, so `free` would technically fit the memory — but
+#     `free` web services spin down on idle (cold starts on her phone) and
+#     have no Shell tab, which docs/deploy.md's account-creation step needs.
+#     `starter` is the smallest plan that stays always-on and keeps Shell
+#     access.
+#   - database `basic-256mb` (~$6/mo): the smallest *paid* Postgres tier.
+#     Free Postgres on Render expires 30 days after creation and carries no
+#     backups of any kind — unacceptable for the one copy of her phrase
+#     library. See docs/deploy.md for this stated as a hard requirement.
+
+databases:
+  - name: phrase-drill-db
+    plan: basic-256mb
+    databaseName: phrase_drill
+    user: phrase_drill
+    region: oregon
+
+services:
+  - type: web
+    name: phrase-drill
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      # DATABASE_URL is wired from the database resource above, never a
+      # literal. `fromDatabase`/`connectionString` resolves to the
+      # *internal* connection string when the web service and the database
+      # share a region — both pinned to `oregon` above, deliberately, since
+      # this is what makes it resolve to internal rather than external —
+      # which keeps the connection on Render's private network with no TLS
+      # negotiation needed, matching server/db.js#sslConfigFor's assumption
+      # (docs/deploy.md explains the internal/external distinction and why
+      # this matters for TLS).
+      - key: DATABASE_URL
+        fromDatabase:
+          name: phrase-drill-db
+          property: connectionString
+      # PORT: Render injects this itself for every web service; not set
+      # here, and server/index.js already reads it (falls back to 8080
+      # only for local/non-Render runs).
+      # Both provider keys are `sync: false` — Render prompts for them in
+      # its dashboard on first deploy and stores them itself; neither value
+      # ever enters this repo. See docs/deploy.md.
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

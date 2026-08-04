@@ -24,9 +24,10 @@ user's phone, not for hypothetical others.
   key: it authenticates to the server with an opaque session token (a plain
   login form, `POST /api/login` — T050, replacing an earlier Keycloak/OIDC
   login in turn replacing the original device-generated library key) and
-  calls same-origin `/api/tts`, `/api/scan`, `/api/library`. Two services
-  (`docker-compose.yml`) — the app and Postgres — serve the stack together;
-  see `docs/server.md` for endpoints, env vars, local run, and Coolify
+  calls same-origin `/api/tts`, `/api/scan`, `/api/library`. Two services —
+  the app and Postgres — serve the stack together: `docker-compose.yml`
+  locally, `render.yaml` in production (T053). See `docs/server.md` for
+  endpoints, env vars, and local run, and `docs/deploy.md` for the Render
   deploy. The offline drill is unaffected — the server generates Clips, the
   device still caches and plays them from cache with no mid-run network
   dependency.
