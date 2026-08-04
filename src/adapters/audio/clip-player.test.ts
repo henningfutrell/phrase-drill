@@ -132,6 +132,98 @@ describe('createClipPlayer', () => {
       expect(ok).toBe(false)
       expect(player.unlockStatus).toBe('failed')
     })
+
+    it('shares one in-flight attempt across concurrent unlock() calls, so neither reports failure (T001)', async () => {
+      // Models the real element's spec behaviour: reassigning `src` (or
+      // calling `pause()`) while a `play()` is still pending rejects that
+      // pending promise with AbortError. A second Start-Drill tap arriving
+      // before the first `unlock()` resolves used to re-enter this method,
+      // which reassigned `element.src` and called `play()` again — aborting
+      // the first attempt and painting an "Audio didn't start" error even
+      // though the second attempt succeeded. Two concurrent callers must
+      // share one attempt instead of racing the element.
+      let pendingReject: ((err: Error) => void) | null = null
+      let srcValue = ''
+      let playCalls = 0
+      const element: AudioElementLike = {
+        get src() {
+          return srcValue
+        },
+        set src(value: string) {
+          if (pendingReject) {
+            const reject = pendingReject
+            pendingReject = null
+            const abort = new Error('The operation was aborted.')
+            abort.name = 'AbortError'
+            reject(abort)
+          }
+          srcValue = value
+        },
+        play(): Promise<void> {
+          playCalls += 1
+          return new Promise<void>((resolve, reject) => {
+            pendingReject = reject
+            queueMicrotask(() => {
+              if (pendingReject === reject) {
+                pendingReject = null
+                resolve()
+              }
+            })
+          })
+        },
+        pause() {},
+        addEventListener() {},
+        removeEventListener() {},
+      }
+      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voices: [VOICE] })
+
+      const [first, second] = await Promise.all([player.unlock(), player.unlock()])
+
+      expect(first).toBe(true)
+      expect(second).toBe(true)
+      expect(player.unlockStatus).toBe('unlocked')
+      expect(player.lastUnlockFailure).toBeUndefined()
+      expect(playCalls).toBe(1)
+    })
+
+    it('does not surface AbortError as an unlock failure — interrupted is not refused (T001)', async () => {
+      const abort = new Error('The operation was aborted.')
+      abort.name = 'AbortError'
+      const element = fakeAudioElement({ play: vi.fn().mockRejectedValue(abort) })
+      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voices: [VOICE] })
+
+      const ok = await player.unlock()
+
+      expect(ok).toBe(true)
+      expect(player.unlockStatus).toBe('unlocked')
+      expect(player.lastUnlockFailure).toBeUndefined()
+    })
+
+    it('still reports NotAllowedError (iOS autoplay refusal) as a failure, distinctly (T001)', async () => {
+      const refusal = new Error('blocked')
+      refusal.name = 'NotAllowedError'
+      const element = fakeAudioElement({ play: vi.fn().mockRejectedValue(refusal) })
+      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voices: [VOICE] })
+
+      const ok = await player.unlock()
+
+      expect(ok).toBe(false)
+      expect(player.unlockStatus).toBe('failed')
+      expect(player.lastUnlockFailure).toEqual({ name: 'NotAllowedError', message: 'blocked' })
+    })
+
+    it('still reports NotSupportedError (undecodable source) as a failure, distinctly (T001)', async () => {
+      const badSource = new Error('bad source')
+      badSource.name = 'NotSupportedError'
+      const element = fakeAudioElement({ play: vi.fn().mockRejectedValue(badSource) })
+      const player = createClipPlayer({ element, clipCache: fakeClipCache(), voices: [VOICE] })
+
+      const ok = await player.unlock()
+
+      expect(ok).toBe(false)
+      expect(player.unlockStatus).toBe('failed')
+      expect(player.lastUnlockFailure).toEqual({ name: 'NotSupportedError', message: 'bad source' })
+    })
   })
 
   describe('speak', () => {
