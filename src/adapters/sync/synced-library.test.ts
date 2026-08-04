@@ -91,6 +91,49 @@ describe('createSyncedLibrary (T067)', () => {
     expect((await settingsStore.load()).voice).toEqual(VOICE)
   })
 
+  /**
+   * `updateLocal` is what the sync engine writes through (T074): read and
+   * write in one step, so a Deck saved while the round-trip was in flight is
+   * merged in rather than replaced. The voice rides along exactly as it does
+   * on `readLocal`/`writeLocal` — joined on by name going in, adopted coming
+   * out.
+   */
+  it('hands the update the envelope with the pinned voice joined on', async () => {
+    const settingsStore = createIndexedDbSettingsStore()
+    const library = createSyncedLibrary({ deckStore: createIndexedDbDeckStore(), settingsStore })
+    await settingsStore.setVoice(VOICE)
+
+    let seen: Library | undefined
+    await library.updateLocal((stored) => {
+      seen = stored
+      return stored
+    })
+
+    expect(seen!.voice).toEqual(VOICE)
+  })
+
+  it('pins the voice the update produced on a device that had none', async () => {
+    const settingsStore = createIndexedDbSettingsStore()
+    const library = createSyncedLibrary({ deckStore: createIndexedDbDeckStore(), settingsStore })
+
+    const result = await library.updateLocal((stored) => ({ ...stored, voice: VOICE }))
+
+    expect((await settingsStore.load()).voice).toEqual(VOICE)
+    expect(result.changed).toBe(true)
+  })
+
+  it('reports nothing changed when the update returned the same library and the same voice', async () => {
+    const settingsStore = createIndexedDbSettingsStore()
+    const deckStore = createIndexedDbDeckStore()
+    const library = createSyncedLibrary({ deckStore, settingsStore })
+    await settingsStore.setVoice(VOICE)
+    await deckStore.save({ id: 'd1', name: 'Home', phrases: [] })
+
+    const result = await library.updateLocal((stored) => stored)
+
+    expect(result.changed).toBe(false)
+  })
+
   it('still replaces the whole local library, voice or no voice', async () => {
     const deckStore = createIndexedDbDeckStore()
     const library = createSyncedLibrary({ deckStore, settingsStore: createIndexedDbSettingsStore() })
