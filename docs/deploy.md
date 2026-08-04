@@ -95,6 +95,47 @@ do not cover.
   the Render logs (Logs tab), check for `SELF_SIGNED_CERT_IN_CHAIN` or a
   generic SSL failure specifically — see "Postgres SSL" below.
 
+## Shipping a change after the one-time setup
+
+Everything above runs once. This is what happens every other time: a fix
+lands on `main` and needs to reach her phone.
+
+**How it reaches her.** `render.yaml` declares `autoDeploy: true` — a push
+to `main` on GitHub triggers a Render deploy with no manual step. Read the
+comment above that line in `render.yaml`; it is the source of truth for the
+one caveat that matters: **Render only applies a Blueprint change (this one
+included) on the next Blueprint sync** (dashboard → Blueprint → Sync) **and
+does not retro-apply it to a service that already exists.** If the service
+was created before `autoDeploy: true` was added, a Blueprint sync — once —
+is what turns auto-deploy on for it. After that sync, every push to `main`
+deploys on its own; no further syncs are needed for ordinary changes.
+
+**How to confirm it deployed.** Open the app on the phone → Settings →
+Diagnostics. The `Build:` line shows the deployed commit's short sha and a
+build timestamp. Compare the sha against `main`'s latest commit
+(`git log -1 --format=%h`). If it matches, the fix is live. If the
+`Build:` line reads `unknown`, that means either the build predates
+`e6c561d` (every deploy before that commit stamped `unknown` — see
+`build-sha.ts`) or `RENDER_GIT_COMMIT` was not injected into this build; a
+current deploy should show a real sha, not `unknown`.
+
+Once the new build is live, `docs/pwa.md` covers what happens on her open
+tab (`autoUpdate` takes over it without a reload — see "Update strategy"
+there); nothing further to do on the phone side.
+
+**What to do when it did not deploy.** Two things to check, in order:
+
+1. **Deploy log.** Render dashboard → the `phrase-drill` service → **Logs**
+   (or **Events**) tab shows whether a deploy triggered at all for the push,
+   and if it did, whether the build or the health check
+   (`healthCheckPath: /api/health`) failed.
+2. **Manual deploy.** If no deploy triggered, the dashboard has a manual
+   trigger — documented by Render as **Manual Deploy** on the service page,
+   letting you pick a branch/commit to deploy directly. This document
+   hasn't been used to click through that flow, so treat the exact button
+   placement as the documented path, not a confirmed one — but the deploy
+   log tab is where to confirm either way whether it worked.
+
 ## Postgres SSL — why this shouldn't come up, and what to check if it does
 
 Render's managed Postgres has two hostnames for the same database: an
