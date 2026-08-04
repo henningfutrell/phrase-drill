@@ -33,6 +33,15 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
+    # A fix that is merged but not deployed does not exist for her. This was
+    # never declared, so the service sat on whatever the dashboard defaulted
+    # to and a push to main reached GitHub and stopped there — found on
+    # 2026-08-04, when the drill-unlock fix (T001) was pushed and did not
+    # arrive. Declared here so the answer lives in the repo rather than in a
+    # dashboard nobody reads. NOTE: Render only picks this up when the
+    # Blueprint is re-synced (dashboard → Blueprint → Sync); changing this
+    # file alone does not retro-apply it to an already-created service.
+    autoDeploy: true
     envVars:
       # DATABASE_URL is wired from the database resource above, never a
       # literal. `fromDatabase`/`connectionString` resolves to the
