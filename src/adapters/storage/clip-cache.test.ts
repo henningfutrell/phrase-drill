@@ -341,9 +341,10 @@ describe('createIndexedDbClipCache', () => {
       const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
 
       expect(await cache.usage()).toEqual({ bytes: 6144, clipCount: 2, maxBytes: 1_000_000 })
-      // Written down at upgrade time, not recomputed on every launch — the
-      // whole point of a separate index is that reading it never touches the
-      // audio bytes.
+      // Written down once, not recomputed on every launch — the whole point
+      // of a separate index is that reading it never touches the audio bytes.
+      // Since T072 that writing happens on the first index build after the
+      // upgrade, never inside the upgrade itself.
       const upgraded = await openDB(DB_NAME, 6)
       expect((await upgraded.getAll(CLIP_META_STORE)).length).toBe(2)
     })

@@ -6,5 +6,7 @@ export { backupFilename, normalizeLibrary, parseLibraryFile, withVoice } from '.
 export type { ParseLibraryResult } from './library'
 export { createIndexedDbClipCache, computeClipHash, DEFAULT_CLIP_CACHE_MAX_BYTES } from './clip-cache'
 export type { Clip, ClipKey, ClipCache, BoundedClipCache, ClipCacheUsage } from './clip-cache'
+export { databaseTrouble } from './database'
+export type { DatabaseTrouble, DatabaseTroubleSource } from './database'
 export { createIndexedDbSyncBaselineStore } from './sync-baseline-store'
 export type { SyncBaselineStore } from './sync-baseline-store'

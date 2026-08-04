@@ -18,13 +18,25 @@
  * Dismissible on purpose. An alert she cannot clear is one she learns to look
  * past, and this one has to survive being seen twice.
  */
-export function WriteFailureNotice({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+export function WriteFailureNotice({
+  message,
+  detail = 'This phone may be out of space. What is on the screen now is what is really saved here.',
+  onDismiss,
+}: {
+  message: string
+  /**
+   * The standing explanation under the message. It defaults to the one every
+   * refused write shares, and is given explicitly only where that sentence
+   * would be false — a database that will not open is not a full disk, and
+   * telling her to clear space would send her to fix the wrong thing (T072).
+   */
+  detail?: string
+  onDismiss: () => void
+}) {
   return (
     <div className="write-failure" role="alert" data-testid="write-failure">
       <p className="write-failure-message">{message}</p>
-      <p className="write-failure-detail">
-        This phone may be out of space. What is on the screen now is what is really saved here.
-      </p>
+      <p className="write-failure-detail">{detail}</p>
       <button
         type="button"
         className="btn-secondary"

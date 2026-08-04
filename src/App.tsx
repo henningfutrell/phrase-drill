@@ -26,7 +26,14 @@ import {
   setMixDecks,
   updatePhrase,
 } from './domain'
-import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore } from './adapters/storage'
+import type {
+  BoundedClipCache,
+  ClipCacheUsage,
+  DatabaseTrouble,
+  DatabaseTroubleSource,
+  Settings,
+  SettingsStore,
+} from './adapters/storage'
 import { backupFilename, parseLibraryFile } from './adapters/storage'
 import { backupAge, lastBackupAt } from './domain'
 import { readInstallStateFromBrowser } from './adapters/device/install-state'
@@ -132,6 +139,7 @@ function App({
   errorLog,
   syncEngine,
   translator,
+  databaseTrouble,
 }: {
   deckStore: DeckStore
   mixStore: MixStore
@@ -143,6 +151,7 @@ function App({
   errorLog: ErrorLog
   syncEngine: SyncEngine
   translator: Translator
+  databaseTrouble: DatabaseTroubleSource
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [mixes, setMixes] = useState<Mix[]>([])
@@ -165,7 +174,7 @@ function App({
   // A write to this phone's storage was refused, and she has not read it yet
   // (T069). Holds the sentence naming what did not save; the standing
   // explanation is the notice's own.
-  const [writeFailure, setWriteFailure] = useState<string | undefined>(undefined)
+  const [writeFailure, setWriteFailure] = useState<{ message: string; detail?: string } | undefined>(undefined)
 
   // One Wake Lock port for the app's lifetime (T006 carried obligation:
   // hold the screen on for a Drill's duration). Stateless, so a single
@@ -241,6 +250,33 @@ function App({
     }
   }, [revision, deckStore, mixStore])
 
+  /**
+   * The database itself refusing to be usable, said out loud (T072).
+   *
+   * `blocked` is another tab or a stale service-worker client holding the old
+   * version open: the upgrade cannot start, nothing times out, and every
+   * screen waits forever on a library that is perfectly fine. `terminated` is
+   * the browser closing the connection underneath the app. Both were silent,
+   * which is the same failure the T069 notice exists to end — so they use it,
+   * with their own detail line, because "this phone may be out of space" is
+   * the wrong thing to send her to fix.
+   */
+  useEffect(() => {
+    return databaseTrouble.subscribe((trouble: DatabaseTrouble) => {
+      setWriteFailure(
+        trouble === 'blocked'
+          ? {
+              message: 'Your phrases could not be opened, because this app is still open in another window.',
+              detail: 'Close the other window, then open this one again. Nothing has been lost.',
+            }
+          : {
+              message: 'This phone closed the app’s connection to your phrases.',
+              detail: 'Close the app and open it again. Anything you change before then may not be saved.',
+            },
+      )
+    })
+  }, [databaseTrouble])
+
   useEffect(() => {
     let cancelled = false
     void settingsStore.load().then((loaded) => {
@@ -310,7 +346,7 @@ function App({
     void write.then(
       () => syncToServer(),
       () => {
-        setWriteFailure(failureMessage)
+        setWriteFailure({ message: failureMessage })
         reloadLibraryFromStores()
       },
     )
@@ -450,7 +486,7 @@ function App({
       // The file did leave the app; only the note that it did was refused. Say
       // so plainly rather than let the Backup age quietly go back to claiming
       // she has not exported in a month.
-      setWriteFailure('That backup was made, but this phone could not record that it was.')
+      setWriteFailure({ message: 'That backup was made, but this phone could not record that it was.' })
       reloadSettings()
     })
   }
@@ -467,8 +503,17 @@ function App({
     const library = pendingRestore
     if (!library) return
     setPendingRestore(undefined)
-    void syncedLibrary
-      .writeLocal(library)
+    void syncEngine
+      // BEFORE the library is written, never after (T072). A restore used to
+      // undo itself: the local Tombstones are cleared by `importAll`, the
+      // server keeps its own, and the next round-trip pulled them back and
+      // re-deleted the Deck she had just restored. `libraryRestored` records
+      // that this device now agrees with the server about nothing, which is
+      // what makes every restored record outrank a stale deletion. Ordered
+      // first so that a failure to record it stops the restore: a restore
+      // applied on top of an intact baseline is the defect happening.
+      .libraryRestored()
+      .then(() => syncedLibrary.writeLocal(library))
       .then(() => Promise.all([deckStore.loadAll(), mixStore.loadAll(), settingsStore.load()]))
       .then(([loadedDecks, loadedMixes, loadedSettings]) => {
         // A restore replaces the whole library, saved Mixes included — read
@@ -487,7 +532,7 @@ function App({
         // `importAll` is one transaction over all three stores, so a refusal
         // rolls the whole restore back — nothing was replaced, and the Decks
         // she had are still the Decks she has.
-        setWriteFailure('That backup could not be restored on this phone.')
+        setWriteFailure({ message: 'That backup could not be restored on this phone.' })
         reloadLibraryFromStores()
       })
   }
@@ -527,7 +572,7 @@ function App({
       .catch(() => {
         // A voice the screen shows as pinned but the store never took is a
         // Drill that will not start, with nothing to explain why (T069).
-        setWriteFailure('The voice you chose could not be saved on this phone.')
+        setWriteFailure({ message: 'The voice you chose could not be saved on this phone.' })
         reloadSettings()
       })
   }
@@ -623,7 +668,11 @@ function App({
   return (
     <>
       {writeFailure !== undefined && (
-        <WriteFailureNotice message={writeFailure} onDismiss={() => setWriteFailure(undefined)} />
+        <WriteFailureNotice
+          message={writeFailure.message}
+          detail={writeFailure.detail}
+          onDismiss={() => setWriteFailure(undefined)}
+        />
       )}
       {renderScreen()}
     </>

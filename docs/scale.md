@@ -257,6 +257,45 @@ The modelled total is slightly above §1's 889,010,240 because this file uses
 its own phrase generator; the formula (`estimatePauseDuration` × 16 bytes/ms)
 is the same one.
 
+## 7. The size index is filled outside the upgrade (T072)
+
+The `clipMeta` index §6 depends on has to exist for every Clip already
+cached, or an upgraded phone reads as having no audio and re-fetches all of
+it. T036 filled it inside the v5 → v6 `versionchange` transaction, with one
+`getAll` over the whole `clips` store — the §1 number, up to 890 MB, held in
+memory at once, on the launch that upgrades.
+
+That is an out-of-memory kill on a phone, and worse than a one-off: an upgrade
+that dies never completes, so the next launch runs it again. The failure mode
+is a **crashloop with her library behind it** — permanently unreachable rather
+than transiently broken, which is the one outcome this app does not accept.
+
+So the upgrade now creates the store **empty**, and `clip-cache.ts` fills it
+on its first index build, outside any versionchange transaction:
+
+- **Bounded memory** — `CLIP_META_BACKFILL_CHUNK` (25) Clips read at a time,
+  ~2 MB in hand, only the byte count kept.
+- **Resumable** — driven off the difference between the two stores, so an
+  interrupted run costs only the rows it did not reach.
+- **Free once done** — a `count` answers "is anything missing?" without
+  reading a key, which is what every launch after the upgrade pays.
+- **Not fatal** — a failure here costs a re-fetch of derived audio. Nothing in
+  it can reach a Deck, a Phrase, a Mix or a Tombstone.
+
+Rejected: a cursor inside the upgrade (bounds the memory, still reads every
+byte on the launch that upgrades, and inherits the auto-commit-on-yield hazard
+of a versionchange transaction), and dropping the `clips` store outright at
+upgrade (instant and loses no user data, but leaves her with no offline audio
+at all until every Clip is re-fetched — and offline drill is the app).
+
+**Blocked and terminated opens (T072).** `openDatabase` now handles both.
+`blocked` — another tab or a stale service-worker client holding the old
+version open — means the open promise never settles and never times out: the
+app hangs on a library that is perfectly fine, saying nothing. Both conditions
+are reported to the composition root and surface in the T069 write-failure
+notice, with their own detail line, because "this phone may be out of space"
+would send her to fix the wrong thing.
+
 ## Assumptions and gaps, named plainly
 
 - **Modelled, not measured:** Clip duration/bytes (§1), per-call ElevenLabs
