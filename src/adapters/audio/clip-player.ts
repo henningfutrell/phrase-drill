@@ -1,7 +1,6 @@
-import type { Language } from '../../domain'
+import type { Language, Voice } from '../../domain'
 import type { SpeechPort } from '../../domain/ports'
-import { computeClipHash, type ClipCache } from '../storage/clip-cache'
-import type { Voice } from '../storage/settings-store'
+import { findCachedClipHash, type ClipCache } from '../storage/clip-cache'
 
 /**
  * The slice of `HTMLAudioElement` this adapter needs — injectable so it is
@@ -78,8 +77,14 @@ export interface ClipPlayerDeps {
   /** The one shared `<audio>` element, unlocked by `unlock()` and reused for every Clip. */
   readonly element: AudioElementLike
   readonly clipCache: ClipCache
-  /** The pinned voice — part of the content-address, alongside lang+text (T019 §5.2). */
-  readonly voice: Voice
+  /**
+   * Every voice a cached Clip could be in, in preference order — the pinned
+   * voice first (`knownVoices`, T067). Not one voice: a Phrase that has audio
+   * must never go silent because a preference changed, so playback takes the
+   * pinned voice where a Clip exists in it and otherwise plays the first
+   * offered voice that has one.
+   */
+  readonly voices: readonly Voice[]
   /** ms added to `clip.durationMs` before the `ended`-race times out. Default 750. */
   readonly slackMs?: number
   /**
@@ -95,7 +100,8 @@ export interface ClipPlayerDeps {
 /**
  * `SpeechPort` implemented by playing cached Clips (`ClipCache`) through one
  * reused `<audio>`-like element, per T019 §4's adapter obligations. Does not
- * call the synth client — it plays what generation already produced.
+ * call the synth client — it plays what generation already produced, in
+ * whichever offered voice it was produced in (T067).
  *
  * Missing-Clip decision: `speak()` resolves (a silent no-op) rather than
  * rejecting. The domain's step-runner runs the adapter promise's `.finally`
@@ -105,7 +111,7 @@ export interface ClipPlayerDeps {
  * side channel a caller can watch instead.
  */
 export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
-  const { element, clipCache, voice, onMissingClip } = deps
+  const { element, clipCache, voices, onMissingClip } = deps
   const slackMs = deps.slackMs ?? DEFAULT_SLACK_MS
   let unlockStatus: UnlockStatus = 'pending'
   let lastUnlockFailure: UnlockFailure | undefined
@@ -145,14 +151,12 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
     },
 
     async speak(text: string, lang: Language): Promise<void> {
-      const hash = await computeClipHash({
-        provider: voice.provider,
-        modelId: voice.modelId,
-        voiceId: voice.voiceId,
-        lang,
-        text,
-      })
-      const clip = await clipCache.get(hash)
+      // Resolved per side, not per Phrase: each of the French and the
+      // English plays in the best voice IT has audio in. The two can differ
+      // in the rare half-generated case, and audio in two voices is a better
+      // answer than silence in one.
+      const hash = await findCachedClipHash((h) => clipCache.has(h), voices, lang, text)
+      const clip = hash ? await clipCache.get(hash) : undefined
       if (!clip) {
         onMissingClip?.({ text, lang })
         return

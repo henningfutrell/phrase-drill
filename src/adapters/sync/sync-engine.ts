@@ -318,6 +318,10 @@ function fingerprint(library: Library): string {
     decks: [...library.decks].sort(byId),
     mixes: [...(library.mixes ?? [])].sort(byId),
     tombstones: [...(library.tombstones ?? [])].sort((x, y) => (`${x.kind}:${x.id}` < `${y.kind}:${y.id}` ? -1 : 1)),
+    // The pinned voice too (T067): a merge whose only news is the voice the
+    // other device pinned is still news, and leaving it out of this
+    // comparison would drop it instead of writing it locally.
+    voice: library.voice ?? null,
   })
 }
 

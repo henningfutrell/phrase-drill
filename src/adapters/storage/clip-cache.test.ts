@@ -98,7 +98,7 @@ describe('createIndexedDbClipCache', () => {
       const frHash2 = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Salut' })
       await cache.put({ hash: frHash2, bytes: bytesOf('fr2'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const ready = await cache.readyPhraseIds(phrases, VOICE)
+      const ready = await cache.readyPhraseIds(phrases, [VOICE])
 
       expect(ready).toEqual(new Set(['p1']))
     })
@@ -111,27 +111,74 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
       const edited = [{ id: 'p1', french: 'New text', english: 'Hello' }]
-      const ready = await cache.readyPhraseIds(edited, VOICE)
+      const ready = await cache.readyPhraseIds(edited, [VOICE])
 
       expect(ready).toEqual(new Set())
     })
 
-    it('excludes every phrase when the pinned voice changes, invalidating the whole cache', async () => {
+    /**
+     * T067. A Clip's voice is a property of that Clip, not of the app: a
+     * Phrase whose audio exists in ANY of the voices offered is ready, and
+     * re-pinning cannot make a library unready. The old behaviour — every
+     * Phrase unready the moment the pinned voice changed — is what queued
+     * a whole library for regeneration.
+     */
+    it('keeps a phrase ready when its clips exist in a voice other than the pinned one', async () => {
       const cache = createIndexedDbClipCache()
       const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Bonjour' })
       const enHash = await computeClipHash({ ...VOICE, lang: 'en-US' as const, text: 'Hello' })
       await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const otherVoice = { ...VOICE, voiceId: 'voice-2' }
-      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], otherVoice)
+      const newlyPinned = { ...VOICE, voiceId: 'voice-2' }
+      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [
+        newlyPinned,
+        VOICE,
+      ])
+
+      expect(ready).toEqual(new Set(['p1']))
+    })
+
+    it('excludes a phrase whose clips are in no offered voice at all', async () => {
+      const cache = createIndexedDbClipCache()
+      const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Bonjour' })
+      const enHash = await computeClipHash({ ...VOICE, lang: 'en-US' as const, text: 'Hello' })
+      await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+      await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+
+      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [
+        { ...VOICE, voiceId: 'voice-2' },
+      ])
 
       expect(ready).toEqual(new Set())
     })
 
+    it('counts a phrase ready when one side is cached in one voice and the other side in another', async () => {
+      const cache = createIndexedDbClipCache()
+      const other = { ...VOICE, voiceId: 'voice-2' }
+      const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Bonjour' })
+      const enHash = await computeClipHash({ ...other, lang: 'en-US' as const, text: 'Hello' })
+      await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+      await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+
+      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [VOICE, other])
+
+      expect(ready).toEqual(new Set(['p1']))
+    })
+
+    it('asks about no voice it was not given — an empty voice list makes nothing ready', async () => {
+      const cache = createIndexedDbClipCache()
+      const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Bonjour' })
+      const enHash = await computeClipHash({ ...VOICE, lang: 'en-US' as const, text: 'Hello' })
+      await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+      await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+
+      expect(await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [])).toEqual(new Set())
+    })
+
     it('returns an empty set for an empty phrase list', async () => {
       const cache = createIndexedDbClipCache()
-      expect(await cache.readyPhraseIds([], VOICE)).toEqual(new Set())
+      expect(await cache.readyPhraseIds([], [VOICE])).toEqual(new Set())
     })
   })
 
@@ -270,7 +317,7 @@ describe('createIndexedDbClipCache', () => {
         await cache.put(sizedClip(await computeClipHash({ ...VOICE, lang: 'en-US', text: phrase.english }), 500))
       }
 
-      expect(await cache.readyPhraseIds(phrases, VOICE)).toEqual(new Set(['p2']))
+      expect(await cache.readyPhraseIds(phrases, [VOICE])).toEqual(new Set(['p2']))
     })
 
     it('counts clips cached before the bound existed, instead of reporting an empty cache', async () => {

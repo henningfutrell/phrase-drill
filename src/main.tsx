@@ -14,6 +14,7 @@ import { createServerScanReader } from './adapters/vision/server-scan-reader'
 import { createServerTranslator } from './adapters/translation/server-translator'
 import { createLibrarySyncClient } from './adapters/sync/library-sync-client'
 import { createSyncEngine } from './adapters/sync/sync-engine'
+import { createSyncedLibrary } from './adapters/sync/synced-library'
 import { createSessionAuth, AuthRequiredError } from './adapters/auth/session-auth'
 import { LoginScreen } from './ui/LoginScreen'
 import { createIndexedDbErrorLog, installErrorCapture, withAdapterErrorLogging } from './adapters/diagnostics'
@@ -103,8 +104,10 @@ function showApp(): void {
   // Built once here, at the composition root, and handed to App as a port.
   const syncEngine = createSyncEngine({
     client: createLibrarySyncClient({ getAccessToken, fetchImpl: auth.authFetch }),
-    readLocal: () => deckStore.exportAll(),
-    writeLocal: (library) => deckStore.importAll(library),
+    // The envelope is the deck store's stores plus the pinned voice, joined
+    // on by name (T067) — so a new phone restores the preference, and
+    // nothing else in `settings` leaves this device.
+    ...createSyncedLibrary({ deckStore, settingsStore }),
     baseline: syncBaselineStore,
     readLastSyncAt: () => settingsStore.load().then((settings) => settings.lastSyncAt),
     recordSync: (timestamp) => settingsStore.recordSync(timestamp),

@@ -609,3 +609,41 @@ describe('mergeLibraries — what the baseline says changed (T034)', () => {
     expect(merged.mixes).toEqual([mix({ id: 'm1', name: 'Local', updatedAt: 10 })])
   })
 })
+
+/**
+ * T067. The pinned voice rides in the envelope so a new phone restores it.
+ * It is one value, not a collection, and — unlike a Deck — it can no longer
+ * invalidate anything: since T067 a Clip is playable in the voice it was
+ * made in, so the pinned voice decides only what the *next* new Phrase is
+ * generated in. That is what makes plain last-writer-wins right here, and
+ * why no `pinnedAt` timestamp was invented to arbitrate it.
+ */
+describe('mergeLibraries — the pinned voice (T067)', () => {
+  const LOCAL_VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'local' }
+  const REMOTE_VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'remote' }
+
+  it('keeps this device\'s pinned voice when both devices have one — last writer wins, and the writer is whoever is syncing', () => {
+    const merged = mergeLibraries(
+      { ...library({}), voice: LOCAL_VOICE },
+      { ...library({}), voice: REMOTE_VOICE },
+    )
+
+    expect(merged.voice).toEqual(LOCAL_VOICE)
+  })
+
+  it('adopts the other device\'s pinned voice when this one has none — the new-phone case', () => {
+    const merged = mergeLibraries(library({}), { ...library({}), voice: REMOTE_VOICE })
+
+    expect(merged.voice).toEqual(REMOTE_VOICE)
+  })
+
+  it('leaves a locally pinned voice alone when the other side is an older envelope with no voice field at all', () => {
+    const merged = mergeLibraries({ ...library({}), voice: LOCAL_VOICE }, library({}))
+
+    expect(merged.voice).toEqual(LOCAL_VOICE)
+  })
+
+  it('carries no voice when neither side has one', () => {
+    expect(mergeLibraries(library({}), library({})).voice).toBeUndefined()
+  })
+})

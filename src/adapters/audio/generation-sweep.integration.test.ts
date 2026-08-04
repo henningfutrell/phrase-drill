@@ -23,7 +23,7 @@ import { createRateLimiter } from '../../../server/rate-limiter.js'
 import { createGenerationQueue, type GenerationStatus } from './generation-queue'
 import { createServerSynthClient } from './server-synth-client'
 import type { Clip, ClipCache } from '../storage/clip-cache'
-import type { Voice } from '../storage/settings-store'
+import type { Voice } from '../../domain'
 
 const VOICE: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 const PHRASE_COUNT = 1000
