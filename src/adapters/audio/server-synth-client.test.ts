@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createServerSynthClient } from './server-synth-client'
 import type { SynthError, SynthVoice } from './server-synth-client'
 
-const VOICE: SynthVoice = { modelId: 'eleven_multilingual_v2', voiceId: 'voice-123' }
+const VOICE: SynthVoice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-123' }
 const ACCESS_TOKEN = 'test-access-token-d'
 
 function mp3Response(status: number, byteLength: number, durationMs?: number): Response {
@@ -46,7 +46,12 @@ describe('createServerSynthClient', () => {
     expect(result.durationMs).toBe(1000)
   })
 
-  it('posts to the same-origin /api/tts endpoint with text/voiceId/modelId', async () => {
+  // Every field of the content address goes on the wire (T063), including
+  // `provider` and `lang`, which the ElevenLabs call itself has no use for.
+  // The server derives the Clip key from exactly these five fields; sending
+  // four of them would leave the server unable to name the clip the device
+  // is asking for.
+  it('posts to the same-origin /api/tts endpoint with every field of the content address', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(mp3Response(200, 100, 10))
     const { client } = makeClient({ fetchImpl })
 
@@ -54,8 +59,24 @@ describe('createServerSynthClient', () => {
 
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/tts')
-    const body = JSON.parse(init.body as string) as { text: string; voiceId: string; modelId: string }
-    expect(body).toEqual({ text: 'Bonjour', voiceId: 'voice-123', modelId: 'eleven_multilingual_v2' })
+    const body = JSON.parse(init.body as string) as Record<string, string>
+    expect(body).toEqual({
+      text: 'Bonjour',
+      voiceId: 'voice-123',
+      modelId: 'eleven_multilingual_v2',
+      provider: 'elevenlabs',
+      lang: 'fr-FR',
+    })
+  })
+
+  it('sends the language it was asked for, not a fixed one', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(mp3Response(200, 100, 10))
+    const { client } = makeClient({ fetchImpl })
+
+    await client.synthesize('Hello', 'en-US', VOICE)
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect((JSON.parse(init.body as string) as { lang: string }).lang).toBe('en-US')
   })
 
   it('sends the library key as a bearer token, never an ElevenLabs key of any kind', async () => {
