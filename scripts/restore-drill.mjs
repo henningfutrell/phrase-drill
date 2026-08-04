@@ -15,13 +15,17 @@
  *
  * Usage:
  *   node scripts/restore-drill.mjs <backup-file.sql.gz> \
- *     [--library-key=<key>] [--expect-sha256=<hex>] [--keep-scratch]
+ *     [--library-key=<key>] [--expect-sha256=<hex>] \
+ *     [--expect-clips-sha256=<hex>] [--keep-scratch]
  *
- * `--library-key`/`--expect-sha256` are optional: without them the drill
- * only proves the schema restores (users/sessions/libraries tables exist).
- * With them, it also proves one library's `data` round-trips byte-identical
- * — compute the hash before backing up (`sha256sum` on the row, or ask
- * `backup.mjs`'s caller to capture it) and pass it in here after restore.
+ * Every flag is optional: without them the drill proves the schema restores
+ * (every table in `REQUIRED_TABLES` exists) and that the Clip store's audio
+ * came back as binary, and reports the library/clip digests it found.
+ * With `--library-key`/`--expect-sha256` it also proves one library's `data`
+ * round-trips byte-identical; with `--expect-clips-sha256` it proves the
+ * whole Clip store does. Capture both hashes before backing up (`sha256sum`
+ * on the library row; `CLIPS_DIGEST_SQL` below for the clips) and pass them
+ * in here after restore — see docs/backup.md.
  *
  * Exits 0 only if every check passes; exits 1 and prints which check failed
  * otherwise. Drops the scratch database on the way out, pass or fail —
@@ -51,7 +55,33 @@ export function scratchDatabaseName() {
   return `${SCRATCH_DATABASE_PREFIX}${randomBytes(8).toString('hex')}`
 }
 
-const VALUED_FLAGS = new Set(['--library-key', '--expect-sha256'])
+/**
+ * Every table the app's own `init()` calls create (`server/db.js`):
+ * `createAuthStore` → `users`/`sessions`, `createLibraryStore` →
+ * `libraries`, `createClipStore` → `clips` (T063). A backup missing any one
+ * of them is a backup that loses something, so the drill fails rather than
+ * reporting a clean restore of a partial database.
+ */
+export const REQUIRED_TABLES = ['users', 'sessions', 'libraries', 'clips']
+
+/**
+ * One digest over the whole Clip store, computed *inside Postgres* so the
+ * identical statement can be run against the live database before a backup
+ * and against the scratch database after a restore — the pre/post pair the
+ * `--expect-clips-sha256` check compares. `encode(bytes,'hex')` is what
+ * makes it a statement about the audio's actual bytes rather than about row
+ * count or `length()`, and the explicit `ORDER BY` makes it reproducible
+ * (`string_agg` over an unordered scan is not). `count` rides along so a
+ * digest can never be confused with an empty store.
+ */
+export const CLIPS_DIGEST_SQL = `
+  SELECT
+    encode(sha256(coalesce(string_agg(hash || ':' || encode(bytes, 'hex') || ':' || mime, E'\\n' ORDER BY hash), '')::bytea), 'hex') AS digest,
+    count(*) AS count
+  FROM clips
+`
+
+const VALUED_FLAGS = new Set(['--library-key', '--expect-sha256', '--expect-clips-sha256'])
 const BOOLEAN_FLAGS = new Set(['--keep-scratch'])
 
 export function parseRestoreArgs(argv) {
@@ -78,6 +108,7 @@ export function parseRestoreArgs(argv) {
     backupFile: positional[0],
     libraryKey: flags['--library-key'] ?? null,
     expectSha256: flags['--expect-sha256'] ?? null,
+    expectClipsSha256: flags['--expect-clips-sha256'] ?? null,
     keepScratch: flags['--keep-scratch'] ?? false,
   }
 }
@@ -107,16 +138,20 @@ async function restoreInto({ databaseUrl, scratchName, backupFile, password }) {
   })
 }
 
-async function verify({ pool, libraryKey, expectSha256 }) {
+export async function verify({ pool, libraryKey, expectSha256, expectClipsSha256 }) {
   const checks = []
 
   const { rows: tableRows } = await pool.query(
     `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ANY($1)`,
-    [['users', 'sessions', 'libraries']],
+    [REQUIRED_TABLES],
   )
   const found = new Set(tableRows.map((r) => r.table_name))
-  for (const table of ['users', 'sessions', 'libraries']) {
+  for (const table of REQUIRED_TABLES) {
     checks.push({ name: `table "${table}" exists`, pass: found.has(table) })
+  }
+
+  if (found.has('clips')) {
+    checks.push(...(await verifyClips({ pool, expectClipsSha256 })))
   }
 
   if (libraryKey) {
@@ -136,8 +171,48 @@ async function verify({ pool, libraryKey, expectSha256 }) {
   return checks
 }
 
+/**
+ * The Clip store's own checks (T063's `clips` table). Two distinct
+ * questions, because they fail differently:
+ *
+ * 1. **Did the audio come back as audio?** `pg` returns a `bytea` column as
+ *    a Buffer. A string means the column round-tripped through a text path
+ *    somewhere between `pg_dump` and here, and the bytes are no longer the
+ *    bytes — a corruption a row count or a `length()` check cannot see.
+ * 2. **Is it the same audio?** `CLIPS_DIGEST_SQL` over every row, compared
+ *    against the same statement run before the backup. Without
+ *    `--expect-clips-sha256` the digest is reported rather than compared —
+ *    the same as the library's own hash check, and for the same reason: a
+ *    number an operator can capture now and compare later beats silence.
+ *
+ * A database with no clips yet is not a failure — a fresh install has none,
+ * and `count` is printed alongside the digest so an unexpectedly empty store
+ * is visible rather than merely digested.
+ */
+async function verifyClips({ pool, expectClipsSha256 }) {
+  const checks = []
+
+  const { rows } = await pool.query('SELECT hash, bytes FROM clips')
+  const nonBinary = rows.filter((r) => !Buffer.isBuffer(r.bytes))
+  checks.push({
+    name: 'clip audio round-trips as binary (bytea, not text)',
+    pass: nonBinary.length === 0,
+    detail: nonBinary.length === 0 ? `${rows.length} clip(s)` : `${nonBinary.length} clip(s) came back as text, e.g. ${nonBinary[0].hash}`,
+  })
+
+  const { rows: digestRows } = await pool.query(CLIPS_DIGEST_SQL)
+  const { digest, count } = digestRows[0]
+  if (expectClipsSha256) {
+    checks.push({ name: 'clip store is byte-identical to the pre-backup clip digest', pass: digest === expectClipsSha256, detail: `${digest} over ${count} clip(s)` })
+  } else {
+    checks.push({ name: 'clip digest (no --expect-clips-sha256 given to compare against)', pass: true, detail: `${digest} over ${count} clip(s)` })
+  }
+
+  return checks
+}
+
 export async function main(argv = process.argv.slice(2)) {
-  const { backupFile, libraryKey, expectSha256, keepScratch } = parseRestoreArgs(argv)
+  const { backupFile, libraryKey, expectSha256, expectClipsSha256, keepScratch } = parseRestoreArgs(argv)
 
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) throw new Error('DATABASE_URL is required (host/port/user/password of the Postgres server to restore into)')
@@ -174,7 +249,7 @@ export async function main(argv = process.argv.slice(2)) {
     await restoreInto({ databaseUrl, scratchName, backupFile, password })
 
     pool = createPool(uriWithDatabase(databaseUrl, scratchName))
-    const checks = await verify({ pool, libraryKey, expectSha256 })
+    const checks = await verify({ pool, libraryKey, expectSha256, expectClipsSha256 })
 
     for (const check of checks) {
       const line = `${check.pass ? 'PASS' : 'FAIL'} — ${check.name}${check.detail ? ` (${check.detail})` : ''}`
