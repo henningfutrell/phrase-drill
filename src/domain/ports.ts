@@ -97,3 +97,47 @@ export interface ScanReader {
    */
   read(image: Blob, signal?: AbortSignal): Promise<DraftPhrase[]>
 }
+
+/** Which side of a Phrase is being translated into which (T057). */
+export type TranslateDirection = 'en-to-fr' | 'fr-to-en'
+
+/**
+ * A machine-proposed rendering of the other side of a Phrase, before review
+ * (T057). Optionally labelled with the register it represents (tu/vous,
+ * formal/casual) only when the phrase actually supports more than one
+ * natural rendering — a phrase with one natural rendering carries no label,
+ * and that is a correct, complete result, not a degraded one. Exists only
+ * until reviewed; becomes a Phrase, paired with the text already known, only
+ * once explicitly accepted into a chosen Deck.
+ */
+export interface PhraseCandidate {
+  readonly text: string
+  readonly register?: string
+}
+
+/**
+ * Why a translation could not be proposed. An empty array from `translate`
+ * is not this — it is the honest result of nothing worth proposing. This
+ * type exists only for genuine failure.
+ */
+export type TranslateError =
+  | { kind: 'unauthorized' }
+  | { kind: 'unreadable'; detail: string }
+  | { kind: 'network'; detail: string }
+
+export interface Translator {
+  /**
+   * Propose one or more Phrase Candidates translating `text` in `direction`.
+   * `deckName` biases register (tu/vous, formal/casual) without fixing it —
+   * the model interprets the name (`home`, `friends`, `work`, `formal`,
+   * `climbing`, ...); a neutral default applies when the name gives no clue.
+   * Resolves to `[]` only when genuinely nothing could be proposed; rejects
+   * with a TranslateError only when the call itself could not complete.
+   */
+  translate(
+    text: string,
+    direction: TranslateDirection,
+    deckName: string,
+    signal?: AbortSignal,
+  ): Promise<PhraseCandidate[]>
+}

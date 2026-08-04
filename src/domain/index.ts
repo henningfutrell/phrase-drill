@@ -19,6 +19,10 @@ export type {
   DraftPhrase,
   ScanError,
   ScanReader,
+  TranslateDirection,
+  PhraseCandidate,
+  TranslateError,
+  Translator,
 } from './ports'
 export { LIBRARY_FORMAT } from './ports'
 export type { Mix } from './mix'

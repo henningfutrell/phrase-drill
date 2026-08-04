@@ -64,6 +64,11 @@ export async function buildServer(env = process.env) {
   // a brute force against one username gets nowhere before the account
   // owner would notice.
   const loginLimiter = createRateLimiter({ capacity: 5, refillMs: 60_000 })
+  // T057: translate fires once per phrase, debounced, while she's adding
+  // phrases to a Deck in one sitting — more frequent than scan's "one photo
+  // at a time" but each call is far cheaper (one short string, not an
+  // image), so it sits just under tts's ceiling rather than down at scan's.
+  const translateLimiter = createRateLimiter({ capacity: 30, refillMs: 60_000 })
 
   const handleRequest = createApp({
     libraryStore,
@@ -73,6 +78,7 @@ export async function buildServer(env = process.env) {
     scanLimiter,
     libraryLimiter,
     loginLimiter,
+    translateLimiter,
     distDir,
     logger,
     sessionAuth,

@@ -10,6 +10,7 @@ import type {
   PhraseId,
   ScanReader,
   SpeechPort,
+  Translator,
 } from './domain'
 import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updatePhrase } from './domain'
 import type { ClipCache, Settings, SettingsStore } from './adapters/storage'
@@ -101,6 +102,7 @@ function App({
   scanReader,
   errorLog,
   librarySyncClient,
+  translator,
 }: {
   deckStore: DeckStore
   settingsStore: SettingsStore
@@ -110,6 +112,7 @@ function App({
   scanReader: ScanReader
   errorLog: ErrorLog
   librarySyncClient: LibrarySyncClient
+  translator: Translator
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
@@ -357,6 +360,33 @@ function App({
     setSelectedDeckId(updated.id)
   }
 
+  /**
+   * A batch of accepted Phrase Candidates from the Add sheet (T057), each
+   * already routed to a chosen Deck. Groups by destination Deck and persists
+   * once per Deck, matching `handleImportSave`'s established pattern; queues
+   * generation for every new Phrase, same as a manually-added one.
+   */
+  function handleAddCandidates(accepted: { french: string; english: string; deckId: string }[]): void {
+    const byDeck = new Map<string, typeof accepted>()
+    for (const c of accepted) {
+      const list = byDeck.get(c.deckId) ?? []
+      list.push(c)
+      byDeck.set(c.deckId, list)
+    }
+    for (const [deckId, group] of byDeck) {
+      const base = (decks ?? []).find((d) => d.id === deckId)
+      if (!base) continue
+      const newIds: PhraseId[] = []
+      const updated = group.reduce((deck, c) => {
+        const id = crypto.randomUUID()
+        newIds.push(id)
+        return addPhrase(deck, { id, french: c.french, english: c.english })
+      }, base)
+      persist(updated)
+      for (const id of newIds) queuePhraseGeneration(updated, id)
+    }
+  }
+
   if (decks === undefined) {
     return <main className="screen" />
   }
@@ -455,6 +485,9 @@ function App({
     return (
       <DeckDetailScreen
         deck={selectedDeck}
+        decks={decks}
+        translator={translator}
+        onAddPhraseCandidates={handleAddCandidates}
         onBack={() => setSelectedDeckId(undefined)}
         onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
         onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
