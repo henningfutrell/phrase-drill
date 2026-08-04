@@ -18,8 +18,12 @@
  *                          production always uses `s3://`).
  *   BACKUP_S3_ENDPOINT     required when BACKUP_DEST is `s3://` and the
  *                          bucket lives on an S3-compatible provider other
- *                          than AWS itself (e.g. Cloudflare R2). Passed to
+ *                          than AWS itself (e.g. Backblaze B2). Passed to
  *                          `aws s3` as `--endpoint-url`.
+ *   BACKUP_S3_REGION       required alongside BACKUP_S3_ENDPOINT for
+ *                          providers whose S3-compatible API needs an
+ *                          explicit region (Backblaze B2 does; plain AWS S3
+ *                          does not need this set). Passed as `--region`.
  *   BACKUP_RETENTION_DAYS  optional, default 180 — see docs/backup.md for
  *                          the reasoning.
  *   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY — read by the `aws` CLI
@@ -81,9 +85,20 @@ function s3Uri(dest, filename) {
   return `s3://${dest.bucket}/${s3Key(dest, filename)}`
 }
 
-function awsArgs(extra) {
-  const endpoint = process.env.BACKUP_S3_ENDPOINT
-  return endpoint ? [...extra, '--endpoint-url', endpoint] : extra
+/**
+ * Pure and exported so the region/endpoint forwarding is testable without a
+ * real `aws` invocation. `env` defaults to `process.env` for every real call
+ * site; tests pass a plain object instead.
+ */
+export function awsArgs(extra, env = process.env) {
+  let args = extra
+  if (env.BACKUP_S3_ENDPOINT) args = [...args, '--endpoint-url', env.BACKUP_S3_ENDPOINT]
+  // Backblaze B2's S3-compatible API (the recommended destination, see
+  // docs/backup.md — chosen because, unlike Cloudflare R2, its free tier
+  // needs no card on file) requires an explicit region alongside the
+  // endpoint; plain AWS S3 infers it and never needs this set.
+  if (env.BACKUP_S3_REGION) args = [...args, '--region', env.BACKUP_S3_REGION]
+  return args
 }
 
 function run(command, args, { env } = {}) {

@@ -15,7 +15,7 @@
  *
  * Usage:
  *   node scripts/restore-drill.mjs <backup-file.sql.gz> \
- *     [--library-key=<key>] [--expect-sha256=<hex>]
+ *     [--library-key=<key>] [--expect-sha256=<hex>] [--keep-scratch]
  *
  * `--library-key`/`--expect-sha256` are optional: without them the drill
  * only proves the schema restores (users/sessions/libraries tables exist).
@@ -24,7 +24,14 @@
  * `backup.mjs`'s caller to capture it) and pass it in here after restore.
  *
  * Exits 0 only if every check passes; exits 1 and prints which check failed
- * otherwise. Always drops the scratch database on the way out, pass or fail.
+ * otherwise. Drops the scratch database on the way out, pass or fail —
+ * unless `--keep-scratch` is given, in which case it is left in place (and
+ * its name printed) so a single library's row can actually be read out of
+ * it afterward. This is not the default: whole-database drills and the
+ * ordinary "does the backup restore cleanly" check want the scratch
+ * database gone every time, so the safe path (drop) needs no flag. See
+ * docs/backup.md ("Restore, step by step") for the single-library recovery
+ * procedure this flag exists for.
  *
  * Requires `psql` on PATH (same host as `backup.mjs`'s `pg_dump`) and the
  * `pg` npm package (already a dependency of this repo).
@@ -33,11 +40,9 @@ import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { createGunzip } from 'node:zlib'
 import { createHash, randomBytes } from 'node:crypto'
-import pg from 'pg'
 import { createLogger } from '../server/logger.js'
+import { createPool } from '../server/db.js'
 import { parsePgUrl, sanitizedUriWithDatabase, uriWithDatabase } from './pg-url.mjs'
-
-const { Pool } = pg
 
 export const SCRATCH_DATABASE_PREFIX = 'phrase_drill_restore_drill_'
 
@@ -46,7 +51,8 @@ export function scratchDatabaseName() {
   return `${SCRATCH_DATABASE_PREFIX}${randomBytes(8).toString('hex')}`
 }
 
-const KNOWN_FLAGS = new Set(['--library-key', '--expect-sha256'])
+const VALUED_FLAGS = new Set(['--library-key', '--expect-sha256'])
+const BOOLEAN_FLAGS = new Set(['--keep-scratch'])
 
 export function parseRestoreArgs(argv) {
   const positional = []
@@ -55,8 +61,14 @@ export function parseRestoreArgs(argv) {
     if (arg.startsWith('--')) {
       const eq = arg.indexOf('=')
       const key = eq === -1 ? arg : arg.slice(0, eq)
-      if (!KNOWN_FLAGS.has(key)) throw new Error(`unrecognized flag: ${key}`)
-      flags[key] = eq === -1 ? '' : arg.slice(eq + 1)
+      if (BOOLEAN_FLAGS.has(key)) {
+        if (eq !== -1) throw new Error(`${key} takes no value — pass it bare`)
+        flags[key] = true
+      } else if (VALUED_FLAGS.has(key)) {
+        flags[key] = eq === -1 ? '' : arg.slice(eq + 1)
+      } else {
+        throw new Error(`unrecognized flag: ${key}`)
+      }
     } else {
       positional.push(arg)
     }
@@ -66,6 +78,7 @@ export function parseRestoreArgs(argv) {
     backupFile: positional[0],
     libraryKey: flags['--library-key'] ?? null,
     expectSha256: flags['--expect-sha256'] ?? null,
+    keepScratch: flags['--keep-scratch'] ?? false,
   }
 }
 
@@ -124,7 +137,7 @@ async function verify({ pool, libraryKey, expectSha256 }) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const { backupFile, libraryKey, expectSha256 } = parseRestoreArgs(argv)
+  const { backupFile, libraryKey, expectSha256, keepScratch } = parseRestoreArgs(argv)
 
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) throw new Error('DATABASE_URL is required (host/port/user/password of the Postgres server to restore into)')
@@ -143,9 +156,16 @@ export async function main(argv = process.argv.slice(2)) {
   // in-process `pg` connections keep the password embedded in the URI
   // (uriWithDatabase) — never passed to a child process, so there is no
   // argv-exposure concern the way there is for pg_dump/psql below.
-  const maintenancePool = new Pool({ connectionString: uriWithDatabase(databaseUrl, 'postgres') })
+  // `createPool` (the same helper `server/db.js` uses for the app itself)
+  // picks up `ssl: { rejectUnauthorized: false }` when `databaseUrl` is
+  // Render's external hostname, and no ssl option otherwise — this script
+  // is often run off-Render (a laptop, GitHub Actions) against exactly that
+  // external hostname, so it needs the same TLS handling the app gets for
+  // free on Render's internal network.
+  const maintenancePool = createPool(uriWithDatabase(databaseUrl, 'postgres'))
 
   let pool
+  let scratchDropped = true
   try {
     logger.info('restore-drill: creating scratch database', { scratchName })
     await maintenancePool.query(`CREATE DATABASE "${scratchName}"`)
@@ -153,7 +173,7 @@ export async function main(argv = process.argv.slice(2)) {
     logger.info('restore-drill: restoring', { backupFile, scratchName })
     await restoreInto({ databaseUrl, scratchName, backupFile, password })
 
-    pool = new Pool({ connectionString: uriWithDatabase(databaseUrl, scratchName) })
+    pool = createPool(uriWithDatabase(databaseUrl, scratchName))
     const checks = await verify({ pool, libraryKey, expectSha256 })
 
     for (const check of checks) {
@@ -173,13 +193,26 @@ export async function main(argv = process.argv.slice(2)) {
     process.exitCode = 1
   } finally {
     if (pool) await pool.end().catch(() => {})
-    logger.info('restore-drill: dropping scratch database', { scratchName })
-    await maintenancePool.query(`DROP DATABASE IF EXISTS "${scratchName}" WITH (FORCE)`).catch(async () => {
-      // WITH (FORCE) needs Postgres 13+; fall back for anything older.
-      await maintenancePool.query(`DROP DATABASE IF EXISTS "${scratchName}"`).catch(() => {})
-    })
+    if (keepScratch) {
+      scratchDropped = false
+      const scratchUri = sanitizedUriWithDatabase(databaseUrl, scratchName)
+      // deliberately printed, not just logged: this is the one thing an
+      // operator needs to copy-paste next, in an incident, possibly under
+      // time pressure — see docs/backup.md "Recovering a single library".
+      console.log(`KEPT scratch database — connect with: PGPASSWORD=<same password as DATABASE_URL> psql '${scratchUri}'`)
+      console.log(`     scratch database name: ${scratchName}`)
+      console.log(`     drop it yourself when done: psql '${sanitizedUriWithDatabase(databaseUrl, 'postgres')}' -c 'DROP DATABASE "${scratchName}" WITH (FORCE)'`)
+      logger.info('restore-drill: keeping scratch database (--keep-scratch)', { scratchName })
+    } else {
+      logger.info('restore-drill: dropping scratch database', { scratchName })
+      await maintenancePool.query(`DROP DATABASE IF EXISTS "${scratchName}" WITH (FORCE)`).catch(async () => {
+        // WITH (FORCE) needs Postgres 13+; fall back for anything older.
+        await maintenancePool.query(`DROP DATABASE IF EXISTS "${scratchName}"`).catch(() => {})
+      })
+    }
     await maintenancePool.end().catch(() => {})
   }
+  return { scratchName, scratchDropped }
 }
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], 'file:').href
