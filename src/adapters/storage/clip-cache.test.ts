@@ -447,8 +447,9 @@ describe('createIndexedDbClipCache', () => {
    * (T076). Two ways it stopped.
    *
    * **The accounting drifts.** The ceiling is computed from the `clipMeta`
-   * index, and an index row can outlive the Clip it describes — an eviction
-   * interrupted between its two deletes leaves one behind. Once the two stores
+   * index, and an index row can outlive the Clip it describes — the old
+   * two-step eviction left one behind when it was interrupted (its own source
+   * is closed in T078; the browser's is not). Once the two stores
    * disagree, every number the ceiling is enforced against is wrong: bytes she
    * no longer has are charged against it, `has()` claims audio that is gone,
    * and — because the backfill is driven off a size comparison — an orphan can

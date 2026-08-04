@@ -314,9 +314,13 @@ would send her to fix the wrong thing.
 Two things made that ceiling stop meaning anything.
 
 **The index and the audio drift apart, in both directions.** A Clip with no
-row is §7's case. A row with no Clip is the reverse: eviction deletes the audio
-and the row in two steps, and an app backgrounded between them leaves the row
-behind. An orphaned row is charged against the ceiling forever — so the cache
+row is §7's case. A row with no Clip is the reverse: eviction used to delete the
+audio and the row in two transactions, and an app backgrounded between them left
+the row behind. **That source is closed (T078)** — one eviction is now one
+transaction over both stores, so it cannot be interrupted half-done — but the
+reconciliation below stays, because a phone that ran the two-step version still
+carries rows it orphaned, and the browser dropping records out of this origin on
+its own is a source no code here can close. An orphaned row is charged against the ceiling forever — so the cache
 believes it holds bytes it does not, and evicts audio it did not need to — and
 `has()` answers `true` for audio that is gone, so the readiness sweep promises
 a drill the player cannot play.
