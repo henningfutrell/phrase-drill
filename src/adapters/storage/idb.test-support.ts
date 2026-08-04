@@ -27,7 +27,7 @@
 import 'fake-indexeddb/auto'
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
 import { forceCloseDatabase } from 'fake-indexeddb'
-import { unwrap, wrap, type IDBPDatabase, type IDBPTransaction } from 'idb'
+import { unwrap, type IDBPDatabase } from 'idb'
 
 /**
  * Every destructive operation IndexedDB has been asked to perform, in order.
@@ -99,19 +99,35 @@ let armedWriteFailure: { store: string; name: string; remaining: number } | unde
  * rolls back. Nothing about the abort or the rollback under test is simulated.
  * Cleared by `resetFakeIdb`.
  *
- * **It also absorbs the transaction's `done` rejection, and that is a finding,
- * not a convenience.** `update`, `updateAll` and `importAll` each read `tx.done`
- * on the path where they abort deliberately, and none of them reads it on the
- * path where a WRITE fails: the failing `put` rejects, the function throws, and
- * `tx.done` is left rejecting with `AbortError` that nothing awaits. On her
- * phone that reaches `error-capture.ts`'s `unhandledrejection` handler and is
- * logged as a captured error on top of the failure she was already shown. No
- * record is at risk — the rollback itself is correct, which is what the tests
- * using this assert — so it is recorded here rather than fixed under a task
- * about test infrastructure.
+ * **It used to absorb the transaction's `done` rejection, and that absorption
+ * is gone (T077).** It was hiding a real defect: `update`, `updateAll` and
+ * `importAll` read `tx.done` on the path where they abort deliberately and on
+ * none of the paths where a WRITE fails, so the failing `put` rejected, the
+ * function threw, and `tx.done` was left rejecting `AbortError` that nothing
+ * awaited — reaching `error-capture.ts`'s `unhandledrejection` handler on her
+ * phone and logging a second error on top of the one she was already shown.
+ * The adapters now mark `done` handled themselves (`runTransaction` in
+ * `database.ts`), so this injector raises the failure and nothing else.
  */
 export function failNextWriteTo(store: string, name = 'QuotaExceededError', times = 1): void {
   armedWriteFailure = { store, name, remaining: times }
+}
+
+let armedWriteThrow: { store: string; name: string } | undefined
+
+/**
+ * Make the next `put` against `store` throw SYNCHRONOUSLY, the way
+ * `DataCloneError` and `DataError` are raised — at request creation, before a
+ * request object exists (T077).
+ *
+ * It is the one write failure `error` handlers cannot see: no request ever
+ * fires, so nothing aborts the transaction on the app's behalf and IndexedDB
+ * commits whatever the transaction has already done. In `importAll` that is a
+ * `clear()` of all three stores plus however many Decks were written before
+ * the bad one — her whole library replaced by a fragment.
+ */
+export function throwOnNextWriteTo(store: string, name = 'DataCloneError'): void {
+  armedWriteThrow = { store, name }
 }
 
 type RequestPipeline = {
@@ -128,12 +144,17 @@ for (const op of LOGGED_OPERATIONS) {
       if (op === 'delete' || op === 'clear') {
         idbDestructiveOperations.push({ op, store: this.name })
       }
+      if (op === 'put' && armedWriteThrow?.store === this.name) {
+        const { name } = armedWriteThrow
+        armedWriteThrow = undefined
+        const error = new Error(`${name}: the value could not be stored`)
+        error.name = name
+        throw error
+      }
       if (op === 'put' && armedWriteFailure?.store === this.name) {
         const { name } = armedWriteFailure
         armedWriteFailure.remaining -= 1
         if (armedWriteFailure.remaining <= 0) armedWriteFailure = undefined
-        // See `failNextWriteTo` — the adapter leaves this promise rejecting.
-        void (wrap(this.transaction) as IDBPTransaction).done.catch(() => {})
         return (this.transaction as unknown as RequestPipeline)._execRequestAsync({
           source: this,
           operation: () => {
@@ -159,6 +180,7 @@ export function resetFakeIdb(): void {
   idbOperations.length = 0
   idbTransactions.clear()
   armedWriteFailure = undefined
+  armedWriteThrow = undefined
 }
 
 /**

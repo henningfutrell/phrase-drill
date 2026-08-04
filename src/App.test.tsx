@@ -2276,6 +2276,33 @@ describe('App — a database that will not open says so (T072)', () => {
     expect(notice()?.textContent).toContain('open it again')
   })
 
+  /**
+   * The copy has to match what the app now does (T077). Every store forgets a
+   * terminated connection and opens a new one on its next call, so "close the
+   * app and open it again" sends her to perform a repair that has already
+   * happened — and on the app holding phrases that exist nowhere else, telling
+   * her to close it is the last instruction to give. It must not overstate the
+   * other way either: the same rule T083 pins for the launch screen.
+   */
+  it('does not send her to close the app, now that it reconnects on its own', async () => {
+    const trouble = createFakeDatabaseTrouble()
+    await renderApp(
+      createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }]),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      trouble,
+    )
+
+    await act(async () => trouble.report('terminated'))
+
+    const words = (notice()?.textContent ?? '').toLowerCase()
+    expect(words).not.toContain('close the app')
+    expect(words).not.toContain('delete')
+    expect(words).not.toContain('gone')
+    expect(words).not.toContain('lost')
+    // And it still says what she should do about the change she just made.
+    expect(words).toContain('again')
+  })
+
   it('does not claim the phone may be out of space, which is a different failure', async () => {
     const trouble = createFakeDatabaseTrouble()
     await renderApp(
