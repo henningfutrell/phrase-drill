@@ -370,7 +370,11 @@ export function DrillScreen({
         })}
       </div>
 
-      <p data-testid="drill-current-line" className="drill-current-line">
+      {/* `key` is the whole point: React reuses one <p> across the cadence, so
+          without a changing key the arrival animation (DrillScreen.css) plays
+          once and never again. Keying on the text remounts the node each time
+          the line changes, which is the only moment in this app that animates. */}
+      <p key={currentText} data-testid="drill-current-line" className="drill-current-line">
         {currentText}
       </p>
 

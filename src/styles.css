@@ -1,9 +1,13 @@
 /*
- * Design tokens and screen styles for List/Deck management (docs/design.md
- * §1-§3.3, §3.6). Decks, Deck-detail, and Settings are styled here — Drill,
- * Mix, and Scan land with their own tasks.
+ * Global sheet: the ground, the lace, and the shared controls (T058).
+ *
+ * The ornament rule this file exists to hold: lace frames, lace never fills.
+ * `.lace-rule` is the divider, `.lace-veil` is a réseau texture for empty
+ * ground, and neither ever sits behind text she reads at speed. The Drill
+ * screen's current line has nothing behind it at all — see DrillScreen.css.
  */
 
+@import './styles/fonts.css';
 @import './styles/tokens.css';
 
 * {
@@ -15,12 +19,28 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: 1.45;
+  /* Old-style figures belong with an old-style face; lining figures in Garamond
+     read as a different font intruding. Counts sit in the text, not above it. */
+  font-variant-numeric: oldstyle-nums;
+  -webkit-font-smoothing: antialiased;
+  /* iOS Safari inflates text in rotated layouts unless told not to, and the
+     drill line is already fluid — it must not be scaled a second time. */
+  -webkit-text-size-adjust: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
 }
 
 button {
-  font-family: inherit;
-  color: inherit;
   border: none;
   background: none;
   cursor: pointer;
@@ -31,58 +51,141 @@ button:disabled {
   cursor: default;
 }
 
+/* One focus treatment everywhere: a gilt thread, offset so it reads as an
+   engraved rule around the control rather than a browser artifact. */
+:focus-visible {
+  outline: 1.5px solid var(--gilt);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* ---- Lace ---------------------------------------------------------------
+   The two ornament primitives. Both are decorative and both are drawn in a
+   pseudo-element or a background, so neither reaches the accessibility tree —
+   nothing here carries meaning a screen-reader user would miss. */
+
+.lace-rule {
+  flex: none;
+  height: 14px;
+  background-image: var(--lace-band);
+  background-repeat: repeat-x;
+  background-position: center top;
+  opacity: 0.75;
+}
+
+.lace-rule--flipped {
+  transform: scaleY(-1);
+}
+
+/* Réseau ground. Only ever on a surface with no body text over it: the head and
+   foot of a screen, and the inside of an empty state. */
+.lace-veil {
+  position: relative;
+  isolation: isolate;
+}
+
+.lace-veil::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: var(--lace-reseau);
+  background-repeat: repeat;
+  opacity: var(--lace-veil-opacity);
+  pointer-events: none;
+  z-index: -1;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .lace-veil::before {
+    display: none;
+  }
+}
+
+/* ---- Screen scaffold ---------------------------------------------------- */
+
 .screen {
   min-height: 100vh;
-  padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+  min-height: 100dvh;
+  padding: max(20px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
 }
 
 .screen-header {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
   gap: 12px;
+  padding-bottom: 2px;
 }
 
+/* The penmanship voice. Reserved for names — screen titles and deck names — at
+   a size where copperplate is actually legible. Never a control label, never
+   anything read under time pressure. */
 .screen-header h1,
 .deck-title {
-  font-size: var(--text-lg);
-  font-weight: 600;
+  font-family: var(--font-script);
+  font-size: var(--text-xl);
+  font-weight: 400;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
   margin: 0;
+  color: var(--ink);
+  /* Pinyon's swashes overhang the em box; without this the capital clips. */
+  padding: 0.12em 0.06em;
 }
 
 .screen-header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .link-action {
   font-size: var(--text-sm);
-  font-weight: 600;
   color: var(--accent);
   min-height: 44px;
   padding: 0 8px;
+  letter-spacing: 0.02em;
 }
+
+/* ---- Empty states -------------------------------------------------------
+   The one place the bouquet is allowed to be the content: a drawn rose de mai
+   over the réseau, and a single line under it. */
 
 .empty-state {
-  color: var(--ink-dim);
+  color: var(--ink-soft);
   font-size: var(--text-base);
   text-align: center;
-  margin-top: 40px;
+  margin-top: 32px;
+  padding: 40px 24px;
+  border-radius: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
 }
 
-/* First-run backup nudge (docs/design.md §3.6, T027) — one line, low-key,
-   dismiss-once. Never competes visually with the primary content it sits
-   next to. */
+.empty-state::before {
+  content: '';
+  width: 64px;
+  height: 64px;
+  background-image: var(--rose-mark);
+  background-size: contain;
+  background-repeat: no-repeat;
+  opacity: 0.9;
+}
+
 .backup-nudge {
   color: var(--ink-dim);
   font-size: var(--text-sm);
   text-align: center;
   margin-top: 12px;
+  font-style: italic;
 }
+
+/* ---- Lists -------------------------------------------------------------- */
 
 .deck-list,
 .phrase-list {
@@ -96,11 +199,13 @@ button:disabled {
 
 .deck-chip {
   background: var(--surface);
-  border-radius: 16px;
+  border: 1px solid var(--gilt-dim);
+  border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   min-height: 44px;
+  box-shadow: var(--shadow-lift);
 }
 
 .deck-chip-main {
@@ -108,20 +213,22 @@ button:disabled {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  padding: 16px;
+  padding: 15px 16px;
   min-height: 44px;
   text-align: left;
+  gap: 1px;
 }
 
 .deck-chip-name {
-  font-size: var(--text-base);
-  font-weight: 600;
+  font-family: var(--font-script);
+  font-size: var(--text-lg);
+  line-height: 1.25;
+  color: var(--ink);
 }
 
 .deck-chip-count {
   font-size: var(--text-sm);
   color: var(--ink-dim);
-  margin-top: 2px;
 }
 
 .deck-chip-actions,
@@ -129,18 +236,23 @@ button:disabled {
 .phrase-reorder {
   display: flex;
   gap: 4px;
-  padding: 0 12px;
+  padding: 0 10px;
 }
 
 .btn-icon {
   min-width: 44px;
   min-height: 44px;
   padding: 8px 12px;
-  border-radius: 12px;
+  border-radius: 11px;
   background: var(--accent-dim);
   color: var(--accent);
   font-size: var(--text-sm);
-  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: background-color 180ms var(--ease-out);
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: var(--surface-lift);
 }
 
 .btn-danger {
@@ -148,10 +260,15 @@ button:disabled {
   color: var(--danger);
 }
 
+.btn-danger:hover:not(:disabled) {
+  background: rgba(236, 136, 148, 0.12);
+}
+
 .phrase-row {
   background: var(--surface);
-  border-radius: 16px;
-  padding: 12px 16px;
+  border: 1px solid var(--gilt-dim);
+  border-radius: 14px;
+  padding: 13px 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -162,17 +279,28 @@ button:disabled {
 .phrase-text {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .phrase-french {
   font-size: var(--text-base);
-  font-weight: 600;
+  color: var(--ink);
 }
 
+/* The gloss is the one place script earns a run of ordinary prose: it is short,
+   it is never drilled from, and it is what makes the list feel handwritten. */
 .phrase-english {
-  font-size: var(--text-sm);
+  font-family: var(--font-script);
+  font-size: var(--text-base);
+  line-height: 1.3;
   color: var(--ink-dim);
 }
+
+/* ---- Buttons ------------------------------------------------------------
+   One rose action per screen. The gilt inset is a hairline — the engraved edge
+   of a calling card, not a second border. */
 
 .btn-primary {
   min-height: 56px;
@@ -180,21 +308,45 @@ button:disabled {
   background: var(--accent);
   color: var(--bg);
   font-size: var(--text-lg);
-  font-weight: 700;
-  padding: 0 20px;
+  font-weight: 600;
+  letter-spacing: 0.015em;
+  padding: 0 24px;
+  box-shadow:
+    inset 0 0 0 1px rgba(25, 16, 22, 0.22),
+    var(--shadow-lift);
+  transition:
+    transform 220ms var(--ease-out),
+    filter 220ms var(--ease-out);
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: scale(0.985);
 }
 
 .btn-secondary {
   min-height: 44px;
   min-width: 44px;
   padding: 0 16px;
-  border-radius: 12px;
+  border-radius: 11px;
   color: var(--ink-dim);
+  transition: color 180ms var(--ease-out);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  color: var(--ink);
 }
 
 .btn-add-row {
   width: 100%;
 }
+
+/* ---- Sheets -------------------------------------------------------------
+   A sheet rises from the foot of the screen wearing the lace band at its top
+   edge — the scalloped selvedge where the lace ends. */
 
 .sheet {
   position: fixed;
@@ -203,44 +355,84 @@ button:disabled {
   bottom: 0;
   background: var(--surface);
   border-radius: 20px 20px 0 0;
-  padding: 20px 20px max(20px, env(safe-area-inset-bottom));
+  padding: 26px 20px max(20px, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
   gap: 12px;
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-sheet);
+  animation: sheet-rise 320ms var(--ease-out);
+}
+
+.sheet::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 0;
+  right: 0;
+  height: 14px;
+  background-image: var(--lace-band);
+  background-repeat: repeat-x;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+@keyframes sheet-rise {
+  from {
+    transform: translateY(14px);
+    opacity: 0;
+  }
 }
 
 .sheet-title {
-  font-size: var(--text-lg);
-  font-weight: 600;
+  font-family: var(--font-script);
+  font-size: var(--text-xl);
+  font-weight: 400;
+  line-height: 1.15;
+  padding: 0.1em 0.06em 0;
 }
 
 .sheet-label {
   font-size: var(--text-sm);
   color: var(--ink-dim);
+  letter-spacing: 0.04em;
 }
 
 .sheet-input {
-  min-height: 44px;
-  border-radius: 12px;
-  border: 1px solid #35373d;
-  background: var(--bg);
+  min-height: 48px;
+  border-radius: 11px;
+  border: 1px solid var(--gilt-dim);
+  background: var(--bg-veil);
   color: var(--ink);
   font-size: var(--text-base);
-  padding: 0 12px;
+  padding: 0 13px;
+  transition: border-color 180ms var(--ease-out);
+}
+
+.sheet-input::placeholder {
+  color: var(--ink-dim);
+  font-style: italic;
+}
+
+.sheet-input:focus {
+  border-color: var(--gilt);
+  outline: none;
 }
 
 .sheet-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 12px;
-  margin-top: 8px;
+  margin-top: 10px;
 }
+
+/* ---- Settings ----------------------------------------------------------- */
 
 .settings-section {
   background: var(--surface);
+  border: 1px solid var(--gilt-dim);
   border-radius: 16px;
-  padding: 16px;
+  padding: 17px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -249,13 +441,16 @@ button:disabled {
 .settings-section-title {
   font-size: var(--text-base);
   font-weight: 600;
+  letter-spacing: 0.03em;
   margin: 0;
+  color: var(--ink);
 }
 
 .settings-help {
   font-size: var(--text-sm);
   color: var(--ink-dim);
   margin: 0;
+  max-width: 68ch;
 }
 
 .settings-status {
@@ -275,8 +470,20 @@ button:disabled {
 
 .settings-privacy-note {
   text-align: center;
+  font-style: italic;
 }
 
 .settings-section--backup {
-  border: 1px solid var(--accent-dim);
+  border-color: var(--gilt);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet {
+    animation: none;
+  }
+
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

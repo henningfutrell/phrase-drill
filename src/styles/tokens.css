@@ -1,23 +1,117 @@
 /*
- * The settled visual palette (docs/design.md §1). One shared source so every
- * screen reads the same tokens instead of re-declaring them.
+ * The visual world: écru lace on aubergine velvet (T058).
+ *
+ * Point de Calais bobbin lace is displayed against dark velvet, because that
+ * is the only ground the réseau — the hexagonal net the pattern is worked on —
+ * actually reads against. That decides the palette, and it decides the
+ * ornament rule: lace is structure made of negative space, so it frames and it
+ * never fills. Ornament lives in headers, margins, dividers and empty states.
+ * The drill line sits on plain ground with nothing behind it, at full size.
+ *
+ * This replaces the near-black #101114 ground with a #ff8a3d pumpkin accent.
+ *
+ * Every foreground here is tinted from the ground's own hue rather than
+ * desaturated toward gray — a gray secondary on a coloured surface is the tell
+ * that a palette was assembled rather than mixed. Measured against --bg
+ * (#191016):
+ *
+ *   --ink       #F6EDE4   15.9:1
+ *   --accent    #E9B9C3   10.4:1
+ *   --ok        #A9C6A2    9.4:1
+ *   --danger    #EC8894    8.3:1
+ *   --gilt      #C8A56E    7.8:1
+ *   --ink-dim   #B295A4    6.4:1   (AA for body, not only for large text)
+ *
+ * --ink-dim is the one worth guarding: it carries the English gloss and every
+ * count and hint, so it is held above 4.5:1 as body text rather than treated
+ * as decoration. Anything below that is not a quieter tone, it is unreadable
+ * in a climbing gym.
  */
-:root {
-  --bg: #101114;
-  --surface: #1a1c20;
-  --ink: #f4f3ef;
-  --ink-dim: #8b8d94;
-  --accent: #ff8a3d;
-  --accent-dim: #7a4726;
-  --danger: #e5484d;
-  --ok: #3ecf8e;
 
-  --text-xs: 13px;
-  --text-sm: 15px;
-  --text-base: 17px;
-  --text-lg: 20px;
-  --text-xl: 28px;
-  /* The Drill screen's current-line only (docs/design.md §1) — the one
-     deliberately fluid size in an otherwise fixed rem scale. */
-  --text-drill: clamp(48px, 15vw, 88px);
+:root {
+  /* Ground — velvet, in three depths. */
+  --bg: #191016;
+  --bg-veil: #120b10;
+  --surface: #251824;
+  --surface-lift: #33222f;
+
+  /* Thread. */
+  --ink: #f6ede4;
+  --ink-soft: #e0cfd6;
+  --ink-dim: #b295a4;
+
+  /* Rose de mai — the Grasse rose, and the only saturated colour in the app.
+     It marks exactly one thing per screen: the action she came to take. */
+  --accent: #e3adbb;
+  --accent-dim: #422533;
+
+  /* Gold thread. Hairlines, ornament, and the edge of a scallop — never a
+     fill, never text at body size. */
+  --gilt: #c8a56e;
+  --gilt-dim: #573f30;
+
+  --danger: #ec8894;
+  --ok: #a9c6a2;
+
+  /* Voices. See styles/fonts.css. The fallbacks are the closest faces iOS
+     actually ships, so a font that has not loaded yet is still a serif and
+     still correctly accented — never the system sans. */
+  --font-body: 'EB Garamond', 'Iowan Old Style', Palatino, 'Times New Roman', serif;
+  --font-script: 'Pinyon Script', 'Snell Roundhand', 'Apple Chancery', cursive;
+
+  /* Garamond sets small for its point size — old-style faces do — so the whole
+     scale steps up from the sans it replaces. --text-base at 19px is not
+     generosity, it is parity. */
+  --text-xs: 14px;
+  --text-sm: 16px;
+  --text-base: 19px;
+  --text-lg: 23px;
+  --text-xl: 32px;
+  /* The Drill screen's current-line only — the one deliberately fluid size in
+     an otherwise fixed scale. */
+  --text-drill: clamp(52px, 15vw, 96px);
+
+  /* Ornament, authored as SVG rather than borrowed from a glyph.
+
+     --lace-reseau is the ground net: a hexagonal bobbin-lace mesh with a picot
+     at each junction, tiled at 24×42. Texture for empty ground only, applied
+     through --lace-veil-opacity so no caller sets its strength by hand.
+
+     --lace-band is the edging: a scalloped arc in écru over a gilt hairline,
+     a picot hanging from each scallop, a bead at each junction. It is the
+     divider, the header rule, and the foot of a sheet. */
+  /* Tiled at 11×19, which is the size that matters: the first cut of this was
+     24×42 and rendered as chicken wire — at that scale the eye resolves
+     individual cells and reads a honeycomb, not a thread ground. Lace is
+     recognised by its fineness, so the net has to sit below the size at which
+     a single cell is legible. The picots come out at this scale too; they
+     became visible dots on a grid rather than knots in a mesh. */
+  --lace-reseau: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='19' viewBox='0 0 11 19'%3E%3Cg fill='none' stroke='%23f6ede4' stroke-width='.4' stroke-linecap='round'%3E%3Cpath d='M0 4.75 5.5 1.6 11 4.75M0 4.75v9.5M11 4.75v9.5M0 14.25 5.5 17.4 11 14.25M5.5 17.4V19M5.5 0v1.6'/%3E%3C/g%3E%3C/svg%3E");
+  /* True scallops, drawn as semicircular arcs rather than quadratics. The
+     quadratic version produced points, not bowls — a sawtooth wearing beads.
+     Each scallop is a half-circle of r=7.5 hanging from the gilt heading, with
+     a picot dropped from its lowest point, which is how a bobbin-lace selvedge
+     actually finishes.
+
+     The sweep flag is 0, not 1, and that is the whole difference between a
+     scalloped edge and a dotted line. SVG's y axis points down, so sweep=1
+     draws the arc clockwise ON SCREEN — upward — and every scallop was being
+     clipped off the top of the 14px band, leaving only the picots visible. */
+  --lace-band: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='14' viewBox='0 0 60 14'%3E%3Cpath d='M0 2h60' fill='none' stroke='%23c8a56e' stroke-width='.7' opacity='.55'/%3E%3Cpath d='M0 2a7.5 7.5 0 0 0 15 0a7.5 7.5 0 0 0 15 0a7.5 7.5 0 0 0 15 0a7.5 7.5 0 0 0 15 0' fill='none' stroke='%23f6ede4' stroke-width='.65' opacity='.7'/%3E%3Cg fill='%23f6ede4' opacity='.6'%3E%3Ccircle cx='7.5' cy='11.6' r='.8'/%3E%3Ccircle cx='22.5' cy='11.6' r='.8'/%3E%3Ccircle cx='37.5' cy='11.6' r='.8'/%3E%3Ccircle cx='52.5' cy='11.6' r='.8'/%3E%3C/g%3E%3Cg fill='%23c8a56e' opacity='.75'%3E%3Ccircle cx='0' cy='2' r='1'/%3E%3Ccircle cx='15' cy='2' r='1'/%3E%3Ccircle cx='30' cy='2' r='1'/%3E%3Ccircle cx='45' cy='2' r='1'/%3E%3Ccircle cx='60' cy='2' r='1'/%3E%3C/g%3E%3C/svg%3E");
+
+  /* Rose de mai, five petals and a heart, for empty states and the wordmark.
+     Drawn, not an emoji — the craft floor bans a glyph standing in for an icon,
+     and 🌸 would render as Apple's cartoon on the one device this app runs on. */
+  --rose-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Cg fill='none' stroke='%23c8a56e' stroke-width='1.1' stroke-linecap='round'%3E%3Cellipse cx='32' cy='19' rx='7.5' ry='11'/%3E%3Cellipse cx='32' cy='19' rx='7.5' ry='11' transform='rotate(72 32 32)'/%3E%3Cellipse cx='32' cy='19' rx='7.5' ry='11' transform='rotate(144 32 32)'/%3E%3Cellipse cx='32' cy='19' rx='7.5' ry='11' transform='rotate(216 32 32)'/%3E%3Cellipse cx='32' cy='19' rx='7.5' ry='11' transform='rotate(288 32 32)'/%3E%3Ccircle cx='32' cy='32' r='4.5' stroke='%23e9b9c3'/%3E%3C/g%3E%3C/svg%3E");
+
+  --lace-veil-opacity: 0.05;
+
+  /* Velvet has no hard edge. Every shadow carries an offset and a real blur —
+     a zero-offset halo is decoration, not depth. */
+  --shadow-sheet: 0 -10px 34px -6px rgba(9, 4, 8, 0.72);
+  --shadow-lift: 0 6px 20px -8px rgba(9, 4, 8, 0.68);
+
+  /* The one authored easing: exponential ease-out, arriving from an
+     already-visible default. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }

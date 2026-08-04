@@ -1,0 +1,54 @@
+/*
+ * The two voices of the app, self-hosted (T058).
+ *
+ * EB Garamond — a digital revival of Claude Garamond's romans, cut in Paris in
+ * the 1530s. It is not decoration that the letterforms she is reading French in
+ * are French letterforms; Garamond's punches are where the accented sorts
+ * (é è ê ç à) were designed as part of the alphabet rather than bolted on, and
+ * it shows at 96px. Old-style proportions, a large-enough x-height to hold up
+ * on a phone, and open counters that survive the drill line's size.
+ *
+ * Pinyon Script — engraved copperplate, the penmanship voice. Display only:
+ * deck names, the English gloss, the wordmark. Never body, never a control
+ * label, never anything she has to read under time pressure.
+ *
+ * Both are vendored as `latin` only. Google's `latin` subset spans U+0000-00FF
+ * plus U+0152-0153, which is the whole of written French — every accented
+ * vowel, the cedilla, the œ ligature, and the guillemets. `latin-ext` adds
+ * 238 KB and, for this app, renders nothing: the only French character outside
+ * `latin` is Ÿ (U+0178), which occurs in a handful of proper nouns. That
+ * matters more than usual here because `vite-plugin-pwa` precaches everything
+ * under `public/`, so an unused subset is not lazily skipped by unicode-range —
+ * it is downloaded in full on install, over her phone's connection.
+ *
+ * Licence: both faces are SIL OFL 1.1, which permits redistribution of the
+ * font files with the work. The licence text ships beside them, as the OFL
+ * requires: public/fonts/EBGaramond-OFL.txt and PinyonScript-OFL.txt.
+ */
+
+@font-face {
+  font-family: 'EB Garamond';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/fonts/eb-garamond-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'EB Garamond';
+  font-style: italic;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/fonts/eb-garamond-latin-wght-italic.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Pinyon Script';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/pinyon-script-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
