@@ -120,4 +120,18 @@ describe('RestoreControl', () => {
     expect(error).toContain('phrase-drill backup')
     expect(error).not.toContain('SyntaxError')
   })
+
+  it('tells her to update the app when the backup was written by a newer build (T070)', async () => {
+    renderControl({ onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: false, reason: 'needs-update' }) })
+    await chooseFile()
+    expect(container.querySelector('[data-testid="restore-error"]')!.textContent).toContain('newer version')
+    expect(container.querySelector('[data-testid="restore-confirm-sheet"]')).toBeNull()
+  })
+
+  it('says an empty backup would replace everything with nothing, and opens no confirmation (T070)', async () => {
+    renderControl({ onRestoreFileChosen: vi.fn().mockResolvedValue({ ok: false, reason: 'empty' }) })
+    await chooseFile()
+    expect(container.querySelector('[data-testid="restore-error"]')!.textContent).toContain('nothing in it')
+    expect(container.querySelector('[data-testid="restore-confirm-sheet"]')).toBeNull()
+  })
 })
