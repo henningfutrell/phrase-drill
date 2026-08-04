@@ -1,4 +1,4 @@
-# Backups and restore (T054)
+# Backups and restore (T054, re-scoped T065)
 
 Her phrases exist in exactly one Postgres database. They were typed by hand
 and exist nowhere else — not on her phone (the IndexedDB clip cache holds
@@ -9,43 +9,151 @@ this whole system exists to prevent. Read this document end to end before
 you need it — it is written for the version of you who is stressed, it is
 late, and something just went wrong.
 
-## The failure this covers, and the one it does not
+## The arrangement, in one table
 
-Render's paid Postgres includes point-in-time recovery (PITR): a 3-day
-window on a Hobby workspace, 7 days on Pro. PITR is real protection, but it
-answers one question only — **"the database broke at a known moment, put it
-back the way it was just before."** It does not answer the other question
-that actually matters here: **"she deleted a deck five weeks ago and only
-just noticed."** PITR's window has already closed on that mistake long
-before anyone knew to look. A slow, quiet, human mistake — not a crash — is
-the likely failure mode for one non-technical user typing phrases by hand,
-and it is exactly the shape PITR is worst at.
-
-That is why this exists: a **logical backup** (`pg_dump`), **compressed**,
-shipped **off Render entirely**, with **retention measured in months, not
-days**. Two independent safety nets, covering two different failures:
-
-| | Covers | Window | Where it lives |
+| | What it is | Who runs it | Where the copy lives |
 |---|---|---|---|
-| Render PITR | A broken database at a known moment (bad migration, corrupted write, "put it back to 2pm today") | 3 days (Hobby) / 7 days (Pro) | Inside Render — the same outage or account problem that could take the primary database could plausibly take this too |
-| This backup | A mistake nobody noticed immediately (a deleted deck, a bad import, a Phrase overwritten weeks ago) | `BACKUP_RETENTION_DAYS`, default 180 | An S3-compatible bucket, off Render |
+| **Render managed Postgres backups** | **The primary mechanism.** Point-in-time recovery, plus downloadable logical exports, both provided by Render for every paid database. | Render, continuously, with no configuration in this repo | Inside Render |
+| **`scripts/backup.mjs`** | The **secondary, manual, off-platform** copy. A human runs it and gets a `.sql.gz` file on a machine they own. | You, by hand, when you want one | Wherever you point `BACKUP_DEST` — a directory on your own machine |
 
-Use PITR first if the timing fits (Render's dashboard, Recovery page — see
-[Render's own docs](https://render.com/docs/postgresql-backups)). Reach for
-this backup when the mistake is older than PITR's window, or when Render
-itself is the thing that's unavailable.
+**There is no scheduled off-site backup, and this repo does not pretend
+there is one.** An earlier version of this document described an `s3://`
+cron job to a Backblaze B2 bucket. The owner has no S3 account and no
+Backblaze account and is not getting one, so that path was deleted in T065
+rather than left standing as a plan nobody would execute. What replaced it
+is not a downgrade — it is the decision `render.yaml` already made, written
+down: pay for a managed database whose backups are somebody else's job.
 
-## What is backed up, and how
+## Primary: Render's managed Postgres backups
 
-`scripts/backup.mjs`:
+`render.yaml` pins `plan: basic-256mb` — the smallest **paid** Postgres tier
+— and its own comment says why: Render's free Postgres "expires 30 days
+after creation and carries no backups of any kind — unacceptable for the
+one copy of her phrase library". That is not a cost decision that happens to
+have a backup side effect. **Buying the backups is the point of the paid
+tier**, and it is the primary backup mechanism for this application.
+
+What that buys, from Render's own documentation (see "What is confirmed and
+what is not" below before betting on a number):
+
+- **Point-in-time recovery (PITR), automatically.** Render "continually
+  backs up paid Render Postgres databases to provide point-in-time
+  recovery". Nothing in this repo configures it; it is on because the plan
+  is paid.
+- **Retention: 3 days on a Hobby workspace, 7 days on Pro or higher.**
+  Render states the window "depends on your workspace's plan", not on the
+  instance type — so `basic-256mb` versus `pro-*` does **not** change the
+  window. Upgrading the workspace later does not backfill it.
+- **Logical exports, downloadable.** Render also produces logical backups
+  for paid databases, retained "for seven days after creation, regardless of
+  your workspace plan", and offers them on the database's Recovery page as a
+  compressed archive (e.g. `2025-02-03T19_21Z.dir.tar.gz`) with a download
+  link.
+- Render's own stated preference between the two: "PITR almost always
+  enables you to recover more recent data than what's available in your
+  latest export."
+
+### Restoring from Render — the exact path
+
+**A Render restore creates a NEW database instance. It never restores in
+place.** Render: "Render spins up a new database instance that reflects your
+original instance's state at a specified time in the past." Plan for the
+repoint, not just the restore.
+
+1. Render dashboard → select the `phrase-drill-db` database → **Recovery**
+   page.
+2. Scroll to **Point-in-Time Recovery** → **Restore Database**.
+3. Name the new instance.
+4. Pick the date and time. **You cannot restore to a time within ten minutes
+   of now.**
+5. **Copy Existing Settings** — "No" lets you change instance type, Datadog
+   API key, and/or project. Either way the new instance always copies the IP
+   address allow list.
+6. **Start Recovery** (or **Customize Recovery** if you declined step 5).
+7. Watch the status: **Recovery In Progress** → **Creating** → **Available**.
+8. Verify with the **PSQL Command** on the new instance's **Info** page
+   before touching anything else.
+9. **Repoint the app at the new instance.** `render.yaml` wires
+   `DATABASE_URL` with `fromDatabase: {name: phrase-drill-db}`, which names
+   the *old* resource — the recovery instance has a different name, so this
+   is a manual change on the `phrase-drill` service's Environment tab
+   (a change there redeploys automatically — `docs/deploy.md`). The
+   redeploy re-runs the idempotent `init()` calls against the restored
+   schema, which is safe.
+10. Delete or suspend the original once the app is confirmed working against
+    the new one. "Your recovery instance is now your primary instance."
+
+If the timestamp was wrong: delete the recovery instance and start a new
+recovery at a different point in time. Nothing was destroyed by getting it
+wrong, which is the property that makes this path safe to attempt under
+stress.
+
+### What is confirmed and what is not
+
+Every number above is quoted from Render's own documentation
+([Recovery & Backups](https://render.com/docs/postgresql-backups),
+[Flexible plans](https://render.com/docs/postgresql-refresh)) as of
+2026-08. Two gaps, stated rather than papered over:
+
+- **Which workspace plan this account is on has not been confirmed** — no
+  live Render account was used to write this. That decides whether the PITR
+  window is **3 days or 7**. Check it in the Render dashboard and write the
+  answer here.
+- **Whether Render's logical exports run on an automatic schedule is not
+  established from Render's docs.** The documentation describes a manual
+  **Create export** button and a seven-day retention, but names no cadence.
+  Do not assume a nightly export exists until the Recovery page shows a
+  series of them appearing without anyone pressing anything.
+- Render's docs never state that `basic-256mb` specifically is a paid
+  instance type; that follows from the blueprint spec listing `free` and
+  `basic-256mb` as separate values and from Render gating features on
+  "paid instance type". It is an inference, not a quote — a confident one,
+  but worth knowing it is one.
+
+### The failure Render's backups do NOT cover
+
+PITR answers exactly one question: **"the database broke at a known moment,
+put it back the way it was just before."** It does not answer the question
+that is most likely to actually happen here: **"she deleted a deck five
+weeks ago and only just noticed."** Three days — or seven, or Render's
+seven-day export retention — has already closed on that mistake long before
+anyone knows to look. A slow, quiet, human mistake is the likely failure
+mode for one non-technical user typing phrases by hand, and it is exactly
+the shape PITR is worst at.
+
+**Nothing in this system currently covers that failure automatically.** The
+manual export below covers it only as often as somebody remembers to run it.
+That is the honest state of things, and it is the gap to close if this ever
+gets more attention.
+
+## Secondary: the manual export (`scripts/backup.mjs`)
+
+A human runs it, on demand, and gets a compressed logical dump on a machine
+they control. It is the answer to two questions Render cannot answer:
+"give me a copy that survives losing the Render account entirely", and
+"give me a copy older than Render's retention window".
+
+`npm run backup`:
 
 1. `pg_dump`s the database named by `DATABASE_URL` (plain SQL, `--no-owner
    --no-privileges` — a database name or owner role is deployment detail,
    not part of her data).
 2. Gzips the dump (Node's built-in `zlib`, streamed — no whole dump ever
    sits uncompressed on disk).
-3. Uploads it to `BACKUP_DEST`, off Render (see "Destination" below).
-4. Deletes anything at the destination older than `BACKUP_RETENTION_DAYS`.
+3. Writes it into the directory named by `BACKUP_DEST`, creating it if
+   needed.
+4. Deletes anything in that directory older than `BACKUP_RETENTION_DAYS`.
+
+**Run it from a machine you own, never from the Render container.** A
+directory on Render's filesystem is not a backup: that filesystem is
+ephemeral and evaporates on the next redeploy, and even if it did not,
+a second copy inside the same account survives none of the failures the
+first copy does not.
+
+**`BACKUP_DEST` is a directory path, not a URI.** A `<scheme>://` value is
+refused with an error rather than taken as a literal directory name — a
+leftover `s3://phrase-drill-backups` would otherwise create `./s3:/…` and
+report success.
 
 ### What is in the dump
 
@@ -70,170 +178,82 @@ compare the actual bytes rather than a row count (see "Restore, step by
 step").
 
 Every step fails loudly: a non-zero exit and a `level: "error"` log line on
-any failure — a wrong password, `pg_dump` missing, the upload rejected, disk
-full. **It never exits 0 having silently skipped a step.** A backup job that
-fails quietly is worse than no backup job, because it manufactures
-confidence nobody should have.
+any failure — a wrong password, `pg_dump` missing, disk full. **It never
+exits 0 having silently skipped a step.** An export that fails quietly is
+worse than none, because it manufactures confidence nobody should have.
 
-Nothing here ever logs `DATABASE_URL`, its password, or the S3 credentials.
+Nothing here ever logs `DATABASE_URL` or its password.
 `scripts/pg-url.mjs` strips the password out of the connection string before
 it ever becomes a child-process argument (visible to `ps`) or a log field;
 `server/logger.js`'s existing redaction (the same primitive
 `docs/server.md`'s "Provable: no key can leak" section documents for the
-server itself) redacts the database password and the S3 secret key out of
-every field on every log line this script writes, including error messages
-from a failed `pg_dump`/`aws` call.
+server itself) redacts the database password out of every field on every log
+line this script writes, including error messages from a failed `pg_dump`.
 
 ### File naming
 
 `phrase-drill-<ISO-8601 UTC>.sql.gz`, e.g.
 `phrase-drill-2026-08-03T14-30-00Z.sql.gz` (colons swapped for dashes — safe
-in a filename and an S3 key). Lexicographic sort is chronological sort by
-construction, so retention and "what's the latest backup" are both
-mechanical string operations, never a parse of file metadata that a copy or
-sync could disturb.
+in a filename on every filesystem worth using). Lexicographic sort is
+chronological sort by construction, so retention and "what's the latest
+backup" are both mechanical string operations, never a parse of file
+metadata that a copy or sync could disturb.
 
 ### Retention policy
 
 **Default: 180 days.** Configurable via `BACKUP_RETENTION_DAYS`.
 
-Reasoning: the failure this backup exists for is a mistake that goes
+Reasoning: the failure this export exists for is a mistake that goes
 unnoticed for a while — the task that motivated this doc names "five weeks"
 as the illustrative case. A retention window has to comfortably outlast
 "how long before anyone would plausibly notice and go looking," not just
-match it — a survey conducted weeks later, a seasonal review, a "wait, where
-did that deck go" months on. 180 days (~6 months) is long enough to cover a
-mistake noticed on any reasonably foreseeable cadence, short enough that
-storage cost stays negligible (this library is low tens of KB to low MB per
-export per `docs/scale.md` §4 — a year of daily gzipped dumps at that size
-is still a rounding error against a free storage tier). It is a flat window,
-not a tiered grandfather-father-son scheme — one variable, easy to reason
-about under stress, and the data volume here does not justify the added
-complexity of a tiered policy.
+match it. 180 days (~6 months) is long enough to cover a mistake noticed on
+any reasonably foreseeable cadence, and the storage cost on a machine you
+already own is a rounding error (this library is low tens of KB to low MB
+per export per `docs/scale.md` §4). It is a flat window, not a tiered
+grandfather-father-son scheme — one variable, easy to reason about under
+stress.
 
-**What retention does NOT cover:** a mistake noticed more than
-`BACKUP_RETENTION_DAYS` after it happened has no backup left that predates
-it. Raise `BACKUP_RETENTION_DAYS` if that risk matters more than the
-(still-small) storage cost — it is a single env var, not a code or schema
-change.
-
-## Destination: what was chosen, and what was rejected
-
-**Chosen: an S3-compatible bucket** (`BACKUP_DEST=s3://bucket[/prefix]`),
-uploaded with the `aws` CLI (already installed in this environment;
-otherwise a single well-known, widely-packaged binary — see "What must be
-installed" below). No new npm dependency: shelling out to an existing,
-boring, long-maintained tool instead of adding an SDK to `package.json`, per
-this workflow's "prefer an established library, don't hand-roll it"
-doctrine — and per the same doctrine, *not* hand-rolling AWS SigV4 request
-signing in this script, which a maintained CLI already does correctly.
-
-**Recommended provider: Backblaze B2.** S3-compatible (this script needs no
-B2-specific code — set `BACKUP_S3_ENDPOINT` to B2's endpoint URL and
-`BACKUP_S3_REGION` to its region, and everything else is identical to plain
-S3), 10 GB storage free permanently (not a 12-month trial), and — the reason
-it is the recommendation here rather than Cloudflare R2 — **its free tier
-requires no payment method on file.** Verified directly against Backblaze's
-own sign-up flow and account documentation (not a third party's summary):
-account creation asks for an email and password only, no card, and the
-account dashboard states the free-tier allowance (10 GB storage, 1 GB/day
-free egress) with no card-on-file requirement anywhere in that flow. This
-owner has already refused to add a card to a cloud provider once for exactly
-this reason (Cloudflare R2 was the earlier candidate, rejected below) — a
-destination that reintroduces that requirement reintroduces the blocker
-already paid to remove. B2's S3-compatible endpoint needs an explicit region
-alongside the endpoint URL (`BACKUP_S3_REGION`, forwarded as `--region`),
-unlike plain AWS S3, which infers it — the one real difference this script
-had to account for.
-
-**Rejected:**
-- **Cloudflare R2.** S3-compatible with zero egress fees, and a real
-  candidate on paper — but Cloudflare requires a payment method on file to
-  create *any* R2 bucket, including one that stays entirely within the free
-  10 GB tier. This was the first destination chosen for this task and was
-  corrected: the owner explicitly declined to put a card on file anywhere
-  for a personal phrase-drill tool, and R2 does not offer a path around
-  that. Keep it rejected for this reason specifically — the zero-egress
-  property is real and worth remembering if the card requirement is ever
-  acceptable, but it is not acceptable here.
-- **Hand-rolled S3 signing over plain HTTPS** (no CLI at all) — avoids
-  installing anything, but re-implements AWS SigV4 request signing by hand
-  for one script. That is exactly the kind of code this workflow's own
-  doctrine says not to write yourself when a boring, maintained tool
-  already does it correctly; the failure mode of a subtly-wrong signature
-  implementation is a backup job that silently uploads nothing useful.
-- **`rclone`** — a fine tool (single static binary, broad backend support),
-  but not already present anywhere in this stack, and `aws` already covers
-  every S3-compatible destination worth using here via `--endpoint-url`.
-  Adding a second CLI to install and document when one already suffices is
-  needless operational surface.
-- **Backblaze B2's own `b2` CLI** — B2 also exposes the S3-compatible API
-  used above, so its first-party CLI (a Python package, pulling in a
-  runtime this stack does not otherwise need) buys nothing the `aws` CLI
-  doesn't already have.
-- **A second Render disk/volume.** Not off-platform — a Render outage or
-  account-level problem could plausibly take both copies at once, which
-  defeats the entire point of a second copy.
-- **Committing dumps to a git repo.** No retention mechanism beyond "every
-  commit forever," bloats the repo permanently, and using version control as
-  a backup store is a misuse of the tool regardless of secrecy.
-- **Emailing a dump to the owner.** Not mechanically scriptable/reliable
-  (attachment size limits, no programmatic retention), and turns "did the
-  backup run" into "did I notice the email."
-- **A plain local/other-machine destination** (e.g. `scp` to a home NAS or a
-  second personal machine, no S3 layer at all) — genuinely considered, and
-  would be the right call if this owner ever declines B2 too: for one
-  person's low-MB phrase library, "off Render" doesn't require an
-  S3-compatible bucket specifically, only that the copy lives somewhere a
-  single Render account problem can't reach. Not chosen only because B2's
-  free tier clears the bar (no card, real off-platform, `aws` CLI already
-  covers it) with less new operational surface than standing up and
-  maintaining reachability to a second machine.
+**Retention only prunes what this script wrote.** It matches
+`phrase-drill-<timestamp>.sql.gz` and touches nothing else in the
+directory, so pointing `BACKUP_DEST` at a directory with other files in it
+is safe.
 
 ### What must be installed
 
-- `pg_dump` (backup) and `psql` (restore drill) — same major version family
+- `pg_dump` (export) and `psql` (restore drill) — same major version family
   as the server's Postgres (17, per `docker-compose.yml`); both ship in the
   `postgresql-client` package on Debian/Ubuntu, `postgresql17` (or similar)
   on Alpine/RHEL.
-- `aws` (the AWS CLI v2) — for the upload/prune step only; not needed for
-  the restore drill unless the backup file must first be downloaded from
-  the bucket (`aws s3 cp s3://... ./`). Install per
-  [AWS's own instructions](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html);
-  it does not require an AWS account to install, only to run against a
-  bucket (a B2 "S3 Compatible" application key — not a B2 master
-  application key, and not the older native-B2-API key type — works the
-  same way as AWS credentials: the key ID goes in `AWS_ACCESS_KEY_ID`, the
-  application key itself in `AWS_SECRET_ACCESS_KEY`. Generate one from the
-  B2 dashboard: App Keys → Add a New Application Key, scoped to the backup
-  bucket).
 
-## Environment variables
+Nothing else. There is no CLI to install for a cloud provider, because there
+is no cloud provider.
+
+### Environment variables
 
 | Var | Required | Default | Meaning |
 |---|---|---|---|
-| `DATABASE_URL` | yes | — | Same variable the server itself reads. |
-| `BACKUP_DEST` | yes | — | `s3://bucket[/prefix]` in production. A local directory path is also accepted — used for the restore drill and local testing only; production always uses `s3://`. |
-| `BACKUP_S3_ENDPOINT` | only for a non-AWS S3-compatible bucket | unset (plain AWS S3) | e.g. `https://s3.us-west-002.backblazeb2.com` for Backblaze B2 (region embedded in the hostname; the exact subdomain is shown on the bucket's page in the B2 dashboard). |
-| `BACKUP_S3_REGION` | only alongside `BACKUP_S3_ENDPOINT`, for a provider whose S3-compatible API needs it explicit | unset | e.g. `us-west-002` for Backblaze B2 — the same region that appears in its endpoint hostname. Plain AWS S3 infers this and never needs it set. |
+| `DATABASE_URL` | yes | — | Same variable the server itself reads. For a pull off Render, this is the **External Database URL** from the database's page in the Render dashboard, with `?sslmode=require`. |
+| `BACKUP_DEST` | yes | — | A local directory path, created if it does not exist. Not a URI — a `<scheme>://` value is refused. |
 | `BACKUP_RETENTION_DAYS` | no | `180` | See "Retention policy" above. |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | yes (for an `s3://` destination) | — | Read directly by the `aws` CLI; this script never touches them beyond registering the secret key for log redaction. |
 
-## Run a backup by hand, right now
+### Run an export by hand, right now
+
+From your own machine, pulling the production database off Render:
 
 ```sh
-export DATABASE_URL='postgres://phrase_drill:<password>@<host>:5432/phrase_drill'
-export BACKUP_DEST='s3://phrase-drill-backups'
-export BACKUP_S3_ENDPOINT='https://s3.us-west-002.backblazeb2.com'   # omit both for plain AWS S3
-export BACKUP_S3_REGION='us-west-002'
-export AWS_ACCESS_KEY_ID='...'      # B2 "S3 Compatible" application key ID
-export AWS_SECRET_ACCESS_KEY='...'  # the application key itself
+export DATABASE_URL='postgres://phrase_drill:<password>@<external-host>.oregon-postgres.render.com/phrase_drill?sslmode=require'
+export BACKUP_DEST="$HOME/phrase-drill-backups"
 npm run backup
 ```
 
 Exit 0 and a final `"backup: done"` log line mean it worked. Anything else —
 a non-zero exit, a `"level":"error"` line — means it did not; read the
 `error` field, it names the failing step.
+
+Then put the resulting `.sql.gz` somewhere that survives losing that machine
+too — whatever you already do with files you care about. This script's job
+ends at writing the file.
 
 ## Restore, step by step
 
@@ -245,6 +265,12 @@ destructive, not just unhelpful.**
 |---|---|---|---|
 | **Whole-database restore** | The database itself is gone or destroyed — a botched migration, a deleted Render resource, corruption with no PITR window left. | Replaces it entirely with the backup's contents. | "Whole-database restore" below |
 | **Single-library recovery** | A mistake nobody noticed for a while — a deleted deck, a bad import — but the live database is otherwise fine and has real data added *since* the backup. | Touches **one row**; everything else in the live database is untouched. | "Recovering a single library" below |
+
+For the whole-database case, **try Render's own PITR first** ("Restoring
+from Render" above) — it recovers more recent data than any export, and it
+does not destroy the original while you try it. Reach for the export file
+when the mistake is older than Render's window, or when Render itself is
+the thing that is unavailable.
 
 **Restoring the whole database over a live one that has since gained new
 data is the wrong tool and actively destroys work.** If she deleted a deck
@@ -269,12 +295,12 @@ restore the backup into this disposable scratch database first.
 
 ### 0. Get the backup file, and rehearse the restore
 
-1. **Get the backup file onto the machine running the drill**, if it isn't
-   already local:
-   ```sh
-   aws s3 cp s3://phrase-drill-backups/phrase-drill-2026-08-03T14-30-00Z.sql.gz . \
-     --endpoint-url https://s3.us-west-002.backblazeb2.com --region us-west-002
-   ```
+1. **Get the backup file onto the machine running the drill.** If it came
+   from `npm run backup` it is already a local `.sql.gz`. If it is one of
+   Render's own logical exports, download it from the database's **Recovery**
+   page in the dashboard — note that Render's export is a
+   `.dir.tar.gz` directory-format archive restored with `pg_restore`, not
+   the plain gzipped SQL this repo's drill expects.
 2. **Run the drill** against the *same Postgres server* the production
    database lives on (its host/port/user/password — again, its database
    name is ignored):
@@ -322,7 +348,8 @@ restore the backup into this disposable scratch database first.
 
 Only when the database itself is gone or unusable — not for a deleted deck
 with an otherwise-healthy database (see "Recovering a single library"
-below).
+below), and not before checking whether Render's PITR window still covers
+the incident.
 
 - Point `DATABASE_URL` at the real production database.
 - Restore the backup file into it directly:
@@ -410,55 +437,20 @@ reading the *old* blob out of the backup and reconciling it with the
 
 ## Scheduling
 
-**Render Cron Jobs** is the natural fit if the owner accepts a small paid
-line item: it bills per-minute compute, from $0.00016/min on the Starter
-instance type (Render's published pricing as of 2026 — verify at
-[render.com/pricing](https://render.com/pricing) before relying on this
-number, it changes). A nightly job running `npm run backup` for a couple of
-minutes costs a small fraction of a cent per run — call it under $0.10/month
-even with margin for a slow run, not the flat $25/month "Pro workspace" fee
-(that fee buys other things; Cron Jobs bill their own compute regardless of
-workspace tier). Set up: new Cron Job resource in Render, point it at this
-repo/branch, command `npm run backup`, schedule e.g. `0 3 * * *` (03:00
-UTC daily), and set `DATABASE_URL` (the *internal* Render URL — the job runs
-inside Render's network alongside the database), `BACKUP_DEST`,
-`BACKUP_S3_ENDPOINT`, `BACKUP_S3_REGION`, `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY` in its environment variables.
+**Nothing here is scheduled, and that is the current decision.** Render's
+managed backups are continuous and need no cron; this script is deliberately
+manual, run when a human wants an off-platform copy.
 
-**Free alternative: a scheduled GitHub Actions workflow.** GitHub Actions'
-free tier (2,000 minutes/month on a private repo, unlimited on a public one)
-comfortably covers one short job a day. The one thing this needs that Render
-Cron Jobs gets for free by being inside Render's network: Render's
-**external** database connection string (`docs/server.md` doesn't document
-this because the app itself only ever uses the internal one) — copy it from
-the database's page in the Render dashboard ("Connect" → "External Database
-URL") and append `?sslmode=require` if it isn't already TLS. Example
-workflow (`.github/workflows/backup.yml`, not created by this task — add it
-if the owner picks this path):
-```yaml
-on:
-  schedule:
-    - cron: '0 3 * * *'
-jobs:
-  backup:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client awscli
-      - run: npm run backup
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}      # the *external* Render URL, ?sslmode=require
-          BACKUP_DEST: ${{ secrets.BACKUP_DEST }}
-          BACKUP_S3_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
-          BACKUP_S3_REGION: ${{ secrets.BACKUP_S3_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-```
-GitHub's own secret store keeps every credential out of the workflow file
-itself, the same "never committed" rule `docs/server.md` already holds the
-provider keys to.
+The cost of that is stated plainly under "The failure Render's backups do
+NOT cover": a slow mistake noticed after Render's window has closed is only
+covered if somebody happened to run an export recently. Closing that gap
+means finding a machine that is reliably online to run `npm run backup` on a
+timer against Render's **External Database URL**. That is a real piece of
+operational surface — a machine to keep alive, a credential to rotate —
+and it has not been taken on. Revisit it if the phrase library grows into
+something whose loss would hurt more than it does today.
 
-## Verified proof this works (T054)
+## Verified proof this works (T054, re-confirmed T065)
 
 Every claim below is a command that was run, against a real Postgres, with
 its real output. "The script exits 0" is not on this list — the whole point
@@ -488,7 +480,7 @@ NUL, the smallest thing a length check would wave through.
 ### The round-trip
 
 ```
-$ npm run backup            # BACKUP_DEST=<local dir>, standing in for s3://
+$ npm run backup            # BACKUP_DEST=<local dir>
 {"level":"info",...,"msg":"backup: starting","filename":"phrase-drill-2026-08-04T03-33-26Z.sql.gz","destinationKind":"local"}
 {"level":"info",...,"msg":"backup: dump complete","bytes":2150}
 {"level":"info",...,"msg":"backup: uploaded","destination":".../phrase-drill-2026-08-04T03-33-26Z.sql.gz"}
@@ -508,6 +500,44 @@ PASS — library "usr_drill_marguerite" round-trips
 PASS — restored data is byte-identical to the pre-backup hash (a0629e0eeaf142ae057482eccfd91ca2b62353add1281702023f11fcfe625072)
 EXIT=0
 ```
+
+### Re-run after the s3 removal (T065)
+
+The `destinationKind` and `"backup: uploaded"` fields above are the T054
+wording; T065 renamed them to `destDir` and `"backup: written"` when the s3
+branch was deleted — there is no longer a kind to distinguish or an upload
+to name. Re-run afterward against the repo's own `docker-compose.yml`
+Postgres (`postgres:17-alpine`, schema created by the same three `init()`
+calls, no rows seeded — this run proves the path still works end to end,
+not the round-trip fidelity T054 already proved):
+
+```
+$ export DATABASE_URL='postgres://phrase_drill:phrase_drill@<compose-postgres-ip>:5432/phrase_drill'
+$ export BACKUP_DEST=<local dir>
+$ npm run backup
+{"level":"info","ts":"2026-08-04T03:55:24.851Z","msg":"backup: starting","filename":"phrase-drill-2026-08-04T03-55-24Z.sql.gz","destDir":"<local dir>"}
+{"level":"info","ts":"2026-08-04T03:55:24.883Z","msg":"backup: dump complete","bytes":855}
+{"level":"info","ts":"2026-08-04T03:55:24.884Z","msg":"backup: written","destination":"<local dir>/phrase-drill-2026-08-04T03-55-24Z.sql.gz"}
+{"level":"info","ts":"2026-08-04T03:55:24.884Z","msg":"backup: done","filename":"phrase-drill-2026-08-04T03-55-24Z.sql.gz","prunedCount":0}
+EXIT=0
+
+$ npm run restore-drill -- <local dir>/phrase-drill-2026-08-04T03-55-24Z.sql.gz
+PASS — table "users" exists
+PASS — table "sessions" exists
+PASS — table "libraries" exists
+PASS — table "clips" exists
+PASS — clip audio round-trips as binary (bytea, not text) (0 clip(s))
+PASS — clip digest (no --expect-clips-sha256 given to compare against) (e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 over 0 clip(s))
+EXIT=0
+
+$ BACKUP_DEST='s3://phrase-drill-backups' npm run backup
+backup: failed — BACKUP_DEST must be a local directory path, not "s3://..." — this script writes to a directory on the machine that runs it (docs/backup.md)
+EXIT=1
+```
+
+The third command is the negative control for the removal: a leftover
+`s3://` value fails loudly and says why, rather than creating `./s3:/…`
+and reporting a successful backup.
 
 ### How the bytea was actually verified
 
@@ -554,11 +584,10 @@ printed.
   not her library and not Render's Postgres. It proves the scripts are
   correct; it does not prove any particular real backup file is good. Only
   running the drill against a real backup does that.
-- **The `s3://` path was not exercised.** `BACKUP_DEST` pointed at a local
-  directory. The upload is one `aws s3 cp` and the prune is `aws s3 ls`/`rm`,
-  covered by unit tests over `awsArgs`, but no bucket was written to — that
-  needs credentials this drill deliberately did not have. The first real run
-  against Backblaze B2 is what settles it.
+- **Nothing has been run against Render.** Neither this script against the
+  External Database URL, nor a PITR restore, nor a logical export download.
+  The Render half of this document is read off Render's documentation, not
+  off a dashboard.
 - **Retention was never exercised against a real expiry.** `prunedCount: 0`
   — no file in the destination was older than 180 days. `selectExpiredBackups`
   is unit-tested; the live prune is not proven here.
@@ -566,3 +595,4 @@ printed.
   `UPDATE`) was walked in the earlier T054 run and its `--keep-scratch`
   behaviour re-confirmed here, but the hand-merge step is by design manual
   and has no automated proof.
+</content>

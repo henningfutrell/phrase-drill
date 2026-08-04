@@ -1,6 +1,21 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { backupFileName, parseBackupTimestamp, selectExpiredBackups, parseDestination, awsArgs } from './backup.mjs'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { backupFileName, parseBackupTimestamp, selectExpiredBackups, resolveDestinationDir } from './backup.mjs'
+
+const execFileAsync = promisify(execFile)
+const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'backup.mjs')
+
+/** Runs the script for real and resolves with its exit code and streams — never throws on a non-zero exit. */
+function runScript(env) {
+  return execFileAsync(process.execPath, [SCRIPT], { env: { PATH: process.env.PATH, ...env } }).then(
+    ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
+    (err) => ({ code: err.code, stdout: err.stdout ?? '', stderr: err.stderr ?? '' }),
+  )
+}
 
 describe('backupFileName', () => {
   it('is ISO-8601 UTC with colons swapped for dashes, so it sorts chronologically and is a safe filename', () => {
@@ -46,52 +61,42 @@ describe('selectExpiredBackups', () => {
   })
 })
 
-describe('parseDestination', () => {
-  it('parses an s3:// destination into bucket and prefix', () => {
-    expect(parseDestination('s3://phrase-drill-backups/prod')).toEqual({
-      kind: 's3',
-      bucket: 'phrase-drill-backups',
-      prefix: 'prod',
-    })
+describe('resolveDestinationDir', () => {
+  it('takes a local directory path as-is — the only destination this script has', () => {
+    expect(resolveDestinationDir('/var/backups/phrase-drill')).toBe('/var/backups/phrase-drill')
   })
 
-  it('parses an s3:// destination with no prefix', () => {
-    expect(parseDestination('s3://phrase-drill-backups')).toEqual({
-      kind: 's3',
-      bucket: 'phrase-drill-backups',
-      prefix: '',
-    })
+  it('accepts a relative directory path too', () => {
+    expect(resolveDestinationDir('./backups')).toBe('./backups')
   })
 
-  it('treats anything else as a local directory', () => {
-    expect(parseDestination('/var/backups/phrase-drill')).toEqual({ kind: 'local', dir: '/var/backups/phrase-drill' })
+  it('refuses an s3:// destination loudly rather than writing a directory literally named "s3:"', () => {
+    expect(() => resolveDestinationDir('s3://phrase-drill-backups/prod')).toThrow(/s3:\/\//)
+  })
+
+  it('refuses any other URI scheme for the same reason', () => {
+    expect(() => resolveDestinationDir('https://example.com/backups')).toThrow(/local directory/)
+    expect(() => resolveDestinationDir('b2://bucket')).toThrow(/local directory/)
   })
 })
 
-describe('awsArgs', () => {
-  it('adds nothing when no endpoint or region is configured', () => {
-    expect(awsArgs(['s3', 'ls'], {})).toEqual(['s3', 'ls'])
+// A backup that fails silently is worse than none. Every failure must reach
+// stderr, including the ones that happen before the logger is constructed —
+// those used to exit 1 with no output at all, which reads as a clean run to
+// anything watching stdout.
+describe('the script itself, run for real', () => {
+  it('says why it refused an s3:// destination instead of exiting 1 in silence', async () => {
+    const { code, stderr } = await runScript({
+      DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+      BACKUP_DEST: 's3://phrase-drill-backups',
+    })
+    expect(code).toBe(1)
+    expect(stderr).toMatch(/local directory/)
   })
 
-  it('forwards BACKUP_S3_ENDPOINT as --endpoint-url', () => {
-    expect(awsArgs(['s3', 'ls'], { BACKUP_S3_ENDPOINT: 'https://s3.us-west-002.backblazeb2.com' })).toEqual([
-      's3',
-      'ls',
-      '--endpoint-url',
-      'https://s3.us-west-002.backblazeb2.com',
-    ])
-  })
-
-  it('forwards BACKUP_S3_REGION as --region — Backblaze B2 needs it explicitly, unlike plain AWS S3', () => {
-    expect(awsArgs(['s3', 'ls'], { BACKUP_S3_REGION: 'us-west-002' })).toEqual(['s3', 'ls', '--region', 'us-west-002'])
-  })
-
-  it('forwards both, endpoint then region, when both are set', () => {
-    expect(
-      awsArgs(['s3', 'ls'], {
-        BACKUP_S3_ENDPOINT: 'https://s3.us-west-002.backblazeb2.com',
-        BACKUP_S3_REGION: 'us-west-002',
-      }),
-    ).toEqual(['s3', 'ls', '--endpoint-url', 'https://s3.us-west-002.backblazeb2.com', '--region', 'us-west-002'])
+  it('says which required variable was missing', async () => {
+    const { code, stderr } = await runScript({ BACKUP_DEST: '/tmp/nowhere' })
+    expect(code).toBe(1)
+    expect(stderr).toMatch(/DATABASE_URL is required/)
   })
 })

@@ -18,6 +18,12 @@ be gone with no recovery path the day it happened to expire. `render.yaml`
 already pins `plan: basic-256mb`; do not change it to `free`, and do not let
 Render's dashboard "downgrade" prompt talk you into it.
 
+**The backups that plan buys are the primary backup mechanism for this
+app** — there is no scheduled off-site job anywhere in this repo, by
+decision (T065). `docs/backup.md` documents what Render's managed backups
+cover, the exact dashboard path to restore from one, and the failure they
+do not cover.
+
 ## One-time setup
 
 1. **Connect the repo.** In the Render dashboard: New → Blueprint → pick
