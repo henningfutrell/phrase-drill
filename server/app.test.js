@@ -835,10 +835,12 @@ describe('server app (integration, fake upstreams)', () => {
      * `response.json()` on a 200, it threw, and the sync engine died for the
      * whole session while the UI still said "syncing".
      *
-     * 500 is the honest answer — the fault is the server's — and the client
-     * already maps it to `network`, which is a *handled* result it retries,
-     * not an exception. The row itself is the last copy, so it is neither
-     * deleted nor overwritten here.
+     * 500 is the honest answer — the fault is the server's — and it is a
+     * *handled* result at the device, not an exception. Since T089 the body
+     * is a contract too: `library-unreadable` is the one verdict this server
+     * gives on its own stored bytes, and it is what licenses the device to
+     * push over the row (see the repair-loop test below). The row itself is
+     * the last copy, so it is neither deleted nor overwritten here.
      */
     it('answers 500 library-unreadable instead of streaming back a stored row that will not parse', async () => {
       await boot()
