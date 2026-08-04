@@ -1,16 +1,33 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <!--
-    Plain geometric icon in the settled design palette (docs/design.md):
-    bg token ground with four accent-token bars of varying height, echoing
-    the app's "beat row" — the four-mark metronome indicator that is the
-    one visual idea the design commits to (a spoken phrase moving through
-    a fixed four-beat cadence, not a flashcard). All content sits inside
-    the centered 80% "safe zone" so this single design works unmodified
-    as both a regular and a maskable icon.
+    Source art for every raster icon here. Edit this file, never the PNGs —
+    they are produced from it. See "Icons" in docs/pwa.md.
+
+    The rose de mai on aubergine velvet, in gilt: the same mark the app draws
+    for its empty states and its login crest (`--rose-mark` in
+    src/styles/tokens.css), so the home-screen icon and the first screen behind
+    it are visibly one object. Replaces four #ff8a3d bars on #101114.
+
+    The ground is full-bleed and opaque. iOS masks this to a squircle itself,
+    and a transparent app icon renders on black there.
+
+    Maskable safe zone: Android may crop to a circle of 80% diameter, so
+    nothing meaningful may sit outside r=205 from centre. The petals reach
+    r=180 and the ring r=196, both inside it — which is why one piece of art
+    serves `any` and `maskable` with no second crop.
   -->
-  <rect width="512" height="512" fill="#101114" />
-  <rect x="76" y="176" width="60" height="160" rx="30" fill="#ff8a3d" />
-  <rect x="176" y="126" width="60" height="260" rx="30" fill="#ff8a3d" />
-  <rect x="276" y="156" width="60" height="200" rx="30" fill="#ff8a3d" />
-  <rect x="376" y="106" width="60" height="300" rx="30" fill="#ff8a3d" />
+  <rect width="512" height="512" fill="#191016"/>
+
+  <!-- Medallion ring: a gilt hairline, the engraved edge of a calling card.
+       Left off the favicon, where at 16px it would close up against the petals. -->
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#c8a56e" stroke-width="3" opacity="0.55"/>
+
+  <g fill="none" stroke="#c8a56e" stroke-width="9" stroke-linecap="round">
+    <ellipse cx="256" cy="160" rx="58" ry="84"/>
+    <ellipse cx="256" cy="160" rx="58" ry="84" transform="rotate(72 256 256)"/>
+    <ellipse cx="256" cy="160" rx="58" ry="84" transform="rotate(144 256 256)"/>
+    <ellipse cx="256" cy="160" rx="58" ry="84" transform="rotate(216 256 256)"/>
+    <ellipse cx="256" cy="160" rx="58" ry="84" transform="rotate(288 256 256)"/>
+    <circle cx="256" cy="256" r="34" stroke="#e3adbb"/>
+  </g>
 </svg>
