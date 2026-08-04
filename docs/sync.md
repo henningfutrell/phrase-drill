@@ -147,6 +147,16 @@ App, the real merge and the real round-trip with her write held in flight, and
 pins both halves: the merged Phrase survives on this phone and on the server,
 and so does hers.
 
+**The indivisibility itself is pinned separately**, in
+`src/adapters/storage/transaction-atomicity.test.ts` (T084), and it has to be:
+"one transaction" is a fact about a transaction, not about the values left in
+the stores, and until T084 these paths ran against a test double with
+`abort: () => {}` and a pre-settled `done` — which cannot tell this design from
+the `readLocal`/`writeLocal` pair it replaced. Those tests run against a real
+implementation of IndexedDB, assert which transaction carried the read and the
+write and over which stores, and race a real concurrent save against a real
+merge. Five of them go red against the two-transaction shape.
+
 **Saved Mixes are not covered by this**, deliberately. `persistMix` still puts a
 whole Mix built from React state, so a Mix she edits while a merge is landing
 can lose the other side's *selection of Deck ids* — the same trade the merge
