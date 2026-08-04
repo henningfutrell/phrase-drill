@@ -239,3 +239,46 @@ describe('DeckDetailScreen — the backup age follows her here only once it is u
     expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
   })
 })
+
+/**
+ * T067 requirement 4 — re-generating audio is hers to ask for, never
+ * automatic. Deck scope confirms first: it is the control that spends real
+ * money, one request per side per Phrase.
+ */
+describe('DeckDetailScreen — explicit re-generation (T067)', () => {
+  it('offers no re-generation control when the caller wires none', () => {
+    renderScreen(threePhraseDeck)
+
+    expect(container.querySelector('[data-testid="regenerate-deck-audio"]')).toBeNull()
+  })
+
+  it('asks for confirmation before re-generating a whole Deck, naming what it will do', () => {
+    const onRegenerateDeckAudio = vi.fn()
+    renderScreen(threePhraseDeck, { onRegenerateDeckAudio })
+
+    act(() => click(container.querySelector('[data-testid="regenerate-deck-audio"]')!))
+
+    expect(onRegenerateDeckAudio).not.toHaveBeenCalled()
+    const confirm = container.querySelector('[data-testid="confirm-regenerate-deck-audio"]')!
+    expect(confirm.textContent).toContain('3')
+  })
+
+  it('re-generates the whole Deck once confirmed', () => {
+    const onRegenerateDeckAudio = vi.fn()
+    renderScreen(threePhraseDeck, { onRegenerateDeckAudio })
+
+    act(() => click(container.querySelector('[data-testid="regenerate-deck-audio"]')!))
+    act(() => click(container.querySelector('[data-testid="confirm-regenerate-deck-audio"]')!))
+
+    expect(onRegenerateDeckAudio).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-generates one Phrase on one tap — two Clips is not a decision worth a confirmation', () => {
+    const onRegeneratePhraseAudio = vi.fn()
+    renderScreen(threePhraseDeck, { onRegeneratePhraseAudio })
+
+    act(() => click(container.querySelector('[data-testid="regenerate-phrase-audio-p2"]')!))
+
+    expect(onRegeneratePhraseAudio).toHaveBeenCalledWith('p2')
+  })
+})

@@ -1,7 +1,7 @@
-import type { Phrase } from '../../domain'
+import type { Phrase, Voice } from '../../domain'
 import type { ClipCache } from '../storage/clip-cache'
-import type { Voice } from '../storage/settings-store'
 import type { GenerationQueue } from './generation-queue'
+import { knownVoices } from './voice-catalogue'
 
 /** Why a Drill cannot start, or why it is starting smaller than the Deck it came from. */
 export type DrillReadinessReason = 'no-voice' | 'none-ready'
@@ -27,8 +27,12 @@ export interface DrillReadiness {
 export interface DrillReadinessDeps {
   readonly clipCache: ClipCache
   readonly generationQueue: GenerationQueue
-  /** The pinned voice, or `null` if the owner hasn't chosen one yet — a real
-   * state (T024), never defaulted. */
+  /**
+   * The pinned voice, or `null` if the owner hasn't chosen one yet — a real
+   * state (T024), never defaulted. It decides what an unready Phrase is
+   * GENERATED in, and nothing else (T067): readiness is asked over every
+   * voice a Clip could be in, so re-pinning cannot make cached audio unready.
+   */
   readonly voice: Voice | null
   /** Defaults to `navigator.onLine`. Missing clips are queued only when online. */
   isOnline?(): boolean
@@ -36,8 +40,8 @@ export interface DrillReadinessDeps {
 
 /**
  * The drill-start readiness sweep (T019 §3): asks which Phrases already have
- * both Clips under the pinned voice, queues generation for the rest when
- * online, and excludes everything not ready from this run. This is the
+ * both Clips in ANY voice they could have been generated in (T067), queues
+ * generation for the rest — in the pinned voice — when online, and excludes everything not ready from this run. This is the
  * enforcement behind the domain's contract — "every Phrase given to
  * `createDrillPlayer` is playable" — so its `ready` array is exactly what a
  * caller must pass to `createDrillPlayer`. Lives adapter-side, not as a
@@ -61,7 +65,10 @@ export async function computeDrillReadiness(
     }
   }
 
-  const readyIds = await deps.clipCache.readyPhraseIds(phrases, deps.voice)
+  // Every voice a Clip could be in, pinned first (T067). Asking only about
+  // the pinned voice is what used to report a fully-generated library as
+  // entirely unready the moment she changed her mind, and enqueue all of it.
+  const readyIds = await deps.clipCache.readyPhraseIds(phrases, knownVoices(deps.voice))
   const ready = phrases.filter((phrase) => readyIds.has(phrase.id))
   const unready = phrases.filter((phrase) => !readyIds.has(phrase.id))
 

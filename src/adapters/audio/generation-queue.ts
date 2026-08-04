@@ -1,6 +1,6 @@
 import type { Language, Phrase } from '../../domain'
 import { computeClipHash, type ClipCache } from '../storage/clip-cache'
-import type { Voice } from '../storage/settings-store'
+import type { Voice } from '../../domain'
 import type { SynthClient, SynthError } from './server-synth-client'
 
 /** Bounded automatic retries for a `network` failure before giving up.

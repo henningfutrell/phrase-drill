@@ -55,6 +55,13 @@ import type { DeckRecord, Library, MixRecord, PhraseRecord, Tombstone } from './
  * evicted — every deck falls back to whole-record last-write-wins, exactly as
  * T060 behaved. A missing baseline degrades the merge; it never breaks it.
  *
+ * The pinned voice (T067) is neither: it is one value with no id and no
+ * `updatedAt`, and it takes plain last-writer-wins — this device's, unless
+ * this device has none. It used to be able to invalidate the whole audio
+ * cache, which would have made that rule reckless; it cannot any more, so a
+ * conflict on it changes what the next new Phrase is generated in and
+ * nothing else.
+ *
  * Mixes stay whole-record even with a baseline: a Mix is a name and a list of
  * Deck ids, so the loser of a Mix conflict is a selection she can re-make in
  * seconds, not text she wrote.
@@ -101,6 +108,15 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
     // A Tombstone whose record survived was outlived by a rewrite of that
     // id; keeping it would delete the record again on the next merge.
     tombstones: [...tombstones.values()].filter((tombstone) => !survivingIds.has(key(tombstone.kind, tombstone.id))),
+    // The pinned voice (T067): last writer wins, and the writer is whichever
+    // device is syncing. No `pinnedAt` was invented to arbitrate it, because
+    // there is nothing left for a timestamp to protect — since T067 a Clip
+    // is playable in the voice it was made in, so losing this conflict costs
+    // her what the NEXT new Phrase is generated in and nothing else. A
+    // side with no voice never clears the other's: absent means "none
+    // recorded", which is how a new phone adopts the voice from the server
+    // copy and how an envelope written before T067 leaves a local pin alone.
+    voice: local.voice ?? remote.voice,
   }
 }
 

@@ -201,14 +201,21 @@ describe('SettingsScreen', () => {
       expect(text).not.toMatch(/credit/i)
     })
 
-    it('warns, before committing, that switching voices regenerates every phrase and takes a while — not "cache invalidation"', async () => {
+    /**
+     * T067 reversed what this sheet has to say. It used to warn that every
+     * phrase would be made again — which is exactly the behaviour the owner
+     * rejected. Switching now costs nothing: the audio she has keeps
+     * playing, and the new voice applies to what is made next.
+     */
+    it('says, before committing, that the audio she already has is kept — never that everything will be made again', async () => {
       renderScreen()
       await act(async () => click(container.querySelector('[data-testid="voice-choose-voice-rachel"]')!))
 
       const sheet = container.querySelector('[data-testid="voice-confirm-sheet"]')
       expect(sheet).not.toBeNull()
-      expect(sheet!.textContent).toMatch(/again|remade|made again/i)
-      expect(sheet!.textContent).toMatch(/while|time/i)
+      expect(sheet!.textContent).toMatch(/keep|kept/i)
+      expect(sheet!.textContent).toMatch(/new phrases/i)
+      expect(sheet!.textContent).not.toMatch(/every phrase will|made again|takes a little while/i)
       expect(sheet!.textContent).not.toMatch(/cache|invalidat/i)
     })
 

@@ -1,7 +1,6 @@
 import type { IDBPDatabase } from 'idb'
-import type { Language, PhraseRecord } from '../../domain'
+import type { Language, PhraseRecord, Voice } from '../../domain'
 import { CLIPS_STORE, CLIP_META_STORE, openDatabase } from './database'
-import type { Voice } from './settings-store'
 
 /**
  * A cached rendering of one side of one Phrase, in one voice — the on-disk
@@ -42,6 +41,32 @@ export async function computeClipHash(key: ClipKey): Promise<string> {
     .join('')
 }
 
+/**
+ * The hash of the first of `voices` this cache holds a Clip for, or
+ * `undefined` when none of them has one (T067).
+ *
+ * The one place the "which voice do we play?" rule lives, shared by the
+ * readiness sweep and by playback so the two can never disagree: **the first
+ * voice in the given order that has a Clip**, and callers put the pinned
+ * voice first. Deterministic, and it stops at the first hit — a warm library
+ * in the pinned voice costs one hash per side, exactly as before.
+ *
+ * Takes `has` rather than a whole cache because the cache implementation
+ * calls it from inside itself, against its own in-memory index.
+ */
+export async function findCachedClipHash(
+  has: (hash: string) => Promise<boolean>,
+  voices: readonly Voice[],
+  lang: Language,
+  text: string,
+): Promise<string | undefined> {
+  for (const voice of voices) {
+    const hash = await computeClipHash({ ...voice, lang, text })
+    if (await has(hash)) return hash
+  }
+  return undefined
+}
+
 export interface ClipCache {
   /**
    * The cached Clip, if there is one — and the one call that counts as
@@ -53,12 +78,20 @@ export interface ClipCache {
   put(clip: Clip): Promise<void>
   has(hash: string): Promise<boolean>
   /**
-   * Which of these Phrases already have both an FR and an EN clip cached
-   * under the given (pinned) voice — "can be drilled right now, without
-   * generating anything". One call over the whole set, the question the
-   * drill-start readiness sweep asks, not one `has` per Phrase per language.
+   * Which of these Phrases already have both an FR and an EN clip cached in
+   * ANY of `voices` — "can be drilled right now, without generating
+   * anything". One call over the whole set, the question the drill-start
+   * readiness sweep asks, not one `has` per Phrase per language.
+   *
+   * **A list of voices, not the pinned one (T067).** A Clip's voice is a
+   * property of that Clip: audio made in one voice stays playable after
+   * another is pinned, so asking only about the pinned voice reported a
+   * fully-generated library as entirely unready and queued all of it for
+   * regeneration. `voices` is in preference order — pinned first — and the
+   * first hit wins, so the ordinary case (everything in the pinned voice)
+   * costs exactly what it did before.
    */
-  readyPhraseIds(phrases: readonly PhraseRecord[], voice: Voice): Promise<Set<string>>
+  readyPhraseIds(phrases: readonly PhraseRecord[], voices: readonly Voice[]): Promise<Set<string>>
 }
 
 /** What the cache is holding, and what it is allowed to hold (T036). */
@@ -255,21 +288,25 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       return (await getIndex()).has(hash)
     },
 
-    async readyPhraseIds(phrases: readonly PhraseRecord[], voice: Voice): Promise<Set<string>> {
+    async readyPhraseIds(phrases: readonly PhraseRecord[], voices: readonly Voice[]): Promise<Set<string>> {
       if (phrases.length === 0) return new Set()
 
       // The index, not `getAll(CLIPS_STORE)`. The old form loaded every Clip
       // in the cache — the whole ~848 MB at a full library — to answer a
-      // question about which hashes exist (docs/scale.md §3).
+      // question about which hashes exist (docs/scale.md §3). Asking about
+      // several voices does not change that: this is still one read of the
+      // small `clipMeta` rows, already in memory, and the extra work is
+      // hashing, which touches no storage at all.
       const cachedHashes = await getIndex()
+      const has = (hash: string): Promise<boolean> => Promise.resolve(cachedHashes.has(hash))
 
       const ready = new Set<string>()
       for (const phrase of phrases) {
-        const [frHash, enHash] = await Promise.all([
-          computeClipHash({ ...voice, lang: 'fr-FR', text: phrase.french }),
-          computeClipHash({ ...voice, lang: 'en-US', text: phrase.english }),
+        const [french, english] = await Promise.all([
+          findCachedClipHash(has, voices, 'fr-FR', phrase.french),
+          findCachedClipHash(has, voices, 'en-US', phrase.english),
         ])
-        if (cachedHashes.has(frHash) && cachedHashes.has(enHash)) {
+        if (french && english) {
           ready.add(phrase.id)
         }
       }

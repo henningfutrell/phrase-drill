@@ -1,4 +1,4 @@
-import { LIBRARY_FORMAT, type Library } from '../../domain'
+import { isVoice, LIBRARY_FORMAT, type Library, type Voice } from '../../domain'
 import {
   CURRENT_SCHEMA_VERSION,
   migrateDeckRecord,
@@ -53,6 +53,16 @@ export function parseLibraryFile(raw: string): ParseLibraryResult {
     return { ok: false, reason: 'invalid' }
   }
 
+  // `voice` arrived at T067 and reads like the two above: absent is every
+  // backup written before then and means "no voice recorded"; present and
+  // not a Voice is a corrupt file. A file she chose is refused outright
+  // rather than silently repaired — unlike a pulled envelope, where losing
+  // the sync of her phrases over a preference field would be the worse
+  // failure (see `normalizeLibrary`).
+  if (candidate.voice !== undefined && !isVoice(candidate.voice)) {
+    return { ok: false, reason: 'invalid' }
+  }
+
   return { ok: true, library: candidate as unknown as Library }
 }
 
@@ -91,7 +101,7 @@ export function buildLibrary(
 
 /**
  * Bring a library — this device's or the server's — to the current schema
- * and fill in every field a merge reads, so `mergeLibraries` compares two
+ * and fill in every field a merge reads (the pinned voice included, T067), so `mergeLibraries` compares two
  * envelopes of the same shape and never has to guess what an absent field
  * meant (T060).
  *
@@ -116,7 +126,35 @@ export function normalizeLibrary(library: Library): Library {
     decks: migrateLibraryDecks(library),
     mixes: migrateLibraryMixes(library),
     tombstones: migrateLibraryTombstones(library),
+    voice: migrateLibraryVoice(library),
   }
+}
+
+/**
+ * The pinned voice of a library (T067), or `undefined` when it has none —
+ * which is every envelope written before T067, and is not an error.
+ *
+ * A malformed voice is dropped rather than thrown on. This runs on the sync
+ * path, where the envelope came from the server rather than from a file she
+ * chose: refusing it would stop her phrases syncing over a preference field,
+ * and a dropped voice costs one tap in Settings. `parseLibraryFile` is
+ * stricter on purpose, because there a bad field means a bad file.
+ */
+export function migrateLibraryVoice(library: Library): Voice | undefined {
+  return isVoice(library.voice) ? library.voice : undefined
+}
+
+/**
+ * Join the pinned voice onto an envelope the deck store built (T067).
+ *
+ * This is the whole of what settings contributes to a `Library`, and it is
+ * named field by field on purpose: the deck store still reads no settings at
+ * all, so nothing else in that store has a route into a backup file or onto
+ * the wire. `null` produces an envelope with no voice field, which is what
+ * "nothing pinned" means everywhere else.
+ */
+export function withVoice(library: Library, voice: Voice | null): Library {
+  return { ...library, voice: voice ?? undefined }
 }
 
 /**

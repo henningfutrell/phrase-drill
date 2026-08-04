@@ -1,3 +1,5 @@
+import type { Voice } from '../../domain'
+
 /**
  * Curated catalogue of voices offered by the Settings voice picker (T026).
  * The ElevenLabs key this app holds is scoped to synthesis only — `GET
@@ -47,3 +49,29 @@ export const VOICE_CATALOGUE: readonly VoiceCatalogueEntry[] = [
 
 /** Preview text used when her library has no Phrases yet to draw a real one from. */
 export const FALLBACK_PREVIEW_PHRASE = 'Bonjour, comment ça va ?'
+
+/**
+ * Every voice a cached Clip could plausibly be in, in the order playback and
+ * the readiness sweep must prefer them: the pinned voice first, then the
+ * catalogue in its declared order (T067).
+ *
+ * This list is what makes "does this Phrase have audio in ANY voice?"
+ * answerable without a new index. A Clip is content-addressed by
+ * `provider|modelId|voiceId|lang|text`, so knowing the text and the language
+ * leaves only the voice unknown — and the voices she can pin are exactly the
+ * ones in this file. Three candidates cost three hashes per side in the worst
+ * case, and none at all in the common one, because callers stop at the first
+ * hit and the pinned voice is tried first.
+ *
+ * Known gap, stated rather than solved: a voice REMOVED from the catalogue
+ * takes its Clips out of reach, and they are then regenerated in a voice that
+ * is still offered. Retiring a voice is a deliberate edit to this file, so
+ * the answer is to keep a retired entry here until its Clips have aged out of
+ * the cache, not to build a second registry of voices ever pinned.
+ */
+export function knownVoices(pinned: Voice | null): Voice[] {
+  const catalogue = VOICE_CATALOGUE.map(({ provider, modelId, voiceId }) => ({ provider, modelId, voiceId }))
+  if (!pinned) return catalogue
+  const address = (voice: Voice): string => `${voice.provider}|${voice.modelId}|${voice.voiceId}`
+  return [pinned, ...catalogue.filter((voice) => address(voice) !== address(pinned))]
+}
