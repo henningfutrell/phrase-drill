@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { backupFileName, parseBackupTimestamp, selectExpiredBackups, parseDestination } from './backup.mjs'
+import { backupFileName, parseBackupTimestamp, selectExpiredBackups, parseDestination, awsArgs } from './backup.mjs'
 
 describe('backupFileName', () => {
   it('is ISO-8601 UTC with colons swapped for dashes, so it sorts chronologically and is a safe filename', () => {
@@ -65,5 +65,33 @@ describe('parseDestination', () => {
 
   it('treats anything else as a local directory', () => {
     expect(parseDestination('/var/backups/phrase-drill')).toEqual({ kind: 'local', dir: '/var/backups/phrase-drill' })
+  })
+})
+
+describe('awsArgs', () => {
+  it('adds nothing when no endpoint or region is configured', () => {
+    expect(awsArgs(['s3', 'ls'], {})).toEqual(['s3', 'ls'])
+  })
+
+  it('forwards BACKUP_S3_ENDPOINT as --endpoint-url', () => {
+    expect(awsArgs(['s3', 'ls'], { BACKUP_S3_ENDPOINT: 'https://s3.us-west-002.backblazeb2.com' })).toEqual([
+      's3',
+      'ls',
+      '--endpoint-url',
+      'https://s3.us-west-002.backblazeb2.com',
+    ])
+  })
+
+  it('forwards BACKUP_S3_REGION as --region — Backblaze B2 needs it explicitly, unlike plain AWS S3', () => {
+    expect(awsArgs(['s3', 'ls'], { BACKUP_S3_REGION: 'us-west-002' })).toEqual(['s3', 'ls', '--region', 'us-west-002'])
+  })
+
+  it('forwards both, endpoint then region, when both are set', () => {
+    expect(
+      awsArgs(['s3', 'ls'], {
+        BACKUP_S3_ENDPOINT: 'https://s3.us-west-002.backblazeb2.com',
+        BACKUP_S3_REGION: 'us-west-002',
+      }),
+    ).toEqual(['s3', 'ls', '--endpoint-url', 'https://s3.us-west-002.backblazeb2.com', '--region', 'us-west-002'])
   })
 })

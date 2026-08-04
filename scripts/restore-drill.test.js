@@ -2,6 +2,14 @@
 import { describe, expect, it } from 'vitest'
 import { scratchDatabaseName, SCRATCH_DATABASE_PREFIX, parseRestoreArgs } from './restore-drill.mjs'
 
+const withDefaults = (overrides) => ({
+  backupFile: '/tmp/backup.sql.gz',
+  libraryKey: null,
+  expectSha256: null,
+  keepScratch: false,
+  ...overrides,
+})
+
 describe('scratchDatabaseName', () => {
   it('always starts with the scratch prefix, never a name the caller controls', () => {
     const name = scratchDatabaseName()
@@ -25,22 +33,28 @@ describe('parseRestoreArgs', () => {
   })
 
   it('parses the backup file path with no optional flags', () => {
-    expect(parseRestoreArgs(['/tmp/backup.sql.gz'])).toEqual({
-      backupFile: '/tmp/backup.sql.gz',
-      libraryKey: null,
-      expectSha256: null,
-    })
+    expect(parseRestoreArgs(['/tmp/backup.sql.gz'])).toEqual(withDefaults())
   })
 
   it('parses --library-key and --expect-sha256', () => {
-    expect(parseRestoreArgs(['/tmp/backup.sql.gz', '--library-key=abc123', '--expect-sha256=deadbeef'])).toEqual({
-      backupFile: '/tmp/backup.sql.gz',
-      libraryKey: 'abc123',
-      expectSha256: 'deadbeef',
-    })
+    expect(parseRestoreArgs(['/tmp/backup.sql.gz', '--library-key=abc123', '--expect-sha256=deadbeef'])).toEqual(
+      withDefaults({ libraryKey: 'abc123', expectSha256: 'deadbeef' }),
+    )
   })
 
   it('rejects an unrecognized flag rather than silently ignoring it', () => {
     expect(() => parseRestoreArgs(['/tmp/backup.sql.gz', '--bogus=1'])).toThrow(/unrecognized/i)
+  })
+
+  it('defaults --keep-scratch to false — the safe path (always drop) needs no flag', () => {
+    expect(parseRestoreArgs(['/tmp/backup.sql.gz']).keepScratch).toBe(false)
+  })
+
+  it('parses a bare --keep-scratch (no "=value") as true', () => {
+    expect(parseRestoreArgs(['/tmp/backup.sql.gz', '--keep-scratch'])).toEqual(withDefaults({ keepScratch: true }))
+  })
+
+  it('rejects --keep-scratch=anything — it is a boolean presence flag, not a valued one', () => {
+    expect(() => parseRestoreArgs(['/tmp/backup.sql.gz', '--keep-scratch=true'])).toThrow(/--keep-scratch/i)
   })
 })
