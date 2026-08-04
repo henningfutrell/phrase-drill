@@ -28,6 +28,9 @@ import type { DeckRecord, Library, MixRecord, PhraseRecord, Tombstone } from './
  *   Deck she recreated would be deleted again on the next merge, forever.
  *   Since T070 that is judged against the baseline rather than against the
  *   other device's clock; see `isDeleted`.
+ * - **Two records sharing an id are both kept**, never paired up and folded
+ *   into one, whether they are Decks, Mixes or Phrases (T086). See
+ *   `mergeRecords`.
  *
  * ## Inside a Deck, when a baseline is known (T034)
  *
@@ -161,15 +164,26 @@ function key(kind: Tombstone['kind'], id: string): string {
  * Records by id, or nothing at all when there is nothing to index. Absent and
  * empty are different answers here: absent is "there is no baseline to reason
  * from", empty is "the baseline held none of these".
+ *
+ * **An id the baseline holds twice is left out** (T086). A baseline entry
+ * answers one question — "is this record the one both sides agreed on?" — and
+ * two entries under one id cannot answer it: nothing pairs a later record with
+ * one of them rather than the other. Left in, whichever copy the index happened
+ * to keep would decide whether a Tombstone deletes a Deck, so a coin toss could
+ * remove handwriting. Left out, that id reads as one the baseline never held,
+ * which is the reading that keeps things — the same degradation an unreadable
+ * baseline takes in `mergeLibraries`.
  */
 function byId<T extends { readonly id: string }>(records: readonly T[] | undefined): Map<string, T> | undefined {
   if (records === undefined) return undefined
-  return new Map(records.map((record) => [record.id, record]))
+  const sole = new Map<string, T>()
+  for (const [id, held] of groupById(records)) if (held.length === 1) sole.set(id, held[0]!)
+  return sole
 }
 
 /**
- * Every Mix from both sides. Local order first, then whatever only the remote
- * had — the same ordering rule the Decks follow.
+ * Every Mix from both sides — see `mergeRecords` for how they are brought
+ * together, and what a duplicated id does there.
  *
  * A Mix's CONTENTS stay whole-record: it is a name and a list of Deck ids, and
  * the loser of a conflict is a selection she can re-make in seconds. But which
@@ -181,15 +195,7 @@ function mergeMixes(
   remote: readonly MixRecord[],
   base: readonly MixRecord[] | undefined,
 ): MixRecord[] {
-  const baseById = base && new Map(base.map((mix) => [mix.id, mix]))
-  const remoteById = new Map(remote.map((mix) => [mix.id, mix]))
-  const localIds = new Set(local.map((mix) => mix.id))
-
-  const merged = local.map((mix) => {
-    const other = remoteById.get(mix.id)
-    return other ? reconcileMix(mix, other, baseById?.get(mix.id)) : mix
-  })
-  return [...merged, ...remote.filter((mix) => !localIds.has(mix.id))]
+  return mergeRecords(local, remote, base, reconcileMix, sameMixContent)
 }
 
 /**
@@ -218,24 +224,67 @@ function sameMixContent(mix: MixRecord, base: MixRecord): boolean {
 
 /**
  * Every Deck from both sides. An id only one side holds is kept as it is; an
- * id both hold is reconciled against the baseline (T034). Local order first,
- * then whatever only the remote had — a Deck she is looking at does not move
- * under her because another device wrote one.
+ * id both hold once is reconciled against the baseline (T034); an id either
+ * side holds twice takes the union — see `mergeRecords`.
  */
 function mergeDecks(
   local: readonly DeckRecord[],
   remote: readonly DeckRecord[],
   base: readonly DeckRecord[] | undefined,
 ): DeckRecord[] {
-  const baseById = base && new Map(base.map((deck) => [deck.id, deck]))
-  const remoteById = new Map(remote.map((deck) => [deck.id, deck]))
-  const localIds = new Set(local.map((deck) => deck.id))
+  return mergeRecords(local, remote, base, reconcileDeck, sameDeckContent)
+}
 
-  const merged = local.map((deck) => {
-    const other = remoteById.get(deck.id)
-    return other ? reconcileDeck(deck, other, baseById?.get(deck.id)) : deck
-  })
-  return [...merged, ...remote.filter((deck) => !localIds.has(deck.id))]
+/**
+ * Every record of one kind from both sides, by id. Local order first, then
+ * whatever only the remote had — a Deck she is looking at does not move under
+ * her because another device wrote one.
+ *
+ * **Two records sharing an id are both kept, never folded into one** (T086).
+ * Nothing on the write path mints a duplicate id — the app uses uuids — but a
+ * hand-edited backup file does, and `parseLibraryFile` accepts what it
+ * validates. This used to index the other side with a `Map`, which kept the
+ * last of them, and the pass that carried remote-only records then filtered
+ * that id out entirely, because this side held it: the unpaired Deck was not
+ * folded but dropped whole, with every Phrase in it, silently.
+ *
+ * There is no sound way to pair two records under one id, so neither side's is
+ * reconciled against the other's: both sides are kept whole and only exact
+ * repeats are folded together, so the merge still converges instead of growing
+ * on every sync. The cost is that she sees the duplicate and fixes it with one
+ * tap; the cost of the alternative is handwriting that exists nowhere else.
+ * This is the answer T070 already settled for Phrases, applied where it always
+ * belonged too — see `mergePhrases`.
+ */
+function mergeRecords<T extends { readonly id: string }>(
+  local: readonly T[],
+  remote: readonly T[],
+  base: readonly T[] | undefined,
+  reconcile: (local: T, remote: T, base: T | undefined) => T,
+  sameContent: (record: T, base: T) => boolean,
+): T[] {
+  const baseById = byId(base)
+  const localById = groupById(local)
+  const remoteById = groupById(remote)
+  const ids = [...new Set([...local, ...remote].map((record) => record.id))]
+
+  const merged: T[] = []
+  for (const id of ids) {
+    const mine = localById.get(id) ?? []
+    const theirs = remoteById.get(id) ?? []
+    if (mine.length > 1 || theirs.length > 1) {
+      merged.push(...unionByContent(mine, theirs, sameContent))
+      continue
+    }
+    const held = mine[0]
+    const other = theirs[0]
+    // `ids` came from the two lists, so a side with none means the other side
+    // has exactly one. An id only one side holds is kept as it is.
+    if (held === undefined) merged.push(theirs[0]!)
+    else if (other === undefined) merged.push(held)
+    else merged.push(reconcile(held, other, baseById?.get(id)))
+  }
+  return merged
 }
 
 /**
@@ -338,7 +387,7 @@ function mergePhrases(
     // together: a duplicate id is already a defect, and answering it by
     // dropping one of her phrases makes it a loss (T070).
     if (mine.length > 1 || theirs.length > 1 || before.length > 1) {
-      merged.push(...unionByContent(mine, theirs))
+      merged.push(...unionByContent(mine, theirs, samePhrase))
       continue
     }
 
@@ -375,26 +424,27 @@ function mergePhrases(
 const NONE: readonly PhraseRecord[] = []
 
 /**
- * Every Phrase under its id, in order — a list, because ids are not unique.
+ * Every record under its id, in order — a list, because ids are not unique
+ * anywhere in this file: not for Phrases, and not for Decks or Mixes (T086).
  * No baseline at all groups to nothing, which is the honest reading: with
  * nothing to compare against, nothing is known to have been deleted.
  */
-function groupById(phrases: readonly PhraseRecord[] | undefined): Map<string, PhraseRecord[]> {
-  const grouped = new Map<string, PhraseRecord[]>()
-  if (phrases === undefined) return grouped
-  for (const phrase of phrases) {
-    const held = grouped.get(phrase.id)
-    if (held) held.push(phrase)
-    else grouped.set(phrase.id, [phrase])
+function groupById<T extends { readonly id: string }>(records: readonly T[] | undefined): Map<string, T[]> {
+  const grouped = new Map<string, T[]>()
+  if (records === undefined) return grouped
+  for (const record of records) {
+    const held = grouped.get(record.id)
+    if (held) held.push(record)
+    else grouped.set(record.id, [record])
   }
   return grouped
 }
 
-/** Both sides' Phrases under one id, keeping every distinct one exactly once. */
-function unionByContent(mine: readonly PhraseRecord[], theirs: readonly PhraseRecord[]): PhraseRecord[] {
+/** Both sides' records under one id, keeping every distinct one exactly once. */
+function unionByContent<T>(mine: readonly T[], theirs: readonly T[], same: (a: T, b: T) => boolean): T[] {
   const kept = [...mine]
-  for (const phrase of theirs) {
-    if (!kept.some((held) => samePhrase(held, phrase))) kept.push(phrase)
+  for (const record of theirs) {
+    if (!kept.some((held) => same(held, record))) kept.push(record)
   }
   return kept
 }

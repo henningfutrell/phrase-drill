@@ -169,6 +169,26 @@ function contentOf(record: DeckRecord): string {
   return JSON.stringify([record.name, record.phrases])
 }
 
+/**
+ * Deck ids where "did the id survive?" and "did THIS copy survive?" are
+ * different questions: a Tombstone names the id, and one side holds that id
+ * twice. The Tombstone removes the copy unchanged since the baseline and
+ * leaves the copy written after it (T070), so one copy of the id can go while
+ * another stays. The properties below ask about ids, so they cannot speak
+ * about these — that is a per-copy question, and the example tests own it.
+ */
+function partlyDeletable(local: Library, remote: Library): Set<string> {
+  const named = new Set(
+    [...(local.tombstones ?? []), ...(remote.tombstones ?? [])]
+      .filter((tombstone) => tombstone.kind === 'deck')
+      .map((tombstone) => tombstone.id),
+  )
+  const duplicated = [...decksById(local), ...decksById(remote)]
+    .filter(([, records]) => records.length > 1)
+    .map(([id]) => id)
+  return new Set(duplicated.filter((id) => named.has(id)))
+}
+
 /** One generated three-way scenario, and the merge of it. */
 function scenario(seed: number): {
   local: Library
@@ -231,12 +251,14 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
 
   it('never removes a Phrase this device holds, unless a Tombstone removed its whole Deck', () => {
     for (const seed of seeds) {
-      const { local, merged } = scenario(seed)
+      const { local, remote, merged } = scenario(seed)
       const survivingDecks = decksById(merged)
+      const partly = partlyDeletable(local, remote)
       const tombstoned = new Set((merged.tombstones ?? []).filter((t) => t.kind === 'deck').map((t) => t.id))
 
       for (const record of local.decks) {
         const survivors = survivingDecks.get(record.id) ?? []
+        if (partly.has(record.id)) continue
         if (survivors.length === 0) {
           expect({ seed, id: record.id, tombstoned: tombstoned.has(record.id) }).toEqual({
             seed,
@@ -264,10 +286,11 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
       const survivingDecks = decksById(merged)
       const localDecks = decksById(local)
       const baseDecks = decksById(base)
+      const partly = partlyDeletable(local, remote)
 
       for (const record of remote.decks) {
         const survivors = survivingDecks.get(record.id) ?? []
-        if (survivors.length === 0) continue
+        if (survivors.length === 0 || partly.has(record.id)) continue
         const kept = new Set(phrasesUnder(survivors).map((phrase) => phrase.id))
         const mine = localDecks.get(record.id) ?? []
         for (const held of record.phrases) {
@@ -291,12 +314,13 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
 
   it('keeps every Phrase this device holds under a duplicated id — two never collapse into one', () => {
     for (const seed of seeds) {
-      const { local, merged } = scenario(seed)
+      const { local, remote, merged } = scenario(seed)
       const survivingDecks = decksById(merged)
+      const partly = partlyDeletable(local, remote)
 
       for (const record of local.decks) {
         const survivors = survivingDecks.get(record.id) ?? []
-        if (survivors.length === 0) continue
+        if (survivors.length === 0 || partly.has(record.id)) continue
         for (const id of new Set(record.phrases.map((held) => held.id))) {
           const mineAlike = record.phrases.filter((held) => held.id === id).length
           if (mineAlike < 2) continue
@@ -316,10 +340,11 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
     for (const seed of seeds) {
       const { local, remote, merged } = scenario(seed)
       const survivingDecks = decksById(merged)
+      const partly = partlyDeletable(local, remote)
 
       for (const side of [local, remote]) {
         for (const [id, records] of decksById(side)) {
-          if (records.length < 2) continue
+          if (records.length < 2 || partly.has(id)) continue
           const survivors = survivingDecks.get(id) ?? []
           // Gone entirely is a Tombstone's business, checked above.
           if (survivors.length === 0) continue

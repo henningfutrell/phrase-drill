@@ -1206,6 +1206,16 @@ describe('mergeLibraries — duplicate Deck and Mix ids are kept, never collapse
     expect(merged.decks).toEqual([twinB])
   })
 
+  it('says nothing about that id whichever of the two copies the surviving Deck matches', () => {
+    const merged = mergeLibraries(
+      library({ decks: [twinA] }),
+      library({ tombstones: [{ kind: 'deck', id: 'd1', deletedAt: 4000 }] }),
+      library({ decks: [twinA, twinB] }),
+    )
+
+    expect(merged.decks).toEqual([twinA])
+  })
+
   it('merges a singly-held id against an ambiguous baseline as if there were none — the union, losing nothing', () => {
     const merged = mergeLibraries(
       library({ decks: [deck({ id: 'd1', name: 'Mine', updatedAt: 3000, phrases: [A, C] })] }),
