@@ -20,9 +20,48 @@ const { Pool } = pg
  * driver, a real Postgres, and this SQL agreeing is what `server/app.test.js`
  * plus the live `docker compose` verification prove.
  */
-export function createLibraryStore(pool) {
+export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, versionMaxBytes } = {}) {
+  const intervalMs = snapshotIntervalMs ?? LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS
+  const maxCount = versionMaxCount ?? LIBRARY_VERSION_MAX_COUNT
+  const maxBytes = versionMaxBytes ?? LIBRARY_VERSION_MAX_BYTES
+
+  async function get(key) {
+    const { rows } = await pool.query('SELECT data, updated_at AS "updatedAt" FROM libraries WHERE library_key = $1', [key])
+    if (rows.length === 0) return null
+    return { data: rows[0].data, updatedAt: Number(rows[0].updatedAt) }
+  }
+
+  /** Milliseconds since the newest archived version for this key, or `null` if there is none. */
+  async function lastArchivedAt(key) {
+    const { rows } = await pool.query('SELECT archived_at AS "archivedAt" FROM library_versions WHERE library_key = $1 ORDER BY id DESC LIMIT 1', [
+      key,
+    ])
+    return rows.length === 0 ? null : Number(rows[0].archivedAt)
+  }
+
+  /**
+   * Drops the oldest archived versions for one key until both budgets hold.
+   * The arithmetic is here rather than in a window function so that what is
+   * kept is readable, testable and obviously bounded — at a few dozen rows
+   * the round trip costs nothing, and it only runs on the puts that archived.
+   *
+   * The newest version is never a candidate, however large it is: a budget
+   * that can delete the last copy is the defect this table exists to fix.
+   */
+  async function pruneVersions(key) {
+    const { rows } = await pool.query('SELECT id, octet_length(data) AS bytes FROM library_versions WHERE library_key = $1 ORDER BY id DESC', [key])
+    const doomed = []
+    let running = 0
+    rows.forEach((row, index) => {
+      running += Number(row.bytes)
+      if (index === 0) return
+      if (index >= maxCount || running > maxBytes) doomed.push(Number(row.id))
+    })
+    if (doomed.length > 0) await pool.query('DELETE FROM library_versions WHERE id = ANY($1::bigint[])', [doomed])
+  }
+
   return {
-    /** Idempotent: safe to call on every boot, including against a database that already has the table. */
+    /** Idempotent: safe to call on every boot, including against a database that already has the tables. */
     async init() {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS libraries (
@@ -31,15 +70,63 @@ export function createLibraryStore(pool) {
           updated_at BIGINT NOT NULL
         )
       `)
+      // T071. Same `CREATE TABLE IF NOT EXISTS` rule as every other table
+      // here, so the already-deployed database gets it on its next restart
+      // with no manual step and no existing row touched.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS library_versions (
+          id BIGSERIAL PRIMARY KEY,
+          library_key TEXT NOT NULL,
+          data TEXT NOT NULL,
+          updated_at BIGINT NOT NULL,
+          archived_at BIGINT NOT NULL
+        )
+      `)
+      await pool.query('CREATE INDEX IF NOT EXISTS library_versions_key_idx ON library_versions (library_key, id DESC)')
     },
 
-    async get(key) {
-      const { rows } = await pool.query('SELECT data, updated_at AS "updatedAt" FROM libraries WHERE library_key = $1', [key])
-      if (rows.length === 0) return null
-      return { data: rows[0].data, updatedAt: Number(rows[0].updatedAt) }
-    },
+    get,
 
-    async put(key, data, updatedAt) {
+    /**
+     * Writes the new library, keeping the one it replaces (T071).
+     *
+     * **Archiving is not the caller's job.** It happens inside `put`, before
+     * the overwrite, so there is no route or script that can replace the only
+     * off-device copy of her library by forgetting a step. A crash between
+     * the two statements leaves the previous version archived and the new one
+     * unwritten — a duplicate at worst, never a loss, which is why they are
+     * in this order and why they do not need a transaction.
+     *
+     * **What this deliberately does not do is refuse.** The server cannot
+     * tell a client bug from her genuinely deleting a deck, and the device
+     * treats every status it does not recognise as `network` and retries it
+     * forever — so a refusal invented here would present as a sync that says
+     * "waiting" and never finishes, which is a worse failure than the one it
+     * guards. Accept the push; keep what it replaced.
+     *
+     * **Snapshots are throttled by time, not by content.** A content-aware
+     * trigger ("archive when the push shrinks") is the tempting version and
+     * is worse: a bad push repeated then archives its own shrunken states and
+     * prunes the good one out of the window. At most one snapshot per
+     * `snapshotIntervalMs` cannot be accelerated by any push pattern, so the
+     * worst case is bounded at "lose up to an hour of edits" whatever the
+     * client does.
+     */
+    async put(key, data, updatedAt, { now = Date.now() } = {}) {
+      const previous = await get(key)
+      if (previous && previous.data !== data) {
+        const archivedAt = await lastArchivedAt(key)
+        if (archivedAt === null || now - archivedAt >= intervalMs) {
+          await pool.query('INSERT INTO library_versions (library_key, data, updated_at, archived_at) VALUES ($1, $2, $3, $4)', [
+            key,
+            previous.data,
+            previous.updatedAt,
+            now,
+          ])
+          await pruneVersions(key)
+        }
+      }
+
       await pool.query(
         `INSERT INTO libraries (library_key, data, updated_at) VALUES ($1, $2, $3)
          ON CONFLICT (library_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
@@ -47,11 +134,42 @@ export function createLibraryStore(pool) {
       )
     },
 
+    /**
+     * Every retained prior version for one key, newest first — the recovery
+     * path. Scoped to the key throughout: one user's history is never
+     * reachable from another's session. See docs/server.md "Recovering a
+     * library a bad push destroyed" for the operator procedure.
+     */
+    async versions(key) {
+      const { rows } = await pool.query(
+        'SELECT id, data, updated_at AS "updatedAt", archived_at AS "archivedAt" FROM library_versions WHERE library_key = $1 ORDER BY id DESC',
+        [key],
+      )
+      return rows.map((row) => ({ id: Number(row.id), data: row.data, updatedAt: Number(row.updatedAt), archivedAt: Number(row.archivedAt) }))
+    },
+
     async close() {
       await pool.end()
     },
   }
 }
+
+/**
+ * How often a prior version is snapshotted, at most (T071). One hour: the
+ * worst case a bad push can cost is an hour of edits, and no burst of pushes
+ * can consume the retention window faster than the clock.
+ */
+export const LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000
+/** Retained snapshots per key — 72 hourly snapshots is three days of history. */
+export const LIBRARY_VERSION_MAX_COUNT = 72
+/**
+ * Retained bytes per key. 32 MB of the deployed plan's 1 GB (render.yaml,
+ * `basic-256mb`) — ~26 copies of the largest library docs/scale.md models
+ * (1.2 MB at 10,000 Phrases), ~250 copies of a 1,000-Phrase one. Whichever
+ * of the two budgets binds first wins, so a big library trades depth for
+ * size automatically instead of quietly filling the disk `clips` shares.
+ */
+export const LIBRARY_VERSION_MAX_BYTES = 32 * 1024 * 1024
 
 /**
  * The shared Clip store (T063): generated audio, keyed by the content
@@ -75,7 +193,54 @@ export function createLibraryStore(pool) {
  * stored clip requires already knowing all five fields, so sharing the row
  * discloses nothing a caller did not already have.
  */
-export function createClipStore(pool) {
+export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES, evictBatchSize = CLIP_EVICT_BATCH_SIZE } = {}) {
+  const evictTo = Math.floor(maxBytes * CLIP_EVICT_TO_FRACTION)
+
+  async function totalBytes() {
+    const { rows } = await pool.query('SELECT COALESCE(SUM(byte_size), 0)::bigint AS total FROM clips')
+    return Number(rows[0].total)
+  }
+
+  /**
+   * Brings `clips` back under the ceiling by deleting the oldest rows (T071).
+   *
+   * **Why a bound at all.** docs/scale.md §1 models ~89 KB of audio per
+   * Phrase. A 5,000-Phrase library is ~425 MB, a 10,000-Phrase one ~848 MB,
+   * and every re-pinned voice, corrected phrase or model change orphans the
+   * whole previous set at a new content address forever. The deployed plan
+   * (`render.yaml`, `basic-256mb`) has 1 GB. When it fills, the write that
+   * starts failing is `libraryStore.put` — her phrases stop reaching the
+   * server while the sync line still says "waiting". Audio is derived and
+   * regenerable; the phrases are not, so the growth has to be cut here.
+   *
+   * **Oldest-first, on the `created_at` the table already has.** Least
+   * recently *played* is better policy and would cost a column plus a write
+   * on every cache hit. On the server a wrongly evicted clip is one
+   * regeneration; on the device it is a drill that cannot start offline,
+   * which is why the device's cache is the LRU one (docs/scale.md §6) and
+   * this one is not.
+   *
+   * **It cannot reach `libraries`.** Every statement here names `clips`
+   * literally and no identifier is ever interpolated, so the set of tables
+   * this code can touch is closed — `db.test.js` asserts it over every query
+   * the store issues.
+   */
+  async function evictIfOverBudget() {
+    if ((await totalBytes()) <= maxBytes) return
+    let remaining = (await totalBytes()) - evictTo
+    while (remaining > 0) {
+      const { rows } = await pool.query('SELECT hash, byte_size AS "byteSize" FROM clips ORDER BY created_at ASC, hash ASC LIMIT $1', [evictBatchSize])
+      if (rows.length === 0) return
+      const doomed = []
+      for (const row of rows) {
+        if (remaining <= 0) break
+        doomed.push(row.hash)
+        remaining -= Number(row.byteSize)
+      }
+      await pool.query('DELETE FROM clips WHERE hash = ANY($1::text[])', [doomed])
+    }
+  }
+
   return {
     /**
      * Idempotent: safe on every boot, including against a database that
@@ -84,6 +249,14 @@ export function createClipStore(pool) {
      * change"). Adding this table needs no migration runner and no manual
      * step: a running deployment gets it on its next restart, and it touches
      * no existing row.
+     *
+     * `byte_size` (T071) is the one column added after the table shipped, so
+     * it follows the documented shape for that: `ADD COLUMN IF NOT EXISTS`
+     * plus a backfill whose `WHERE` matches nothing once it has run. Summing
+     * a narrow integer column is a cheap scan of the heap tuples; summing
+     * `octet_length(bytes)` would detoast every clip on every cache miss,
+     * and `pg_total_relation_size` does not shrink after a DELETE until
+     * VACUUM, which would make the eviction loop empty the table.
      */
     async init() {
       await pool.query(`
@@ -92,9 +265,12 @@ export function createClipStore(pool) {
           bytes BYTEA NOT NULL,
           mime TEXT NOT NULL,
           duration_ms BIGINT NOT NULL,
-          created_at BIGINT NOT NULL
+          created_at BIGINT NOT NULL,
+          byte_size BIGINT
         )
       `)
+      await pool.query('ALTER TABLE clips ADD COLUMN IF NOT EXISTS byte_size BIGINT')
+      await pool.query('UPDATE clips SET byte_size = octet_length(bytes) WHERE byte_size IS NULL')
     },
 
     async get(hash) {
@@ -111,17 +287,35 @@ export function createClipStore(pool) {
      */
     async put({ hash, bytes, mime, durationMs, createdAt }) {
       await pool.query(
-        `INSERT INTO clips (hash, bytes, mime, duration_ms, created_at) VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO clips (hash, bytes, mime, duration_ms, created_at, byte_size) VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (hash) DO NOTHING`,
-        [hash, bytes, mime, durationMs, createdAt],
+        [hash, bytes, mime, durationMs, createdAt, bytes.byteLength],
       )
+      await evictIfOverBudget()
     },
+
+    /** Live size of the store, for the eviction loop and for anyone asking how close the ceiling is. */
+    totalBytes,
 
     async close() {
       await pool.end()
     },
   }
 }
+
+/**
+ * The ceiling on the shared Clip store (T071). 300 MB of the deployed plan's
+ * 1 GB (`render.yaml`, `basic-256mb`): ~3,400 Phrases of audio at the ~89
+ * KB/Phrase docs/scale.md §1 models — more than either device's own 200 MB
+ * cache can hold (T036) — and it leaves ~65% of the disk for `libraries`,
+ * `library_versions`, WAL and Postgres's own overhead. Override with
+ * `CLIP_STORE_MAX_BYTES` if the plan changes.
+ */
+export const DEFAULT_CLIP_STORE_MAX_BYTES = 300 * 1024 * 1024
+/** Evict past the ceiling, not to it — the same 90% hysteresis the device's cache uses (docs/scale.md §6), so one sweep is not one delete per put. */
+const CLIP_EVICT_TO_FRACTION = 0.9
+/** Rows read per eviction sweep: bounded so a badly over-budget table is drained in passes rather than one unbounded result set. */
+const CLIP_EVICT_BATCH_SIZE = 200
 
 /**
  * Identity storage for T050 (replacing Keycloak + the JWT it issued): two

@@ -33,6 +33,23 @@ function sendRateLimited(res, decision) {
 }
 
 /**
+ * Whether a parsed body is a library envelope at all. The same shape test is
+ * applied to what a client sends and to what the server reads back out of its
+ * own row (T071) — a row that fails it is not a library, whoever wrote it.
+ */
+function isLibraryEnvelope(value) {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    value.format === LIBRARY_FORMAT &&
+    typeof value.schemaVersion === 'number' &&
+    Array.isArray(value.decks) &&
+    (value.mixes === undefined || Array.isArray(value.mixes)) &&
+    (value.tombstones === undefined || Array.isArray(value.tombstones))
+  )
+}
+
+/**
  * The schema version of a stored envelope, read back out of the JSON the
  * server keeps opaque otherwise. `0` for anything unreadable or missing a
  * numeric version — the permissive answer, so a corrupt or ancient stored
@@ -254,11 +271,45 @@ export function createApp({
     }
   }
 
+  /**
+   * The stored row, validated before it is served (T071).
+   *
+   * This used to be `res.end(row.data)` with no check at all. A row that will
+   * not parse — hand-repaired, half-restored, truncated by anything upstream
+   * — came back as a 200 that claimed to be a library, the device called
+   * `response.json()` on it, that threw, and the sync engine died for the
+   * rest of the session while the UI still said "syncing" (AUDIT-T068
+   * finding 2). Everything she wrote after that stayed on the phone.
+   *
+   * 500 is the honest status: the fault is this server's, not the request's.
+   * It is also the one that behaves — the device maps every unrecognised
+   * status to `network`, a *handled* result it retries with backoff, rather
+   * than to an exception nothing catches.
+   *
+   * The row is not repaired, deleted or overwritten here. It is the last copy
+   * of something, even when what it is is unreadable; a PUT may still replace
+   * it (`storedSchemaVersion` answers 0 for it, deliberately), and that PUT
+   * archives these bytes on the way past.
+   */
   async function handleLibraryGet(req, res, key) {
     const budget = libraryLimiter.allow(key)
     if (!budget.ok) return sendRateLimited(res, budget)
     const row = await libraryStore.get(key)
     if (!row) return sendJson(res, 404, { error: 'not-found' })
+
+    let parsed
+    try {
+      parsed = JSON.parse(row.data)
+    } catch {
+      parsed = null
+    }
+    if (!isLibraryEnvelope(parsed)) {
+      logger.error('stored library is unreadable and was not served', { key, bytes: Buffer.byteLength(row.data), updatedAt: row.updatedAt })
+      return sendJson(res, 500, { error: 'library-unreadable' })
+    }
+
+    // Served byte for byte, not re-serialized: what she gets back is exactly
+    // what was stored, so nothing this server does can quietly reshape it.
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(row.data)
   }
@@ -281,17 +332,7 @@ export function createApp({
     } catch {
       return sendJson(res, 400, { error: 'invalid-json' })
     }
-    if (
-      !parsed ||
-      typeof parsed !== 'object' ||
-      parsed.format !== LIBRARY_FORMAT ||
-      typeof parsed.schemaVersion !== 'number' ||
-      !Array.isArray(parsed.decks) ||
-      (parsed.mixes !== undefined && !Array.isArray(parsed.mixes)) ||
-      (parsed.tombstones !== undefined && !Array.isArray(parsed.tombstones))
-    ) {
-      return sendJson(res, 400, { error: 'invalid-request' })
-    }
+    if (!isLibraryEnvelope(parsed)) return sendJson(res, 400, { error: 'invalid-request' })
 
     // A client older than the stored envelope may not overwrite it (T060).
     //
@@ -313,6 +354,11 @@ export function createApp({
       return sendJson(res, 409, { error: 'stale-client' })
     }
 
+    // Accepted, whatever it does to the size of her library — the server
+    // cannot tell a client bug from her deleting a deck, and a refusal she
+    // cannot get past is its own failure. What makes a bad push survivable is
+    // that `libraryStore.put` archives the version it replaces (T071); it is
+    // the store's invariant, not a step this route can forget.
     await libraryStore.put(key, JSON.stringify(parsed), Date.now())
     res.writeHead(204)
     res.end()

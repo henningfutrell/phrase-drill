@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { createApp } from './app.js'
-import { createLibraryStore, createAuthStore, createClipStore, createPool, waitForDatabase, extractPassword } from './db.js'
+import { createLibraryStore, createAuthStore, createClipStore, createPool, waitForDatabase, extractPassword, DEFAULT_CLIP_STORE_MAX_BYTES } from './db.js'
 import { createSessionAuth } from './session-auth.js'
 import { createLogger } from './logger.js'
 import { createRateLimiter } from './rate-limiter.js'
@@ -41,8 +41,12 @@ export async function buildServer(env = process.env) {
   await authStore.init()
   // T063: adds the `clips` table. Same `CREATE TABLE IF NOT EXISTS` shape as
   // the two above, so a deployed database gets it on the next restart with no
-  // manual step and nothing existing touched.
-  const clipStore = createClipStore(pool)
+  // manual step and nothing existing touched. T071 bounds it: audio is
+  // derived and regenerable, her phrases are not, and both live on the same
+  // 1 GB instance — so the table that grows without limit is the one that
+  // gets a ceiling. `CLIP_STORE_MAX_BYTES` overrides it if the plan changes.
+  const clipStoreMaxBytes = Number(env.CLIP_STORE_MAX_BYTES ?? DEFAULT_CLIP_STORE_MAX_BYTES)
+  const clipStore = createClipStore(pool, { maxBytes: clipStoreMaxBytes })
   await clipStore.init()
 
   // T050: identity is a session row in Postgres, not a Keycloak-issued

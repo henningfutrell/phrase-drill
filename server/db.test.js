@@ -146,7 +146,7 @@ describe('createLibraryStore — version history (T071)', () => {
     const { store } = await newStore()
     await store.put(KEY, '{"v":0}', 0, { now: 0 })
     await store.put(KEY, '{"v":1}', 1, { now: 1 })
-    await store.put(KEY, '{"v":2}', 2, { now: LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS })
+    await store.put(KEY, '{"v":2}', 2, { now: LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS + 1 })
 
     expect((await store.versions(KEY)).map((v) => v.data)).toEqual(['{"v":1}', '{"v":0}'])
   })
@@ -361,10 +361,15 @@ describe('createClipStore — the growth bound (T071)', () => {
     const store = createClipStore(pool, { maxBytes: 1_000, evictBatchSize: 3 })
     await store.init()
 
-    for (let i = 0; i < 40; i += 1) await store.put(clip(`clip-${i}`, 100, i))
+    for (let i = 0; i < 10; i += 1) await store.put(clip(`clip-${i}`, 100, i))
+    // One clip that puts the store far enough over that no single sweep of
+    // three rows can bring it back — the drain has to keep going.
+    await store.put(clip('big', 900, 100))
 
     expect(await store.totalBytes()).toBeLessThanOrEqual(900)
-    expect(await store.get(`clip-39`)).not.toBeNull()
+    expect(await store.get('big')).not.toBeNull()
+    expect(await store.get('clip-0')).toBeNull()
+    expect(pool.queries.filter((q) => q.text.trim().startsWith('DELETE')).length).toBeGreaterThan(1)
   })
 
   it('never issues a statement naming any table but clips', async () => {
