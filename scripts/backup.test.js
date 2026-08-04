@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { backupFileName, parseBackupTimestamp, selectExpiredBackups, parseDestination, awsArgs } from './backup.mjs'
+import { backupFileName, parseBackupTimestamp, selectExpiredBackups, resolveDestinationDir } from './backup.mjs'
 
 describe('backupFileName', () => {
   it('is ISO-8601 UTC with colons swapped for dashes, so it sorts chronologically and is a safe filename', () => {
@@ -46,52 +46,21 @@ describe('selectExpiredBackups', () => {
   })
 })
 
-describe('parseDestination', () => {
-  it('parses an s3:// destination into bucket and prefix', () => {
-    expect(parseDestination('s3://phrase-drill-backups/prod')).toEqual({
-      kind: 's3',
-      bucket: 'phrase-drill-backups',
-      prefix: 'prod',
-    })
+describe('resolveDestinationDir', () => {
+  it('takes a local directory path as-is — the only destination this script has', () => {
+    expect(resolveDestinationDir('/var/backups/phrase-drill')).toBe('/var/backups/phrase-drill')
   })
 
-  it('parses an s3:// destination with no prefix', () => {
-    expect(parseDestination('s3://phrase-drill-backups')).toEqual({
-      kind: 's3',
-      bucket: 'phrase-drill-backups',
-      prefix: '',
-    })
+  it('accepts a relative directory path too', () => {
+    expect(resolveDestinationDir('./backups')).toBe('./backups')
   })
 
-  it('treats anything else as a local directory', () => {
-    expect(parseDestination('/var/backups/phrase-drill')).toEqual({ kind: 'local', dir: '/var/backups/phrase-drill' })
-  })
-})
-
-describe('awsArgs', () => {
-  it('adds nothing when no endpoint or region is configured', () => {
-    expect(awsArgs(['s3', 'ls'], {})).toEqual(['s3', 'ls'])
+  it('refuses an s3:// destination loudly rather than writing a directory literally named "s3:"', () => {
+    expect(() => resolveDestinationDir('s3://phrase-drill-backups/prod')).toThrow(/s3:\/\//)
   })
 
-  it('forwards BACKUP_S3_ENDPOINT as --endpoint-url', () => {
-    expect(awsArgs(['s3', 'ls'], { BACKUP_S3_ENDPOINT: 'https://s3.us-west-002.backblazeb2.com' })).toEqual([
-      's3',
-      'ls',
-      '--endpoint-url',
-      'https://s3.us-west-002.backblazeb2.com',
-    ])
-  })
-
-  it('forwards BACKUP_S3_REGION as --region — Backblaze B2 needs it explicitly, unlike plain AWS S3', () => {
-    expect(awsArgs(['s3', 'ls'], { BACKUP_S3_REGION: 'us-west-002' })).toEqual(['s3', 'ls', '--region', 'us-west-002'])
-  })
-
-  it('forwards both, endpoint then region, when both are set', () => {
-    expect(
-      awsArgs(['s3', 'ls'], {
-        BACKUP_S3_ENDPOINT: 'https://s3.us-west-002.backblazeb2.com',
-        BACKUP_S3_REGION: 'us-west-002',
-      }),
-    ).toEqual(['s3', 'ls', '--endpoint-url', 'https://s3.us-west-002.backblazeb2.com', '--region', 'us-west-002'])
+  it('refuses any other URI scheme for the same reason', () => {
+    expect(() => resolveDestinationDir('https://example.com/backups')).toThrow(/local directory/)
+    expect(() => resolveDestinationDir('b2://bucket')).toThrow(/local directory/)
   })
 })
