@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
 import { Readable, Writable } from 'node:stream'
-import { readPasswordFrom } from './useradd.mjs'
+import { readPasswordFrom, describeTarget } from './useradd.mjs'
 
 /**
  * T055: `scripts/useradd.mjs` hung in Render's web Shell. Two causes, both
@@ -95,5 +95,23 @@ describe('readPasswordFrom', () => {
     const input = Readable.from([])
     const output = collectingOutput()
     await expect(readPasswordFrom({ input, output })).rejects.toThrow(/no password/i)
+  })
+})
+
+describe('describeTarget', () => {
+  it('names host, port and database so the operator can see where it is going', () => {
+    expect(describeTarget('postgres://u:p@db.example.com:5432/phrase_drill')).toBe('db.example.com:5432/phrase_drill')
+  })
+
+  it('never includes the password', () => {
+    expect(describeTarget('postgres://u:sup3rs3cret@h:5432/d')).not.toContain('sup3rs3cret')
+  })
+
+  it('defaults the port rather than printing an empty one', () => {
+    expect(describeTarget('postgres://u:p@h/d')).toBe('h:5432/d')
+  })
+
+  it('does not throw on a malformed URL — a bad value must produce a message, not a stack trace', () => {
+    expect(describeTarget('not a url')).toBe('(unparseable DATABASE_URL)')
   })
 })
