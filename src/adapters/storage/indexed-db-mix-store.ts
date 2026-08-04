@@ -14,9 +14,14 @@ export function createIndexedDbMixStore(): MixStore {
   let dbPromise: Promise<IDBPDatabase> | undefined
 
   // One connection per store instance, opened lazily and reused — the same
-  // shape the deck store uses, against the same database and version.
+  // shape the deck store uses, against the same database and version, down to
+  // forgetting a failed open so one refusal is not replayed for the rest of
+  // the session (T087; see `indexed-db-deck-store.ts` for why).
   function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase()
+    dbPromise ??= openDatabase().catch((error: unknown) => {
+      dbPromise = undefined
+      throw error
+    })
     return dbPromise
   }
 

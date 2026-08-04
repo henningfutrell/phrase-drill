@@ -53,8 +53,17 @@ export interface ErrorLogDeps {
 export function createIndexedDbErrorLog({ getSecrets }: ErrorLogDeps): ErrorLog {
   let dbPromise: Promise<IDBPDatabase> | undefined
 
+  // A failed open is forgotten again, so one refusal is not replayed for the
+  // rest of the session (T087; see `adapters/storage/indexed-db-deck-store.ts`
+  // for why). This one compounds: the log is what a failure gets described in,
+  // so a log that gave up on its first bad moment records nothing about every
+  // failure after it — and the diagnostics report then describes a session
+  // that looks quiet.
   function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase()
+    dbPromise ??= openDatabase().catch((error: unknown) => {
+      dbPromise = undefined
+      throw error
+    })
     return dbPromise
   }
 
