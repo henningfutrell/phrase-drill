@@ -69,10 +69,35 @@ export function readPasswordFrom({ input, output }) {
   })
 }
 
+/** `host:port/database` — never the password, which is the only part of a connection string worth hiding. */
+export function describeTarget(connectionString) {
+  try {
+    const url = new URL(connectionString)
+    return `${url.hostname}:${url.port || '5432'}${url.pathname}`
+  } catch {
+    return '(unparseable DATABASE_URL)'
+  }
+}
+
 async function main() {
   const username = process.argv[2]
   if (!username) {
     console.error('usage: npm run useradd -- <username>   (password is read from stdin)')
+    process.exitCode = 1
+    return
+  }
+
+  // No localhost fallback here, deliberately (T055). `server/index.js` may
+  // default, because it boots beside its own Postgres in compose. This CLI is
+  // run by hand, most often in a hosted shell where a missing DATABASE_URL
+  // means the environment is wrong — and silently defaulting to localhost sent
+  // the operator into 30 seconds of wordless retrying against a database that
+  // was never there. Refuse immediately and say what is missing.
+  const databaseUrl = process.env.DATABASE_URL
+  if (!databaseUrl) {
+    console.error('DATABASE_URL is not set — nothing to connect to.')
+    console.error('In Render, run this from the service Shell so the service env is present.')
+    console.error("Locally: DATABASE_URL='postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill' npm run useradd -- <username>")
     process.exitCode = 1
     return
   }
@@ -84,9 +109,23 @@ async function main() {
     return
   }
 
-  const databaseUrl = process.env.DATABASE_URL ?? 'postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill'
-  const pool = createPool(databaseUrl)
-  await waitForDatabase(pool)
+  // Say where we are going before going there. waitForDatabase retries
+  // silently, so without this line an unreachable host is indistinguishable
+  // from a hung process — which is exactly how this was reported.
+  console.error(`connecting to ${describeTarget(databaseUrl)} ...`)
+  const pool = createPool(databaseUrl, { connectionTimeoutMillis: 3000 })
+  try {
+    // 3 tries, not the server's 30: a CLI in front of a human must fail while
+    // they are still watching. The server waits longer because compose starts
+    // every service at once and Postgres genuinely may not be up yet.
+    await waitForDatabase(pool, { retries: 3, delayMs: 1000 })
+  } catch (err) {
+    console.error(`could not reach the database at ${describeTarget(databaseUrl)} after 3 tries.`)
+    console.error(err instanceof Error ? err.message : String(err))
+    process.exitCode = 1
+    await pool.end()
+    return
+  }
   const authStore = createAuthStore(pool)
   await authStore.init()
 
