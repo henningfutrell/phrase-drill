@@ -1,6 +1,5 @@
-import type { IDBPDatabase } from 'idb'
 import type { Library } from '../../domain'
-import { openDatabase, SETTINGS_STORE } from './database'
+import { createDatabaseConnection, SETTINGS_STORE } from './database'
 
 /**
  * The last whole-library snapshot this device and the server are known to
@@ -35,21 +34,13 @@ export interface SyncBaselineStore {
 const SYNC_BASELINE = 'syncBaseline'
 
 export function createIndexedDbSyncBaselineStore(): SyncBaselineStore {
-  let dbPromise: Promise<IDBPDatabase> | undefined
-
-  // A failed open is forgotten again, so one refusal is not replayed for the
-  // rest of the session (T087; see `indexed-db-deck-store.ts` for why). The
-  // baseline is derived and regenerable, but a store that has given up writes
-  // no baseline at all, so every merge for the rest of the session falls back
-  // to whole-record rules — the precise case that loses a Phrase when two
-  // devices edit one Deck between round-trips.
-  function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase().catch((error: unknown) => {
-      dbPromise = undefined
-      throw error
-    })
-    return dbPromise
-  }
+  // A handle is given up again both when the open is refused (T087) and when
+  // the browser closes the connection (T077); `createDatabaseConnection` owns
+  // why. The baseline is derived and regenerable, but a store that has given
+  // up writes no baseline at all, so every merge for the rest of the session
+  // falls back to whole-record rules — the precise case that loses a Phrase
+  // when two devices edit one Deck between round-trips.
+  const getDatabase = createDatabaseConnection()
 
   return {
     async read(): Promise<Library | undefined> {
