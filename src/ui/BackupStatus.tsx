@@ -15,51 +15,62 @@ export type ExportOutcome =
   | { kind: 'unavailable'; text: string; filename: string }
 
 const AGE_COPY: Record<BackupAgeLevel, (days: number) => string> = {
-  never: () => 'Not backed up yet.',
+  never: () => 'No copy saved to this phone yet.',
   fresh: sinceCopy,
   aging: sinceCopy,
   overdue: sinceCopy,
 }
 
 function sinceCopy(days: number): string {
-  if (days === 0) return 'Backed up today.'
-  if (days === 1) return 'Backed up yesterday.'
-  return `Backed up ${days} days ago.`
+  if (days === 0) return 'Last copy saved today.'
+  if (days === 1) return 'Last copy saved yesterday.'
+  return `Last copy saved ${days} days ago.`
 }
 
 /**
- * The one line of consequence, added as the age climbs. Fresh says nothing
- * beyond the age itself: a warning that is always on is a warning that is
- * never read.
+ * One line, the same at every level, and it is an explanation rather than a
+ * consequence (T097).
+ *
+ * It used to escalate — "Everything here is only on this phone. Nothing has
+ * reached the server or a file yet." — which was written when there was no
+ * server and nothing else was true. There is a server now: it takes her
+ * library after every save, and the sync line on the Decks screen reports that
+ * honestly, by cause, including when it is failing. Repeating it here in
+ * stronger words said the same thing worse, and usually said it wrongly.
+ *
+ * What a file still buys is the one case the server cannot cover: a stored row
+ * the server refuses to read AND no phone left to push a good copy from. That
+ * is worth offering. It is not worth alarming her about.
  */
 const DETAIL_COPY: Record<BackupAgeLevel, string | null> = {
   fresh: null,
-  aging: 'Anything added since then is only on this phone.',
-  never: 'Everything here is only on this phone. Nothing has reached the server or a file yet.',
-  overdue:
-    'Everything added since then is only on this phone. If it is lost or replaced, that work goes with it.',
+  aging: null,
+  never: 'Your phrases go to the server on their own. A file is an extra copy you keep yourself.',
+  overdue: null,
 }
 
 const ACTION_COPY: Record<BackupAgeLevel, string> = {
   fresh: 'Save a copy',
   aging: 'Save a copy',
-  never: 'Save a copy now',
-  overdue: 'Save a copy now',
+  never: 'Save a copy',
+  overdue: 'Save a copy',
 }
 
 /**
- * Escalation in weight, not in noise: a link, a quiet button, then the rose.
+ * No escalation at any level (T097). This is an affordance in Settings, not a
+ * warning, so it never takes the screen's rose button — that weight belongs to
+ * something she must act on, and nothing here qualifies while the server has
+ * her library.
  *
- * `never` sits at the top with `overdue`, not beside `aging`, and a render is
- * what made that obvious: "not backed up yet" with twenty-nine phrases on the
- * phone is strictly worse than "backed up twelve days ago", and giving it the
- * middle treatment said the opposite.
+ * The escalation it replaces (link -> quiet button -> rose, with `never` at the
+ * top beside `overdue`) was right for an app with no server, where "not backed
+ * up" meant nowhere at all.
  */
 const ACTION_CLASS: Record<BackupAgeLevel, string> = {
   fresh: 'link-action',
   aging: 'btn-icon',
-  never: 'btn-primary',
-  overdue: 'btn-primary',
+  never: 'btn-icon',
+  overdue: 'btn-icon',
 }
 
 /**

@@ -32,7 +32,7 @@ afterEach(() => {
   container.remove()
 })
 
-const deck: Deck = { id: 'd1', name: 'Home', language: 'fr', phrases: [], createdAt: 1, updatedAt: 1 }
+const deck: Deck = { id: 'd1', name: 'Home', phrases: [] }
 
 describe('the file backup is an affordance, not an alarm (T097)', () => {
   it('says nothing about file backups on the Decks screen — the sync line already says where her phrases are', () => {
@@ -47,8 +47,6 @@ describe('the file backup is an affordance, not an alarm (T097)', () => {
           onOpenSettings={vi.fn()}
           onOpenMix={vi.fn()}
           onOpenImport={vi.fn()}
-          backupAge={{ level: 'never', days: 0 }}
-          onExportBackup={vi.fn()}
         />,
       )
     })

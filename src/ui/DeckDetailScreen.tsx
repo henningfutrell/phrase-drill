@@ -1,10 +1,8 @@
 import { useState } from 'react'
-import type { BackupAge, Deck, Translator } from '../domain'
+import type { Deck, Translator } from '../domain'
 import type { PhraseId } from '../domain'
-import { isBackupUrgent } from '../domain'
 import { NameSheet } from './NameSheet'
 import { PhraseSheet } from './PhraseSheet'
-import { BackupStatus, type ExportOutcome } from './BackupStatus'
 
 interface AcceptedCandidate {
   french: string
@@ -35,9 +33,6 @@ export function DeckDetailScreen({
   onDrillDeck,
   onRegenerateDeckAudio,
   onRegeneratePhraseAudio,
-  backupAge,
-  onExportBackup,
-  onCopyText,
 }: {
   deck: Deck
   /** All Decks, so a Phrase Candidate can be routed to one other than this one (T057). */
@@ -73,10 +68,6 @@ export function DeckDetailScreen({
    * wallpaper. This is the screen she adds Phrases on, so it is where an
    * urgent one has to reach her: the work at risk is the work being made here.
    */
-  backupAge?: BackupAge
-  /** Required whenever `backupAge` is passed. */
-  onExportBackup?: () => Promise<ExportOutcome>
-  onCopyText?: (text: string) => Promise<boolean>
 }) {
   const [renaming, setRenaming] = useState(false)
   const [phraseSheet, setPhraseSheet] = useState<PhraseSheetState>(undefined)
@@ -119,9 +110,12 @@ export function DeckDetailScreen({
         )}
       </header>
 
-      {backupAge && onExportBackup && isBackupUrgent(backupAge) && (
-        <BackupStatus age={backupAge} onExportBackup={onExportBackup} onCopyText={onCopyText} />
-      )}
+      {/*
+        No file-backup block here either (T097). This was the escalation's last
+        step — follow her onto the Deck she is working in once the age is
+        urgent — and it was built when a file was the only copy that existed.
+        The server holds her library now; saving a file is offered in Settings.
+      */}
 
       {deck.phrases.length > 0 && (
         <button

@@ -1,7 +1,6 @@
 import { useState } from 'react'
-import type { BackupAge, Deck, DeckId } from '../domain'
+import type { Deck, DeckId } from '../domain'
 import { NameSheet } from './NameSheet'
-import { BackupStatus, type ExportOutcome } from './BackupStatus'
 import { RestoreControl, type RestoreFileResult } from './RestoreControl'
 
 type SheetState = { kind: 'create' } | { kind: 'rename'; deckId: DeckId; name: string } | undefined
@@ -20,9 +19,6 @@ export function DecksScreen({
   onOpenSettings,
   onOpenMix,
   onOpenImport,
-  backupAge,
-  onExportBackup,
-  onCopyText,
   onRestoreFileChosen,
   onConfirmRestore,
   onCancelRestore,
@@ -45,11 +41,6 @@ export function DecksScreen({
    * so it is the one place the answer is always available rather than only
    * when something is wrong. Omitted only in tests that don't exercise it.
    */
-  backupAge?: BackupAge
-  /** Required whenever `backupAge` is passed. */
-  onExportBackup?: () => Promise<ExportOutcome>
-  /** Required whenever `backupAge` is passed. */
-  onCopyText?: (text: string) => Promise<boolean>
   /**
    * Restore, on the empty state (T031). A wiped or replaced phone opens here
    * and nowhere else, and this is the screen she is looking at when her
@@ -123,10 +114,15 @@ export function DecksScreen({
           {syncStatus}
         </p>
       )}
-      {/* Nothing saved yet is nothing to lose — the age is silent until there is. */}
-      {decks.length > 0 && backupAge && onExportBackup && (
-        <BackupStatus age={backupAge} onExportBackup={onExportBackup} onCopyText={onCopyText} />
-      )}
+      {/*
+        No file-backup block here (T097). The server holds her library, and the
+        sync line above already says where her phrases are and says it
+        accurately — including when sync is failing, which it names by cause
+        ("sign in again to sync", "will sync when back online"). A second
+        indicator on the same screen, pushing a file she has to save herself,
+        said the same thing worse and read as an emergency. Saving a file is
+        still offered, in Settings, where she goes looking for it.
+      */}
 
       {decks.length === 0 ? (
         <>

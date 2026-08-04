@@ -45,22 +45,22 @@ function ageText(): string {
 describe('BackupStatus — the age is always stated, never only implied', () => {
   it('names today as today rather than as zero days', () => {
     render({ level: 'fresh', days: 0 })
-    expect(ageText()).toBe('Backed up today.')
+    expect(ageText()).toBe('Last copy saved today.')
   })
 
   it('names one day as yesterday rather than as "1 days ago"', () => {
     render({ level: 'fresh', days: 1 })
-    expect(ageText()).toBe('Backed up yesterday.')
+    expect(ageText()).toBe('Last copy saved yesterday.')
   })
 
   it('counts plain days beyond that', () => {
     render({ level: 'fresh', days: 4 })
-    expect(ageText()).toBe('Backed up 4 days ago.')
+    expect(ageText()).toBe('Last copy saved 4 days ago.')
   })
 
   it('states plainly that nothing has ever been backed up', () => {
     render({ level: 'never', days: 0 })
-    expect(ageText()).toBe('Not backed up yet.')
+    expect(ageText()).toBe('No copy saved to this phone yet.')
   })
 
   it('carries the level on the element, so the escalation is visible to a render and to a test', () => {
@@ -76,17 +76,29 @@ describe('BackupStatus — escalation is tone and consequence, never repetition'
     expect(container.querySelector('[data-testid="backup-status-detail"]')).toBeNull()
   })
 
-  it('adds one line of plain consequence once aging', () => {
-    render({ level: 'aging', days: 12 })
-    const detail = container.querySelector('[data-testid="backup-status-detail"]')
-    expect(detail).not.toBeNull()
-    expect(detail!.textContent).toContain('only on this phone')
+  it('explains what a file is FOR when none has been saved, rather than naming a loss (T097)', () => {
+    render({ level: 'never', days: 0 })
+    const detail = container.querySelector('[data-testid="backup-status-detail"]')!
+    expect(detail.textContent).toContain('go to the server on their own')
+    expect(detail.textContent).toContain('extra copy')
   })
 
-  it('names the loss in full once overdue', () => {
-    render({ level: 'overdue', days: 44 })
-    const detail = container.querySelector('[data-testid="backup-status-detail"]')!
-    expect(detail.textContent).toContain('lost or replaced')
+  it('says nothing beyond the age at every level that HAS a copy — the age is the whole message (T097)', () => {
+    // Escalating consequence copy ("only on this phone", "lost or replaced")
+    // belonged to an app with no server. The server takes her library after
+    // every save and the sync line reports that by cause; repeating it here in
+    // stronger words was both redundant and, on a synced phone, false.
+    for (const age of [
+      { level: 'fresh', days: 2 },
+      { level: 'aging', days: 12 },
+      { level: 'overdue', days: 44 },
+    ] as const) {
+      render(age)
+      expect(
+        container.querySelector('[data-testid="backup-status-detail"]'),
+        `${age.level} must add no consequence line`,
+      ).toBeNull()
+    }
   })
 
   it('offers no way to dismiss it at any level — there is no reflex to train', () => {
@@ -102,12 +114,21 @@ describe('BackupStatus — escalation is tone and consequence, never repetition'
     }
   })
 
-  it('keeps the fresh action a quiet link and makes the overdue action the screen’s one rose button', () => {
+  it('never takes the screen’s rose button, at any level (T097)', () => {
+    // The rose is for something she must act on. Saving a second copy of a
+    // library the server already holds is not that, and dressing it that way
+    // is what made the one person who uses this app read it as an emergency.
     render({ level: 'fresh', days: 1 })
     expect(container.querySelector('[data-testid="backup-status-export"]')!.className).toBe('link-action')
 
-    render({ level: 'overdue', days: 90 })
-    expect(container.querySelector('[data-testid="backup-status-export"]')!.className).toBe('btn-primary')
+    for (const age of [
+      { level: 'aging', days: 12 },
+      { level: 'never', days: 0 },
+      { level: 'overdue', days: 90 },
+    ] as const) {
+      render(age)
+      expect(container.querySelector('[data-testid="backup-status-export"]')!.className).toBe('btn-icon')
+    }
   })
 })
 

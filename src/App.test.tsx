@@ -400,6 +400,19 @@ afterEach(() => {
   container.remove()
 })
 
+/**
+ * A client whose push never succeeds, so no sync happens THIS session and the
+ * age on screen is the one persisted in settings (T097).
+ *
+ * Needed since the age started reading the live snapshot rather than the
+ * settings loaded at mount: `renderApp`'s default client syncs successfully on
+ * start, which correctly makes every seeded `lastSyncAt` read as "today".
+ * Seeding a stale age and letting a sync succeed tests nothing.
+ */
+function neverSyncs(): LibrarySyncClient {
+  return createFakeLibrarySyncClient({ push: async () => ({ ok: false, reason: 'network' }) })
+}
+
 async function renderApp(
   store: DeckStore,
   settingsStore: SettingsStore = createFakeSettingsStore(),
@@ -631,7 +644,7 @@ describe('App wired to backup and restore', () => {
     const settingsStore = createFakeSettingsStore({ lastSyncAt: null, lastExportAt: null })
     vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn().mockReturnValue('blob:fake'), revokeObjectURL: vi.fn() })
 
-    await renderApp(store, settingsStore)
+    await renderApp(store, settingsStore, undefined, undefined, undefined, undefined, undefined, neverSyncs())
     await openSettings()
     await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
 
@@ -1065,9 +1078,13 @@ describe('App wired to the backup age (T031)', () => {
     vi.mocked(shareBackupFile).mockResolvedValue('shared')
   })
 
-  it('states the age on the home screen from the last successful sync', async () => {
+  it('states the age in Settings from the last successful sync', async () => {
+    // In Settings, not on the home screen (T097): the home screen's sync line
+    // already reports where her phrases are, by cause.
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 11 * DAY }))
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 11 * DAY }), undefined, undefined, undefined, undefined, undefined, neverSyncs())
+    expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
+    await openSettings()
     expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain('11 days ago')
   })
 
@@ -1076,13 +1093,16 @@ describe('App wired to the backup age (T031)', () => {
     await renderApp(
       store,
       createFakeSettingsStore({ lastSyncAt: Date.now() - 40 * DAY, lastExportAt: Date.now() - 2 * DAY }),
+      undefined, undefined, undefined, undefined, undefined, neverSyncs(),
     )
+    await openSettings()
     expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain('2 days ago')
   })
 
   it('escalates to overdue once neither has happened for a month', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY }))
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY }), undefined, undefined, undefined, undefined, undefined, neverSyncs())
+    await openSettings()
     const indicator = container.querySelector('[data-testid="backup-status"]') as HTMLElement
     expect(indicator.dataset.level).toBe('overdue')
   })
@@ -1108,8 +1128,11 @@ describe('App wired to the backup age (T031)', () => {
 
   it('says nothing has ever been backed up when neither has ever happened', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    await renderApp(store, createFakeSettingsStore({ lastSyncAt: null, lastExportAt: null }))
-    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain('Not backed up yet')
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: null, lastExportAt: null }), undefined, undefined, undefined, undefined, undefined, neverSyncs())
+    await openSettings()
+    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain(
+      'No copy saved to this phone yet',
+    )
   })
 
   it('offers nothing to dismiss, anywhere — the indicator is a fact, not a nudge', async () => {
@@ -1121,7 +1144,8 @@ describe('App wired to the backup age (T031)', () => {
   it('records the export time and goes quiet immediately, with no reload', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
     const settingsStore = createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY })
-    await renderApp(store, settingsStore)
+    await renderApp(store, settingsStore, undefined, undefined, undefined, undefined, undefined, neverSyncs())
+    await openSettings()
 
     await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
 
@@ -1134,18 +1158,23 @@ describe('App wired to the backup age (T031)', () => {
     vi.mocked(shareBackupFile).mockResolvedValue('cancelled')
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
     const settingsStore = createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY })
-    await renderApp(store, settingsStore)
+    await renderApp(store, settingsStore, undefined, undefined, undefined, undefined, undefined, neverSyncs())
+    await openSettings()
 
     await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
 
     expect((await settingsStore.load()).lastExportAt).toBeNull()
   })
 
-  it('carries the indicator onto a Deck screen once it is urgent', async () => {
+  it('never carries the indicator onto a Deck screen, however old the age (T097)', async () => {
+    // It used to follow her here once the age was "urgent". That escalation
+    // was built when a saved file was the only copy that existed; the server
+    // holds her library now, and a rose "Save a copy now" on the screen she
+    // adds phrases in read as an emergency.
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY }))
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY }), undefined, undefined, undefined, undefined, undefined, neverSyncs())
     await act(async () => click(container.querySelector('[data-testid="deck-row-d1"]')!))
-    expect(container.querySelector('[data-testid="backup-status"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
   })
 
   it('leaves a Deck screen alone while the backup is fresh', async () => {

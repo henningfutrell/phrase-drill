@@ -846,8 +846,25 @@ function App({
      * succeeded makes the answer honest without her doing anything. Read at
      * render, like the sync line below and for the same reason: the clock
      * moving is not worth a ticking interval on a phone.
+     *
+     * **The sync half comes from the live snapshot, not from `settings`
+     * (T097).** `settings` is loaded once at mount and never re-read; the
+     * engine writes `lastSyncAt` to the settings store and emits it on the
+     * snapshot, and only the snapshot is current. Reading `settings` here made
+     * a phone that had just synced say "Not backed up yet. Everything here is
+     * only on this phone. Nothing has reached the server or a file yet." — in
+     * the screen's one rose button, with every word of it false. The comment
+     * above it claimed the sync made the answer honest, which is exactly what
+     * the code did not do.
+     *
+     * `settings.lastSyncAt` is still the fallback: the engine seeds its
+     * snapshot from the stored value at start, but until that lands the
+     * persisted number is the better answer than nothing.
      */
-    const age = backupAge(lastBackupAt(settings.lastSyncAt, settings.lastExportAt), Date.now())
+    const age = backupAge(
+      lastBackupAt(sync.lastSyncAt ?? settings.lastSyncAt, settings.lastExportAt),
+      Date.now(),
+    )
 
     if (decks === undefined) {
       // Refused, not merely slow (T083). The blank `<main>` is right for the
@@ -971,9 +988,6 @@ function App({
         <DeckDetailScreen
           deck={selectedDeck}
           decks={decks}
-          backupAge={age}
-          onExportBackup={handleExportBackup}
-          onCopyText={(text) => copyText(text)}
           translator={translator}
           onAddPhraseCandidates={handleAddCandidates}
           onBack={() => setSelectedDeckId(undefined)}
@@ -1025,9 +1039,6 @@ function App({
         onOpenSettings={handleOpenSettings}
         onOpenMix={() => setMixOpen(true)}
         onOpenImport={() => setImportOpen(true)}
-        backupAge={age}
-        onExportBackup={handleExportBackup}
-        onCopyText={(text) => copyText(text)}
         onRestoreFileChosen={handleRestoreFileChosen}
         onConfirmRestore={handleConfirmRestore}
         onCancelRestore={handleCancelRestore}

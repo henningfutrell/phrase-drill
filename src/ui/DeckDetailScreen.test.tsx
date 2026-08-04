@@ -205,46 +205,22 @@ describe('DeckDetailScreen — Phrase Candidates (T057 scope addition)', () => {
   })
 })
 
-describe('DeckDetailScreen — the backup age follows her here only once it is urgent', () => {
-  it('shows nothing about backups while the backup is fresh — the home screen already said so', () => {
-    renderScreen(threePhraseDeck, {
-      backupAge: { level: 'fresh', days: 2 },
-      onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }),
-    })
-    expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
-  })
-
-  it('carries the indicator onto the screen where she adds phrases once it is aging', () => {
-    renderScreen(threePhraseDeck, {
-      backupAge: { level: 'aging', days: 14 },
-      onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }),
-    })
-    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain(
-      '14 days ago',
-    )
-  })
-
-  it('carries it here when overdue too', () => {
-    renderScreen(threePhraseDeck, {
-      backupAge: { level: 'overdue', days: 61 },
-      onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }),
-    })
-    expect(
-      (container.querySelector('[data-testid="backup-status"]') as HTMLElement).dataset.level,
-    ).toBe('overdue')
-  })
-
-  it('shows nothing when the caller passes no age at all', () => {
+describe('DeckDetailScreen — no file-backup block, ever (T097)', () => {
+  /**
+   * This screen used to grow a backup indicator once the age was "urgent" —
+   * the escalation's last step, following her onto the Deck she was working
+   * in. It was built when a saved file was the only copy that existed. The
+   * server holds her library now, and the Decks screen's sync line reports
+   * that by cause; a rose "Save a copy now" on top of it read as an emergency
+   * to the one person who uses this app.
+   */
+  it('shows no backup indicator at all', () => {
     renderScreen(threePhraseDeck)
     expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
   })
 })
 
-/**
- * T067 requirement 4 — re-generating audio is hers to ask for, never
- * automatic. Deck scope confirms first: it is the control that spends real
- * money, one request per side per Phrase.
- */
+
 describe('DeckDetailScreen — explicit re-generation (T067)', () => {
   it('offers no re-generation control when the caller wires none', () => {
     renderScreen(threePhraseDeck)

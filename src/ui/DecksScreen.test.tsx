@@ -73,7 +73,11 @@ describe('DecksScreen', () => {
     expect(container.textContent).toContain('Nothing here yet')
   })
 
-  it('states the backup age on the home screen whenever there is anything to lose', () => {
+  it('shows no file-backup block, even with a full Deck on screen (T097)', () => {
+    // The sync line above already says where her phrases are, and says it by
+    // cause when sync is failing. A second indicator here, pushing a file she
+    // must save herself, said the same thing worse — and on a phone that had
+    // just synced it said it wrongly, in the screen's one rose button.
     act(() => {
       root.render(
         <DecksScreen
@@ -82,33 +86,10 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
-          backupAge={{ level: 'aging', days: 11 }}
-          onExportBackup={vi.fn().mockResolvedValue({ kind: 'shared' })}
         />,
       )
     })
-    const indicator = container.querySelector('[data-testid="backup-status"]')
-    expect(indicator).not.toBeNull()
-    expect(indicator!.textContent).toContain('11 days ago')
-  })
-
-  it('states the age quietly rather than hiding it when the backup is fresh', () => {
-    act(() => {
-      root.render(
-        <DecksScreen
-          decks={[deck('d1', 'Home', 3)]}
-          onCreateDeck={vi.fn()}
-          onRenameDeck={vi.fn()}
-          onDeleteDeck={vi.fn()}
-          onOpenDeck={vi.fn()}
-          backupAge={{ level: 'fresh', days: 0 }}
-          onExportBackup={vi.fn().mockResolvedValue({ kind: 'shared' })}
-        />,
-      )
-    })
-    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain(
-      'Backed up today',
-    )
+    expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
   })
 
   it('says nothing about backups while there is nothing to back up', () => {
@@ -120,8 +101,6 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
-          backupAge={{ level: 'never', days: 0 }}
-          onExportBackup={vi.fn().mockResolvedValue({ kind: 'shared' })}
         />,
       )
     })
