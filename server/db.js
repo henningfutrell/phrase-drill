@@ -54,6 +54,76 @@ export function createLibraryStore(pool) {
 }
 
 /**
+ * The shared Clip store (T063): generated audio, keyed by the content
+ * address `server/clip-hash.js` derives — the same address the device
+ * computes for its own IndexedDB cache. One table, `clips`.
+ *
+ * **Why it exists.** Before this, `/api/tts` proxied straight through to
+ * ElevenLabs, so the same phrase in the same voice was generated and paid
+ * for again on every device and after every reinstall. The device's cache
+ * was the only copy there was. It still exists and still makes the drill
+ * work offline — it is now a local copy of a shared store, not the only one.
+ *
+ * **Why `bytea` and not an object store.** One user, a few thousand clips at
+ * ~10-30 KB each: tens of megabytes, in a Postgres this stack already runs.
+ * An object store is a second service to run, a second credential to rotate,
+ * and a second thing to be down, for no gain at this size.
+ *
+ * **Not keyed by user, deliberately.** The address is a hash of the exact
+ * provider, model, voice, language and text; identical inputs are identical
+ * audio, so a per-user copy would be the same bytes stored twice. Reaching a
+ * stored clip requires already knowing all five fields, so sharing the row
+ * discloses nothing a caller did not already have.
+ */
+export function createClipStore(pool) {
+  return {
+    /**
+     * Idempotent: safe on every boot, including against a database that
+     * already has the table — the same `CREATE TABLE IF NOT EXISTS` rule the
+     * two stores around it follow (docs/server.md "Schema: creation and
+     * change"). Adding this table needs no migration runner and no manual
+     * step: a running deployment gets it on its next restart, and it touches
+     * no existing row.
+     */
+    async init() {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS clips (
+          hash TEXT PRIMARY KEY,
+          bytes BYTEA NOT NULL,
+          mime TEXT NOT NULL,
+          duration_ms BIGINT NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `)
+    },
+
+    async get(hash) {
+      const { rows } = await pool.query('SELECT bytes, mime, duration_ms AS "durationMs" FROM clips WHERE hash = $1', [hash])
+      if (rows.length === 0) return null
+      return { bytes: rows[0].bytes, mime: rows[0].mime, durationMs: Number(rows[0].durationMs) }
+    },
+
+    /**
+     * `DO NOTHING`, not `DO UPDATE`: the address is derived from the content,
+     * so a row already at this hash holds the same audio by definition. Two
+     * requests that miss concurrently both generate and both write, and the
+     * second write must be a no-op rather than an error or a rewrite.
+     */
+    async put({ hash, bytes, mime, durationMs, createdAt }) {
+      await pool.query(
+        `INSERT INTO clips (hash, bytes, mime, duration_ms, created_at) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (hash) DO NOTHING`,
+        [hash, bytes, mime, durationMs, createdAt],
+      )
+    },
+
+    async close() {
+      await pool.end()
+    },
+  }
+}
+
+/**
  * Identity storage for T050 (replacing Keycloak + the JWT it issued): two
  * tables, `users` (one row per account, created only by `scripts/useradd.mjs`
  * — there is no signup endpoint) and `sessions` (one row per issued token,
