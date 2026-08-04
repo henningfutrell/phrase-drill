@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Clip } from './clip-cache'
-import { resetFakeIdb } from './idb.test-support'
+import { CLIPS_STORE, CLIP_META_STORE } from './database'
+import { failNextWriteTo, resetFakeIdb } from './idb.test-support'
 
 /**
  * What the clip cache does when the device refuses a write (T085, from the
@@ -24,38 +25,32 @@ import { resetFakeIdb } from './idb.test-support'
  *   a settled promise, so one transient failure — iOS killing a transaction
  *   under memory pressure — was remembered and replayed for every later call.
  *
- * The `idb` seam is faked as everywhere else in this directory, wrapped here
- * so a single call can be made to fail on demand.
+ * The `idb` seam runs against a real IndexedDB (fake-indexeddb, T084) like
+ * everywhere else in this directory, wrapped here so a single call can be
+ * made to fail on demand.
  */
 
 const control = vi.hoisted(() => ({
   /** How many further `openDB` calls reject. */
   failingOpens: 0,
-  /** How many further `put`s reject with a `QuotaExceededError`. */
-  quotaPuts: 0,
 }))
 
 vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
+  // Wraps the REAL `idb`, which since T084 runs against fake-indexeddb. The
+  // only thing intercepted is `openDB` REJECTING — a working database will not
+  // refuse to open when asked, and one of the two defects here is precisely
+  // what the cache remembers when it does. A refused WRITE is injected through
+  // `failNextWriteTo` instead, which raises it inside the real request
+  // pipeline, so the transaction that carries it is genuine.
+  const actual = await vi.importActual<typeof import('idb')>('idb')
   return {
-    openDB: async (...args: Parameters<typeof fake.openDB>) => {
+    ...actual,
+    openDB: (...args: Parameters<typeof actual.openDB>) => {
       if (control.failingOpens > 0) {
         control.failingOpens--
-        throw new Error('idb: the database could not be opened')
+        return Promise.reject(new Error('idb: the database could not be opened'))
       }
-      const db = await fake.openDB(...args)
-      return {
-        ...db,
-        put: async (storeName: string, value: unknown, key?: unknown) => {
-          if (control.quotaPuts > 0) {
-            control.quotaPuts--
-            const error = new Error('The quota has been exceeded.')
-            error.name = 'QuotaExceededError'
-            throw error
-          }
-          return db.put(storeName, value, key)
-        },
-      }
+      return actual.openDB(...args)
     },
   }
 })
@@ -76,7 +71,6 @@ describe('the clip cache when a write is refused', () => {
   beforeEach(() => {
     resetFakeIdb()
     control.failingOpens = 0
-    control.quotaPuts = 0
   })
 
   it('frees space and writes the Clip anyway when the device says it is full', async () => {
@@ -84,7 +78,7 @@ describe('the clip cache when a write is refused', () => {
     await cache.put(clipOf('oldest', 1_000))
     await cache.put(clipOf('newer', 1_000))
 
-    control.quotaPuts = 1
+    failNextWriteTo(CLIPS_STORE)
     await cache.put(clipOf('wanted', 1_000))
 
     expect(await cache.has('wanted')).toBe(true)
@@ -96,7 +90,7 @@ describe('the clip cache when a write is refused', () => {
   it('never claims to hold audio the device refused to write', async () => {
     const cache = createIndexedDbClipCache()
 
-    control.quotaPuts = 10
+    failNextWriteTo(CLIPS_STORE, 'QuotaExceededError', 10)
     await expect(cache.put(clipOf('refused', 1_000))).rejects.toThrow(/quota/i)
 
     // The index is what `has()` and the readiness sweep answer from. A `true`
@@ -124,7 +118,7 @@ describe('the clip cache when a write is refused', () => {
 
     // The Clip is on the disk and was read. Failing to re-date it changes
     // which Clip is evicted next; it must not turn into silence now.
-    control.quotaPuts = 1
+    failNextWriteTo(CLIP_META_STORE)
     expect(await cache.get('playable')).toMatchObject({ hash: 'playable' })
   })
 })
