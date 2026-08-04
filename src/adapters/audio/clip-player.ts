@@ -1,6 +1,7 @@
-import type { Language, Voice } from '../../domain'
+import type { ClockPort, Language, Voice } from '../../domain'
 import type { SpeechPort } from '../../domain/ports'
 import { findCachedClipHash, type ClipCache } from '../storage/clip-cache'
+import { createSystemClock } from './system-clock'
 
 /**
  * The slice of `HTMLAudioElement` this adapter needs — injectable so it is
@@ -39,6 +40,18 @@ export const UNLOCK_SOURCE_FOR_TEST = SILENT_UNLOCK_SOURCE
 
 /** Added to `clip.durationMs` before the `ended`-race times out (T019 §4 ob.3). */
 const DEFAULT_SLACK_MS = 750
+
+/**
+ * How long `unlock()` waits for `element.play()` before giving up on it
+ * (T006). The unlock source is a 52-byte inline `data:` URI — nothing is
+ * fetched over the network, so this is not a "cold cellular connection"
+ * budget; it is a budget for iOS Safari's media pipeline to initialize,
+ * which is normally sub-100ms. 3s is generous headroom for a slow/loaded
+ * device while still resolving well inside the span a tap reads as
+ * "slow" rather than "frozen" — the whole point, since a hang here used
+ * to be a genuine freeze (T006).
+ */
+const DEFAULT_UNLOCK_TIMEOUT_MS = 3000
 
 export type UnlockStatus = 'pending' | 'unlocked' | 'failed'
 
@@ -88,6 +101,15 @@ export interface ClipPlayerDeps {
   /** ms added to `clip.durationMs` before the `ended`-race times out. Default 750. */
   readonly slackMs?: number
   /**
+   * How `unlock()` times a `play()` that never settles (T006) — same seam
+   * `system-clock.ts` gives the domain, reused here rather than a second
+   * raw-timer mechanism. Defaults to a real `createSystemClock()`, so tests
+   * that don't care about this need not supply one.
+   */
+  readonly clock?: ClockPort
+  /** ms `unlock()` waits for `play()` before giving up on it. Default 3000 — see `DEFAULT_UNLOCK_TIMEOUT_MS`. */
+  readonly unlockTimeoutMs?: number
+  /**
    * Called when `speak()` is asked for text with no cached Clip. Expected to
    * be rare: unready Phrases are excluded from the Drill before it starts
    * (T019 §3), so this is the safety net for an unexpected state, not the
@@ -132,6 +154,8 @@ export interface ClipPlayerDeps {
 export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
   const { element, clipCache, voices, onMissingClip, onSilentFailure } = deps
   const slackMs = deps.slackMs ?? DEFAULT_SLACK_MS
+  const clock = deps.clock ?? createSystemClock()
+  const unlockTimeoutMs = deps.unlockTimeoutMs ?? DEFAULT_UNLOCK_TIMEOUT_MS
   let unlockStatus: UnlockStatus = 'pending'
   let lastUnlockFailure: UnlockFailure | undefined
   let stopCurrent: (() => void) | null = null
@@ -147,20 +171,33 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
   // rejecting the first promise with AbortError. Concurrent callers now
   // await the one attempt already in flight instead of racing the element.
   let unlockInFlight: Promise<boolean> | null = null
+  // Bumped on every unlock() call, never reset (T006). `attemptUnlock`
+  // closures capture the id they were started with, and any of them that
+  // notices its id is no longer current treats itself as superseded — it
+  // stops touching the shared element and stops writing unlockStatus /
+  // lastUnlockFailure. Without this, a `play()` that finally resolves long
+  // after its own attempt timed out could still `pause()` a *later* attempt's
+  // in-progress playback, or overwrite a later attempt's result with its own
+  // stale one.
+  let unlockGeneration = 0
 
   /**
    * `retried` distinguishes a fresh AbortError from one seen after the one
-   * retry below — see the AbortError branch.
+   * retry below — see the AbortError branch. `id` is this attempt's
+   * `unlockGeneration` at the moment it started (T006) — see the field's
+   * doc comment for why a stale attempt must not touch shared state.
    */
-  async function attemptUnlock(retried: boolean): Promise<boolean> {
+  async function attemptUnlock(retried: boolean, id: number): Promise<boolean> {
     try {
       element.src = SILENT_UNLOCK_SOURCE
       await element.play()
+      if (id !== unlockGeneration) return true // superseded — a later attempt now owns the element
       element.pause()
       unlockStatus = 'unlocked'
       lastUnlockFailure = undefined
       return true
     } catch (error) {
+      if (id !== unlockGeneration) return false // superseded — do not retry or report on the later attempt's behalf
       const name = error instanceof Error ? error.name : 'UnknownError'
       if (name === 'AbortError') {
         // A THIRD category, distinct from the two below: AbortError means
@@ -174,7 +211,7 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
         // aborts too, further retries just spin on the same interruption,
         // so treat it as unlocked rather than report a failure that was
         // never a refusal.
-        if (!retried) return attemptUnlock(true)
+        if (!retried) return attemptUnlock(true, id)
         unlockStatus = 'unlocked'
         lastUnlockFailure = undefined
         onSilentFailure?.(
@@ -198,6 +235,52 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
     }
   }
 
+  /**
+   * Races one `attemptUnlock` against `unlockTimeoutMs` (T006). `play()`
+   * itself is never cancelled — nothing on `AudioElementLike` can cancel it
+   * — so a stalled attempt is left to resolve on its own time in the
+   * background; `id` (`unlockGeneration`) is what keeps its eventual,
+   * possibly-very-late result from corrupting whatever attempt is current
+   * by then.
+   *
+   * **A timeout is treated as unlocked — proceed, and leave a trace.** Not
+   * "failed": she is a non-technical user, alone, in another country. A
+   * Drill that refuses to start hands her a dead end with no one to ask.
+   * A Drill that proceeds — even one that turns out silent because the
+   * element genuinely never unlocked — is at minimum something she can
+   * Stop and retry, and is likely fine outright: an iOS `play()` promise
+   * can fail to settle for reasons that have nothing to do with whether
+   * audio actually plays. What must not happen is this staying invisible,
+   * so `onSilentFailure` records it either way — the next diagnostics
+   * report can tell "timed out but probably fine" from "genuinely broken"
+   * even though she cannot.
+   */
+  async function attemptUnlockWithTimeout(id: number): Promise<boolean> {
+    const controller = new AbortController()
+    const timedOut = clock.wait(unlockTimeoutMs, controller.signal).then(
+      () => true,
+      () => false, // rejects only when our own controller.abort() below cancels it — never a real timeout
+    )
+    const real = attemptUnlock(false, id)
+
+    const timeoutWon = await Promise.race([real.then(() => false), timedOut])
+    controller.abort() // done racing either way — clear the pending wait so it never fires unobserved (a leaked timer)
+
+    if (!timeoutWon) return real
+
+    if (id === unlockGeneration) {
+      unlockStatus = 'unlocked'
+      lastUnlockFailure = undefined
+    }
+    onSilentFailure?.(
+      `unlock() timed out after ${unlockTimeoutMs}ms waiting for play() to settle — judged unlocked ` +
+        `so the Drill proceeds rather than refusing to start; that judgement could be wrong`,
+    )
+    // `real` is deliberately not awaited or attached here: it settles in
+    // `attemptUnlock` itself, in the background, guarded by `id`.
+    return true
+  }
+
   return {
     get unlockStatus(): UnlockStatus {
       return unlockStatus
@@ -209,8 +292,12 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
 
     async unlock(): Promise<boolean> {
       if (unlockInFlight) return unlockInFlight
-      const attempt = attemptUnlock(false).finally(() => {
-        unlockInFlight = null
+      unlockGeneration += 1
+      const id = unlockGeneration
+      // Cleared on ANY settlement, timeout included (T006) — a dead attempt
+      // must not keep every later tap awaiting the same promise forever.
+      const attempt = attemptUnlockWithTimeout(id).finally(() => {
+        if (unlockInFlight === attempt) unlockInFlight = null
       })
       unlockInFlight = attempt
       return attempt

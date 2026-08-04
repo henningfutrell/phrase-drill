@@ -46,7 +46,7 @@ import type { SyncEngine, SyncSnapshot } from './adapters/sync/sync-engine'
 import { createSyncedLibrary } from './adapters/sync/synced-library'
 import { syncStatusText } from './ui/sync-status-text'
 import { FALLBACK_PREVIEW_PHRASE, knownVoices, VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
-import { createClipPlayer } from './adapters/audio/clip-player'
+import { createClipPlayer, type AudioElementLike } from './adapters/audio/clip-player'
 import { computeDrillReadiness } from './adapters/audio/drill-readiness'
 import { createSystemClock } from './adapters/audio/system-clock'
 import { createWakeLockPort } from './adapters/device/wake-lock'
@@ -197,6 +197,7 @@ function App({
   syncEngine,
   translator,
   databaseTrouble,
+  audioElement,
 }: {
   deckStore: DeckStore
   mixStore: MixStore
@@ -209,6 +210,15 @@ function App({
   syncEngine: SyncEngine
   translator: Translator
   databaseTrouble: DatabaseTroubleSource
+  /**
+   * The one shared element `unlock()`/`speak()` reuse for every Drill,
+   * already attached to the document with no initial `src` (T006 — see
+   * `index.html`'s comment on it, and `main.tsx`, which is the only place
+   * that reads it from the DOM). Never built here with `new Audio()`: that
+   * constructs and detached-plays in the same tap, which is the documented
+   * iOS Safari anti-pattern this composition root must not reintroduce.
+   */
+  audioElement: AudioElementLike
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [mixes, setMixes] = useState<Mix[]>([])
@@ -258,14 +268,17 @@ function App({
   // is only ever replaced, never mutated), so the same `<audio>` element
   // keeps serving unlock() and every real Clip across Drills run under the
   // same voice (T023's unlock-persists assumption — unverified on real iOS
-  // Safari, confirmed only in T013).
+  // Safari, confirmed only in T013). `audioElement` itself is the one
+  // `index.html` attaches ahead of time (T006) — this hook never constructs
+  // its own.
   const clipPlayer = useMemo(
     () =>
       settings.voice
         ? createClipPlayer({
-            element: new Audio(),
+            element: audioElement,
             clipCache,
             voices: knownVoices(settings.voice),
+            clock: systemClock,
             // T002: the three silences clip-player deliberately swallows
             // (a play() rejection after unlock, a Clip missing at play
             // time, unlock()'s "unlocked after a second AbortError" call)
@@ -275,7 +288,7 @@ function App({
             onSilentFailure: (message) => logSilentClipFailure(errorLog, message),
           })
         : null,
-    [settings.voice, clipCache, errorLog],
+    [settings.voice, clipCache, errorLog, audioElement, systemClock],
   )
 
   const [sync, setSync] = useState<SyncSnapshot>(() => syncEngine.snapshot())

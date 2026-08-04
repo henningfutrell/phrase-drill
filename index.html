@@ -52,6 +52,21 @@
   </head>
   <body>
     <div id="root"></div>
+    <!--
+      The one shared <audio> element `unlock()`/`speak()` reuse for every
+      Drill (T023, T006) — created here, attached to the document before any
+      tap, with NO initial `src`. Apple's own guidance on iOS Safari's
+      play()-inside-a-gesture handling: an element that is given a `src` and
+      played in the same breath, with the load still pending, can miss the
+      gesture window entirely — that delay is a better account of both the
+      original AbortError (T001) and the later freeze (T006) than anything
+      else tried. `preload="auto"` favours it being loaded and ready by the
+      time she taps; `playsinline` keeps it (and any future video-capable
+      element reusing this pattern) from taking over the screen. Never
+      recreate this element with `new Audio()` in application code — see
+      `main.tsx`, which reads it from here and hands it down as a port.
+    -->
+    <audio id="unlock-audio" preload="auto" playsinline></audio>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
