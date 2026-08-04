@@ -204,11 +204,19 @@ describe('ImportScreen — review & assign', () => {
     return { onSave }
   }
 
-  it('renders every Draft Phrase, French over English', async () => {
+  it('renders every Draft Phrase, English over French', async () => {
     await renderInReview()
     expect(container.querySelector('[data-testid="draft-row-0"]')?.textContent).toContain('Bonjour')
     expect(container.querySelector('[data-testid="draft-row-0"]')?.textContent).toContain('Hello')
     expect(container.querySelector('[data-testid="draft-row-1"]')?.textContent).toContain('Merci')
+
+    // Same reading order as a Deck row (T062): English entry, French under it.
+    const lines = container.querySelectorAll('[data-testid="draft-row-0"] .phrase-text > *')
+    expect(lines).toHaveLength(2)
+    expect(lines[0].className).toBe('phrase-english')
+    expect(lines[0].textContent).toBe('Hello')
+    expect(lines[1].className).toBe('phrase-french')
+    expect(lines[1].textContent).toBe('Bonjour')
   })
 
   it('edits a Draft Phrase inline via the shared PhraseSheet', async () => {
