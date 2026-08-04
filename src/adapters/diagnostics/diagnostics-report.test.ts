@@ -20,6 +20,9 @@ function fakeDeckStore(decks: readonly Deck[]): DeckStore {
       return { format: LIBRARY_FORMAT, schemaVersion: 1, exportedAt: 0, decks: [] }
     },
     async importAll() {},
+    async updateAll(update) {
+      return { library: update(await this.exportAll()), changed: false }
+    },
   }
 }
 

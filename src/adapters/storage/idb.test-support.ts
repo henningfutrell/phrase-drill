@@ -100,7 +100,7 @@ export async function openDB(
   transaction(
     storeNames: string | string[],
     mode?: string,
-  ): { store: StoreOps; objectStore(name: string): StoreOps; done: Promise<void> }
+  ): { store: StoreOps; objectStore(name: string): StoreOps; done: Promise<void>; abort(): void }
 }> {
   let db = databases.get(name)
   const oldVersion = db?.version ?? 0
@@ -136,6 +136,10 @@ export async function openDB(
         store: storeOps(liveDb, names[0]),
         objectStore: (storeName: string) => storeOps(liveDb, storeName),
         done: Promise.resolve(),
+        // This fake applies every operation immediately, so there is nothing
+        // to roll back. It is here because the adapter aborts a transaction it
+        // decided not to write to, and a test must be able to run that path.
+        abort: () => {},
       }
     },
   }

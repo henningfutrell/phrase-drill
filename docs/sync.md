@@ -39,9 +39,13 @@ requests**. There is no heartbeat.
 1. **Pull.** If the pull fails for any reason other than `not-found`, stop —
    without the server copy this device cannot know what a push would
    overwrite. Her change stays on the phone and goes up next time.
-2. **Merge**, never replace: `mergeLibraries(local, remote, baseline)`.
-3. **Write the merge back locally, before pushing.** If the push then fails,
-   what came down from the other device is already saved here.
+2. **Read the baseline.** Written by this engine and by nothing else, so it
+   races with nobody.
+3. **Merge and write it back locally, as one indivisible step, before
+   pushing** — `updateLocal`, below. `mergeLibraries(local, remote, baseline)`
+   merges, never replaces, and `local` is what is stored at the instant of the
+   write. If the push then fails, what came down from the other device is
+   already saved here.
 4. **Push the merge.** It is a superset of what the server held, so a push can
    add records and never remove one.
 5. **Only then** record the baseline and the sync time.
@@ -49,6 +53,56 @@ requests**. There is no heartbeat.
 `lastSyncAt` is written by step 5 and by nothing else, so a failure can never
 report a time and the sync line can never say "Synced" about a round-trip that
 did not complete.
+
+### The read and the write are one step (T074)
+
+Step 3 used to be two: `readLocal()`, then merge, then `writeLocal()`. She is
+holding the phone, and a round-trip is not instant. **Anything she saved
+between that read and that write was computed away** — the merge came from a
+snapshot that predated her keystrokes, and `importAll` clears all three object
+stores and rewrites them from it. The Deck was gone from IndexedDB, absent
+from the push, and nothing was said. `src/adapters/sync/sync-round-trip-race.test.ts`
+runs the whole thing against the real storage adapters and pins it.
+
+So the sync path writes through **`DeckStore.updateAll`**, which does the read
+and the write in **one IndexedDB transaction**: the update function is handed
+what is stored at that instant. Her `save` is its own transaction, so it either
+commits before this one reads — and is merged in — or after this one writes —
+and stands. There is no third outcome and no snapshot old enough to lose. The
+update must be pure and synchronous, because the transaction is held open
+across it; anything awaited in there would reopen the window it closes.
+
+`updateAll` also reports whether it wrote anything, which is what the library
+revision counts, and it **skips the clear-and-rewrite entirely when the merge
+changed nothing**. That is not an optimization: a wholesale clear on every idle
+sync is a wipe waiting for the one transaction that does not finish.
+
+Two other shapes were considered and rejected:
+
+- **Re-read and re-merge just before the write, with a bounded retry.**
+  Optimistic, stays inside the engine, needs no change to any port — and leaves
+  the same defect in a narrower window, because the re-read and the write are
+  still two transactions. A defect that is merely harder to hit is still the
+  defect, and it would have been retired as fixed.
+- **A lock, or a generation counter, over the local library.** A lock has to be
+  held across IndexedDB awaits and would have to be bypassed by the engine's own
+  write to avoid deadlocking on itself — two routes to one store under different
+  rules. A counter has to be incremented by every writer, and this library has
+  more than one: the deck store and the mix store write different object stores
+  of the same envelope, so a counter owned by either is blind to the other. A
+  *persisted* counter would be a schema change to data that is hers, which needs
+  a migration or does not happen. `updateAll` compares nothing and locks nothing
+  — it reads the real records at the moment it writes them.
+
+**Nothing was added to what is stored.** `updateAll` is a new way to write the
+same three object stores; no field, no version bump, no migration.
+
+The **pinned voice** is the one thing not inside the transaction. It lives in
+the `settings` store, reached through a different connection, and no
+transaction can span both — so `updateLocal` reads it before the transaction
+opens and adopts the merged one after it closes. A voice she changes in that
+window can still be overwritten. It costs one tap in Settings (T067), and it is
+not a Phrase.
 
 ## The merge, and the Deck-level conflict T060 left open
 
@@ -191,7 +245,7 @@ local change made in either state does not paint over the message.
 
 `run()` used to be `try`/`finally` with no `catch`, and four of the calls
 `roundTrip` awaits raise their failures by throwing rather than returning
-them. One of those — a `QuotaExceededError` from `writeLocal`, or a
+them. One of those — a `QuotaExceededError` from the local write, or a
 `response.json()` on a truncated body — rejected `run()` into a promise
 nobody read, and the engine stopped at `syncing` with no retry scheduled and
 no way back. The line said **"Syncing…"** for the rest of the session while
@@ -204,8 +258,8 @@ each maps onto a state the engine already had:
 | Throws | Reported as | Ends in |
 | ------ | ----------- | ------- |
 | `client.pull()` / `client.push()` | `network` | `waiting`, retry scheduled |
-| `readLocal()`, `baseline.read()` | `device-storage` | `waiting`, retry scheduled |
-| `writeLocal()` | `device-storage` | `waiting`, retry scheduled — **and the push is skipped**, so a merge this device could not save is never made the agreed state |
+| `baseline.read()` | `device-storage` | `waiting`, retry scheduled |
+| `updateLocal()` — its read or its write | `device-storage` | `waiting`, retry scheduled — **and the push is skipped**, so a merge this device could not save is never made the agreed state |
 | `baseline.write()`, `recordSync()` | `device-storage` | `waiting`, retry scheduled, and no sync time claimed |
 
 `device-storage` is the storage counterpart of `network`: a condition that

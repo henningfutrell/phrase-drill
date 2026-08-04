@@ -98,6 +98,36 @@ function createFakeDeckStore(
   const decks = new Map(initial.map((d) => [d.id, d]))
   const updatedAt = new Map(initial.map((d) => [d.id, 0]))
   const tombstones = new Map<string, Tombstone>()
+
+  function snapshot(): Library {
+    return {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: now(),
+      decks: [...decks.values()].map((d) => ({
+        id: d.id,
+        name: d.name,
+        phrases: d.phrases,
+        createdAt: 0,
+        updatedAt: updatedAt.get(d.id) ?? 0,
+      })),
+      tombstones: [...tombstones.values()],
+    }
+  }
+
+  function replace(library: Library): void {
+    decks.clear()
+    updatedAt.clear()
+    tombstones.clear()
+    for (const record of library.decks) {
+      decks.set(record.id, { id: record.id, name: record.name, phrases: record.phrases })
+      updatedAt.set(record.id, record.updatedAt)
+    }
+    for (const tombstone of library.tombstones ?? []) {
+      tombstones.set(tombstone.id, tombstone)
+    }
+  }
+
   return {
     decks,
     async loadAll() {
@@ -116,31 +146,18 @@ function createFakeDeckStore(
       tombstones.set(id, { id, kind: 'deck', deletedAt: now() })
     },
     async exportAll(): Promise<Library> {
-      return {
-        format: LIBRARY_FORMAT,
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        exportedAt: now(),
-        decks: [...decks.values()].map((d) => ({
-          id: d.id,
-          name: d.name,
-          phrases: d.phrases,
-          createdAt: 0,
-          updatedAt: updatedAt.get(d.id) ?? 0,
-        })),
-        tombstones: [...tombstones.values()],
-      }
+      return snapshot()
     },
     async importAll(library) {
-      decks.clear()
-      updatedAt.clear()
-      tombstones.clear()
-      for (const record of library.decks) {
-        decks.set(record.id, { id: record.id, name: record.name, phrases: record.phrases })
-        updatedAt.set(record.id, record.updatedAt)
-      }
-      for (const tombstone of library.tombstones ?? []) {
-        tombstones.set(tombstone.id, tombstone)
-      }
+      replace(library)
+    },
+    // Its own path to the same records, as in the real adapter: `importAll`
+    // replaces, `updateAll` reads and writes in one step, and a test that
+    // stubs one is not stubbing the other.
+    async updateAll(update) {
+      const next = update(snapshot())
+      replace(next)
+      return { library: next, changed: true }
     },
   }
 }
