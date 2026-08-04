@@ -194,3 +194,27 @@
   color: var(--ink);
   font-family: var(--font-body);
 }
+
+/* One rose per screen (T061 follow-up).
+   With candidates on screen there were two full-accent buttons about 100px
+   apart — "Add selected" and "Save" — and nothing said which one was the
+   action. Only visible in a render; the source reads as two ordinary
+   `.btn-primary` calls in different branches.
+
+   While candidates are showing, accepting them IS the action, so the manual
+   Save demotes to the secondary treatment. Nothing about it changes
+   functionally: it stays enabled, keeps its testid, and still saves the one
+   phrase she typed by hand. `:has()` scopes this to exactly the state where
+   the competition exists, and iOS Safari — the only browser this app must
+   run in (AGENTS.md) — has supported it since 16.4. */
+.sheet:has(.candidate-list) > .sheet-actions > .btn-primary {
+  background: transparent;
+  color: var(--ink-soft);
+  box-shadow: inset 0 0 0 1px var(--gilt-dim);
+}
+
+.sheet:has(.candidate-list) > .sheet-actions > .btn-primary:hover:not(:disabled) {
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--gilt);
+  filter: none;
+}
