@@ -116,6 +116,15 @@ available). Two plausible bottlenecks, in order of likely severity:
 
 ## 3. IndexedDB write throughput (measured, against the fake — see caveat)
 
+> **The harness changed after these numbers were taken (T084).** The tables and
+> the reasoning in this section were measured against a hand-rolled `idb`
+> double whose stores were plain `Map`s. The suite now runs on
+> `fake-indexeddb`, which implements the specification including structured
+> clone, so the "no structured-clone cost" caveat below no longer describes the
+> harness — only that it still reaches no disk. The numbers have not been
+> re-taken; re-run the bench before treating any of them as current.
+
+
 | Phrases | Save all decks, one at a time (ms) | `importAll` — one transaction (ms) | `readyPhraseIds`, cold cache (ms) | `readyPhraseIds`, warm cache (ms) | raw 2n-hash loop (ms) |
 |---:|---:|---:|---:|---:|---:|
 | 100 | 0.38 | 0.07 | 2.01 | 1.27 | 1.75 |
