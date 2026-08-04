@@ -24,16 +24,10 @@ import { estimatePauseDuration, type Phrase } from '../../domain'
 import type { Clip } from './clip-cache'
 import { idbDestructiveOperations, resetFakeIdb } from './idb.test-support'
 
-vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbClipCache, computeClipHash, DEFAULT_CLIP_CACHE_MAX_BYTES } = await import('./clip-cache')
-const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
-const { createIndexedDbMixStore } = await import('./indexed-db-mix-store')
-const { CLIPS_STORE, CLIP_META_STORE, openDatabase } = await import('./database')
+import { createIndexedDbClipCache, computeClipHash, DEFAULT_CLIP_CACHE_MAX_BYTES } from './clip-cache'
+import { createIndexedDbDeckStore } from './indexed-db-deck-store'
+import { createIndexedDbMixStore } from './indexed-db-mix-store'
+import { CLIPS_STORE, CLIP_META_STORE, openDatabase } from './database'
 
 const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 

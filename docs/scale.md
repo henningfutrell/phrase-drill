@@ -6,8 +6,8 @@ assumption with numbers.
 
 **Method.** `src/adapters/storage/scale.bench.test.ts` runs the *real*
 `clip-cache.ts`, `indexed-db-deck-store.ts`, `library.ts`, and
-`generation-queue.ts` code — unmodified — against the same in-memory `idb`
-fake (`idb.test-support.ts`, `vi.mock('idb', ...)`) the rest of this repo's
+`generation-queue.ts` code — unmodified — against the same in-memory
+IndexedDB (`fake-indexeddb`, via `idb.test-support.ts`) the rest of this repo's
 adapter tests already use, at synthetic library sizes of 100, 1,000, 5,000,
 and 10,000 Phrases (4–12 words each, 2 Clips/Phrase). No call to
 `api.elevenlabs.io` was made or attempted.
@@ -23,10 +23,11 @@ under plain `npm test`.
 
 **Labels.** Every number below is one of:
 - **measured** — real code path, real timer, run in this repo.
-- **measured (fake)** — same, but against the in-memory `idb` fake, not real
-  Safari disk-backed IndexedDB. That fake is a `Map`: `getAll()` returns
-  array references with no structured-clone cost. These numbers are a floor
-  for on-device latency, not a ceiling — see the caveat under §3.
+- **measured (in memory)** — same, but against `fake-indexeddb`, not real
+  Safari disk-backed IndexedDB. It implements the specification, structured
+  clone included, but holds everything in memory and reaches no disk. These
+  numbers are a floor for on-device latency, not a ceiling — see the caveat
+  under §3.
 - **modelled** — derived from a formula/constant already in this codebase,
   no I/O performed.
 - **read from code** — a structural fact, not a number, established by
@@ -114,6 +115,15 @@ available). Two plausible bottlenecks, in order of likely severity:
   a best-case floor, not a forecast.
 
 ## 3. IndexedDB write throughput (measured, against the fake — see caveat)
+
+> **The harness changed after these numbers were taken (T084).** The tables and
+> the reasoning in this section were measured against a hand-rolled `idb`
+> double whose stores were plain `Map`s. The suite now runs on
+> `fake-indexeddb`, which implements the specification including structured
+> clone, so the "no structured-clone cost" caveat below no longer describes the
+> harness — only that it still reaches no disk. The numbers have not been
+> re-taken; re-run the bench before treating any of them as current.
+
 
 | Phrases | Save all decks, one at a time (ms) | `importAll` — one transaction (ms) | `readyPhraseIds`, cold cache (ms) | `readyPhraseIds`, warm cache (ms) | raw 2n-hash loop (ms) |
 |---:|---:|---:|---:|---:|---:|
@@ -241,7 +251,7 @@ so a re-fetch after eviction is usually a Postgres read, not an ElevenLabs
 generation. Evicting is close to free; having no ceiling costs the library.
 
 **Measured** by `src/adapters/storage/clip-cache-eviction.test.ts`, which runs
-the real cache against the same in-memory `idb` fake and a modelled
+the real cache against the same in-memory IndexedDB and a modelled
 10,000-Phrase library (part of `npm test`, ~1 s):
 
 | | |
@@ -364,8 +374,8 @@ byte-identical across it.
   cold-fill estimate (§2). No ElevenLabs key was available or used.
 - **Could not verify:** the real, on-device cost of `readyPhraseIds`
   against a large warm cache backed by actual Safari IndexedDB (structured
-  clone of hundreds of MB) — the in-memory `idb` fake used throughout this
-  harness does not model that cost, and is a known blind spot (§3).
+  clone of hundreds of MB) — the in-memory IndexedDB used throughout this
+  harness reaches no disk, and is a known blind spot (§3).
   Likewise, real ElevenLabs concurrency/rate-limit behavior — the specific
   number where a genuine 402 starts — is asserted from the provider client's
   code path, not observed against the live API. What *was* observed is this
