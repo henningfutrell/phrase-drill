@@ -47,6 +47,28 @@ itself is the thing that's unavailable.
 3. Uploads it to `BACKUP_DEST`, off Render (see "Destination" below).
 4. Deletes anything at the destination older than `BACKUP_RETENTION_DAYS`.
 
+### What is in the dump
+
+Four tables, every one of them created by the server's own idempotent
+`init()` calls (`server/db.js`): `users` and `sessions` (T050), `libraries`
+(T043 — her phrases, the thing this exists for), and `clips` (T063 — the
+shared Clip store, a `bytea` column holding the generated audio itself).
+`pg_dump` takes all four; the restore drill checks all four.
+
+**The two are not equally precious, and the drill says so out loud.**
+`libraries` is irreplaceable — hand-typed, exists nowhere else. `clips` is
+merely expensive: every row is content-addressed audio that ElevenLabs would
+generate again from the same phrase, so losing it costs provider calls and
+her waiting, not her work. Both are backed up anyway (the dump is a few KB
+either way), but if you are ever choosing under pressure, `libraries` is the
+one that cannot be rebuilt.
+
+**`clips` is `bytea`, and binary columns are where a logical backup quietly
+goes wrong** — a byte range mangled through a text path restores without an
+error and plays as noise or nothing. That is why the drill's clip checks
+compare the actual bytes rather than a row count (see "Restore, step by
+step").
+
 Every step fails loudly: a non-zero exit and a `level: "error"` log line on
 any failure — a wrong password, `pg_dump` missing, the upload rejected, disk
 full. **It never exits 0 having silently skipped a step.** A backup job that
@@ -261,7 +283,9 @@ restore the backup into this disposable scratch database first.
    npm run restore-drill -- ./phrase-drill-2026-08-03T14-30-00Z.sql.gz
    ```
    This creates a scratch database, restores the dump into it with `psql`,
-   checks that `users`, `sessions`, and `libraries` all exist, and (with no
+   checks that `users`, `sessions`, `libraries` and `clips` all exist, checks
+   that every restored clip's audio came back as *binary* rather than text,
+   reports the clip store's digest and row count, and (with no
    `--keep-scratch`, the default) drops the scratch database again — pass
    or fail. Read the `PASS`/`FAIL` lines it prints; a non-zero exit means at
    least one failed.
@@ -276,6 +300,23 @@ restore the backup into this disposable scratch database first.
    npm run restore-drill -- ./phrase-drill-....sql.gz \
      --library-key=her-user-id --expect-sha256=<hash from above>
    ```
+4. **To prove the audio round-trips byte-identical too**, capture the clip
+   store's digest the same way — one statement, run against the live
+   database *before* the backup, and run again by the drill against the
+   scratch database afterward:
+   ```sh
+   # before: capture it (this is exactly CLIPS_DIGEST_SQL in restore-drill.mjs)
+   psql "$DATABASE_URL" -t -A -c \
+     "SELECT encode(sha256(coalesce(string_agg(hash || ':' || encode(bytes,'hex') || ':' || mime, E'\n' ORDER BY hash),'')::bytea),'hex') FROM clips"
+   # after restoring:
+   npm run restore-drill -- ./phrase-drill-....sql.gz \
+     --expect-clips-sha256=<digest from above>
+   ```
+   Without `--expect-clips-sha256` the drill prints the digest and the clip
+   count rather than comparing them — capture that number somewhere the next
+   drill can reach it. Without `--expect-sha256`/`--expect-clips-sha256` the
+   drill still fails on a missing table or on any clip that came back as
+   text, which is the corruption a plain "it restored" would hide.
 
 ### Whole-database restore
 
@@ -419,40 +460,109 @@ provider keys to.
 
 ## Verified proof this works (T054)
 
-The restore drill was run for real, twice, against two independent
-throwaway `postgres:17-alpine` Docker containers (never the repo's own
-`phrase-drill-postgres-1`) — see the T054 task record for both transcripts.
+Every claim below is a command that was run, against a real Postgres, with
+its real output. "The script exits 0" is not on this list — the whole point
+of a drill is that exit 0 proves nothing on its own.
 
-**Round 1:** seeded with representative `users`/`sessions`/`libraries`
-rows, backed up with `scripts/backup.mjs` to a local directory (standing in
-for an `s3://` destination — the upload step is a single `aws s3 cp` call
-either way), restored with `scripts/restore-drill.mjs`. All five checks
-passed (`users`/`sessions`/`libraries` tables present, the seeded library's
-row present, its `data` column byte-identical by SHA-256 to the value
-captured before the backup ran), exit 0. A second run with a deliberately
-wrong expected hash produced `FAIL` on that one check and exit 1, and the
-scratch database it created was confirmed gone afterward either way.
+### Environment
 
-**Round 2 — the single-library recovery path (`--keep-scratch`), against a
-fresh throwaway container:** seeded a live library with two decks
-("Verbs", "Greetings"), took a backup, then simulated the actual incident
-this task exists for — deleted the "Greetings" deck from the live database
-*and* added a new "Food" deck afterward, so the live database had both a
-loss and new work to protect. Ran `restore-drill.mjs --keep-scratch`: the
-scratch database was left running and its name/connection command printed.
-Queried the old blob out of the scratch database and the current blob out
-of the live database, confirmed by inspection that recovering the deleted
-deck by blindly overwriting the live row would have destroyed the "Food"
-deck, hand-merged the two into one JSON blob carrying both "Greetings" and
-"Food", applied the documented `UPDATE` to the live row, and confirmed the
-live database then held all three decks ("Verbs", "Food", "Greetings").
-Dropped the scratch database with the exact command `restore-drill.mjs`
-printed and confirmed via `pg_database` that no
-`phrase_drill_restore_drill_*` database was left behind. The default (no
-`--keep-scratch`) rehearsal path was re-run against the same container
-first and confirmed it still drops its scratch database unconditionally —
-`--keep-scratch` only changes behavior when explicitly passed.
+A throwaway `postgres:17-alpine` Docker container (`t054-drill-pg`, port
+55433, throwaway local-only credentials), never the repo's own
+`phrase-drill-postgres-1` and never `docker-compose.yml`. Client tools:
+`pg_dump`/`psql` 18.4. Schema created by the server's own
+`createAuthStore(pool).init()`, `createLibraryStore(pool).init()` and
+`createClipStore(pool).init()` — the same calls a boot makes, not hand-written
+DDL. Container removed afterward.
 
-Both containers were removed after their runs; neither was ever named
-`phrase-drill-*`, and neither `docker-compose.yml` nor a `phrase-drill-*`
-container was touched at any point.
+### What was seeded
+
+One user, one session, one library of three decks (`Verbes irréguliers`,
+`Salutations`, `Au marché`) with eight French/English phrases including
+accented and typographic characters, and **three `clips` rows with real
+`bytea` content** chosen to break a text path if one existed: a NUL byte, a
+`0xFF`, a backslash, CR and LF, a quote, and three invalid UTF-8 sequences
+(`c3 28`, an unpaired surrogate `ed a0 80`, an out-of-range `f4 90 80 80`),
+followed by a 4 KB pseudo-audio body — plus a 1-byte clip that is a single
+NUL, the smallest thing a length check would wave through.
+
+### The round-trip
+
+```
+$ npm run backup            # BACKUP_DEST=<local dir>, standing in for s3://
+{"level":"info",...,"msg":"backup: starting","filename":"phrase-drill-2026-08-04T03-33-26Z.sql.gz","destinationKind":"local"}
+{"level":"info",...,"msg":"backup: dump complete","bytes":2150}
+{"level":"info",...,"msg":"backup: uploaded","destination":".../phrase-drill-2026-08-04T03-33-26Z.sql.gz"}
+{"level":"info",...,"msg":"backup: done","filename":"phrase-drill-2026-08-04T03-33-26Z.sql.gz","prunedCount":0}
+EXIT=0
+
+$ npm run restore-drill -- ./phrase-drill-2026-08-04T03-33-26Z.sql.gz \
+    --library-key=usr_drill_marguerite --expect-sha256=a0629e0e... \
+    --expect-clips-sha256=5ce72f79...
+PASS — table "users" exists
+PASS — table "sessions" exists
+PASS — table "libraries" exists
+PASS — table "clips" exists
+PASS — clip audio round-trips as binary (bytea, not text) (3 clip(s))
+PASS — clip store is byte-identical to the pre-backup clip digest (5ce72f7918e4873dfd8007a42e9e3df61d953b3009b13ed96304da81a3dc37f9 over 3 clip(s))
+PASS — library "usr_drill_marguerite" round-trips
+PASS — restored data is byte-identical to the pre-backup hash (a0629e0eeaf142ae057482eccfd91ca2b62353add1281702023f11fcfe625072)
+EXIT=0
+```
+
+### How the bytea was actually verified
+
+Not by the drill's own verdict — by an independent check that does not share
+code with it. The backup was restored a second time with `--keep-scratch`,
+and every row of all four tables was read out of both the live database and
+the restored scratch database through the `pg` driver, digesting each clip's
+`bytes` **as the Buffer the driver returns** (with its length, leading 24
+bytes and trailing 8 bytes recorded alongside). The two dumps were compared
+with `diff`: **identical, byte for byte, every row.** The adversarial clip
+came back as `00ff5c0a0d27221a0000c328eda080f49080807ffffb9064…`, exactly the
+bytes that went in — including the NUL, the invalid UTF-8, and the lone
+`0x00` one-byte clip.
+
+Conclusion, stated plainly: **`pg_dump` plain-SQL format round-trips this
+schema's `bytea` correctly.** The gap was never the dump. It was the drill,
+which did not look.
+
+### The negative controls (a check that cannot fail proves nothing)
+
+1. **Wrong clip digest** — `--expect-clips-sha256=0000…` →
+   `FAIL — clip store is byte-identical to the pre-backup clip digest`,
+   exit 1.
+2. **A dump with no `clips` table**, taken with `--exclude-table=clips` —
+   what a backup made before T063, or one that silently skipped the table,
+   looks like → `FAIL — table "clips" exists`, exit 1. **Before the clips
+   checks were added, this same dump printed three `PASS` lines and exited
+   0**: a backup that had lost every clip, reported as healthy. That is the
+   defect this section exists to record as fixed.
+3. **Wrong library hash** (from the earlier T054 run) → `FAIL` on that one
+   check and exit 1, scratch database dropped either way.
+
+### The scratch database
+
+Confirmed dropped after every run:
+`SELECT datname FROM pg_database WHERE datname LIKE 'phrase_drill_restore_drill_%'`
+returned nothing, including after the `--keep-scratch` run was cleaned up
+with the exact `DROP DATABASE … WITH (FORCE)` command the script itself
+printed.
+
+### What this drill still does not prove
+
+- **No production data was involved.** This was a seeded throwaway database,
+  not her library and not Render's Postgres. It proves the scripts are
+  correct; it does not prove any particular real backup file is good. Only
+  running the drill against a real backup does that.
+- **The `s3://` path was not exercised.** `BACKUP_DEST` pointed at a local
+  directory. The upload is one `aws s3 cp` and the prune is `aws s3 ls`/`rm`,
+  covered by unit tests over `awsArgs`, but no bucket was written to — that
+  needs credentials this drill deliberately did not have. The first real run
+  against Backblaze B2 is what settles it.
+- **Retention was never exercised against a real expiry.** `prunedCount: 0`
+  — no file in the destination was older than 180 days. `selectExpiredBackups`
+  is unit-tested; the live prune is not proven here.
+- **The single-library recovery path** (`--keep-scratch`, hand-merge,
+  `UPDATE`) was walked in the earlier T054 run and its `--keep-scratch`
+  behaviour re-confirmed here, but the hand-merge step is by design manual
+  and has no automated proof.

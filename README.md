@@ -26,8 +26,9 @@ docker compose up --build
 
 No cloud account needed. Speech and Scan return "not configured" until
 `ELEVENLABS_API_KEY`/`ANTHROPIC_API_KEY` are set (a `.env` file next to
-`docker-compose.yml`, git-ignored). Full detail, endpoints, and the Coolify
-deploy path: `docs/server.md`.
+`docker-compose.yml`, git-ignored). Full detail and endpoints:
+`docs/server.md`; the production deploy (Render, from `render.yaml`):
+`docs/deploy.md`.
 
 ## Deploy the static build (GitHub Pages)
 
@@ -42,7 +43,7 @@ This is the PWA's own static assets only — it does not deploy the server; see
 
 - Built assets and manifest use a relative base (`vite.config.ts`), so the
   same build works served from a project sub-path (Pages) or a domain root
-  (the Docker/Coolify server, `server/static.js`) with no separate build.
+  (the Node server, `server/static.js`) with no separate build.
 - `gh-pages` also hosts `spike/`, an unrelated device diagnostic cited as
   evidence elsewhere — the script preserves it and replaces everything else
   at the branch root with the fresh build.
