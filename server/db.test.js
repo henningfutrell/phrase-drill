@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
-import { createLibraryStore, createAuthStore, waitForDatabase, extractPassword } from './db.js'
+import { createLibraryStore, createAuthStore, waitForDatabase, extractPassword, sslConfigFor } from './db.js'
 
 /**
  * A minimal stand-in for a `pg` `Pool`: real enough to exercise
@@ -307,5 +307,33 @@ describe('extractPassword', () => {
 
   it('returns null for a missing/undefined connection string', () => {
     expect(extractPassword(undefined)).toBeNull()
+  })
+})
+
+describe('sslConfigFor (T053: Render deploy)', () => {
+  it('requires no SSL for the local docker-compose hostname', () => {
+    expect(sslConfigFor('postgres://phrase_drill:phrase_drill@postgres:5432/phrase_drill')).toBeUndefined()
+  })
+
+  it('requires no SSL for localhost', () => {
+    expect(sslConfigFor('postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill')).toBeUndefined()
+  })
+
+  it('requires no SSL for a Render internal hostname (private network, no domain suffix)', () => {
+    expect(sslConfigFor('postgres://user:pw@dpg-abc123-a:5432/phrase_drill')).toBeUndefined()
+  })
+
+  it('relaxes certificate verification, scoped to the connection, for a Render external hostname', () => {
+    expect(sslConfigFor('postgres://user:pw@dpg-abc123-a.oregon-postgres.render.com:5432/phrase_drill')).toEqual({
+      rejectUnauthorized: false,
+    })
+  })
+
+  it('returns undefined for an unparsable connection string, rather than throwing', () => {
+    expect(sslConfigFor('not-a-url')).toBeUndefined()
+  })
+
+  it('returns undefined for a missing/undefined connection string', () => {
+    expect(sslConfigFor(undefined)).toBeUndefined()
   })
 })
