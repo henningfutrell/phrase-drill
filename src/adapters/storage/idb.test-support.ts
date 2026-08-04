@@ -85,7 +85,7 @@ function identify(tx: IDBTransaction): number {
  */
 const LOGGED_OPERATIONS = ['get', 'getAll', 'getAllKeys', 'count', 'put', 'delete', 'clear'] as const
 
-let armedWriteFailure: { store: string; name: string } | undefined
+let armedWriteFailure: { store: string; name: string; remaining: number } | undefined
 
 /**
  * Make the next `put` against `store` fail the way a phone under storage
@@ -110,8 +110,8 @@ let armedWriteFailure: { store: string; name: string } | undefined
  * using this assert — so it is recorded here rather than fixed under a task
  * about test infrastructure.
  */
-export function failNextWriteTo(store: string, name = 'QuotaExceededError'): void {
-  armedWriteFailure = { store, name }
+export function failNextWriteTo(store: string, name = 'QuotaExceededError', times = 1): void {
+  armedWriteFailure = { store, name, remaining: times }
 }
 
 type RequestPipeline = {
@@ -130,7 +130,8 @@ for (const op of LOGGED_OPERATIONS) {
       }
       if (op === 'put' && armedWriteFailure?.store === this.name) {
         const { name } = armedWriteFailure
-        armedWriteFailure = undefined
+        armedWriteFailure.remaining -= 1
+        if (armedWriteFailure.remaining <= 0) armedWriteFailure = undefined
         // See `failNextWriteTo` — the adapter leaves this promise rejecting.
         void (wrap(this.transaction) as IDBPTransaction).done.catch(() => {})
         return (this.transaction as unknown as RequestPipeline)._execRequestAsync({
