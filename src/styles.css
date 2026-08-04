@@ -185,6 +185,18 @@ button:disabled {
   font-style: italic;
 }
 
+/*
+ * The sync line (T034). Quiet on purpose: it is standing information, not an
+ * alert, and the states she can do nothing about must not compete with the
+ * Decks themselves. It never uses --accent, which docs/design.md reserves for
+ * the live beat, the primary action, and the current selection.
+ */
+.sync-status {
+  color: var(--ink-dim);
+  font-size: var(--text-sm);
+  margin: 4px 0 12px;
+}
+
 /* ---- Lists -------------------------------------------------------------- */
 
 .deck-list,
