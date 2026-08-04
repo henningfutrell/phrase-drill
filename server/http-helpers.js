@@ -45,11 +45,12 @@ export function readBody(req, { maxBytes }) {
   })
 }
 
-export function sendJson(res, status, body) {
+export function sendJson(res, status, body, headers = {}) {
   const text = JSON.stringify(body)
   res.writeHead(status, {
     'content-type': 'application/json',
     'content-length': Buffer.byteLength(text),
+    ...headers,
   })
   res.end(text)
 }

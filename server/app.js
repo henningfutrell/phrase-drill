@@ -13,6 +13,26 @@ const TRANSLATE_MAX_TEXT_CHARS = 500
 const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
+ * The one way this server refuses a request for being too fast (T035).
+ *
+ * It answers 429 with `Retry-After`, and it is the *only* thing here that
+ * answers 429: a provider running out of credits answers 402 (see
+ * `statusForProviderError`). Those two used to share a status, which made
+ * them indistinguishable at the device — and the device, unable to tell "wait
+ * a moment" from "this will never succeed", gave up on both. A cold library
+ * sweep lost ~1,940 of 2,000 Clips to that, to our own limiter.
+ *
+ * `Retry-After` in seconds is RFC 9110's field, understood by anything
+ * between here and the device, and it carries the number the client cannot
+ * derive: how full the bucket is. Rounded up, and never below one second —
+ * a `Retry-After: 0` is an invitation to hammer.
+ */
+function sendRateLimited(res, decision) {
+  const seconds = Math.max(1, Math.ceil(decision.retryAfterMs / 1000))
+  return sendJson(res, 429, { error: 'rate-limited' }, { 'retry-after': String(seconds) })
+}
+
+/**
  * The schema version of a stored envelope, read back out of the JSON the
  * server keeps opaque otherwise. `0` for anything unreadable or missing a
  * numeric version — the permissive answer, so a corrupt or ancient stored
@@ -75,7 +95,8 @@ export function createApp({
     // (buildServer wires the limiter's capacity/refillMs) — before
     // credentials are ever checked, so a brute force against one username
     // never even reaches the scrypt comparison after the fifth try.
-    if (!loginLimiter.allow(username)) return sendJson(res, 429, { error: 'rate-limited' })
+    const loginBudget = loginLimiter.allow(username)
+    if (!loginBudget.ok) return sendRateLimited(res, loginBudget)
 
     // Never pass the password to the logger, in a field or a message — see
     // docs/server.md "Provable: no key can leak".
@@ -107,7 +128,8 @@ export function createApp({
    * is a smaller bill, not a working sweep.
    */
   async function handleTts(req, res, key) {
-    if (!ttsLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
+    const budget = ttsLimiter.allow(key)
+    if (!budget.ok) return sendRateLimited(res, budget)
 
     let body
     try {
@@ -171,7 +193,8 @@ export function createApp({
   }
 
   async function handleScan(req, res, key) {
-    if (!scanLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
+    const budget = scanLimiter.allow(key)
+    if (!budget.ok) return sendRateLimited(res, budget)
 
     let body
     try {
@@ -194,7 +217,8 @@ export function createApp({
   }
 
   async function handleTranslate(req, res, key) {
-    if (!translateLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
+    const budget = translateLimiter.allow(key)
+    if (!budget.ok) return sendRateLimited(res, budget)
 
     let body
     try {
@@ -231,7 +255,8 @@ export function createApp({
   }
 
   async function handleLibraryGet(req, res, key) {
-    if (!libraryLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
+    const budget = libraryLimiter.allow(key)
+    if (!budget.ok) return sendRateLimited(res, budget)
     const row = await libraryStore.get(key)
     if (!row) return sendJson(res, 404, { error: 'not-found' })
     res.writeHead(200, { 'content-type': 'application/json' })
@@ -239,7 +264,8 @@ export function createApp({
   }
 
   async function handleLibraryPut(req, res, key) {
-    if (!libraryLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
+    const budget = libraryLimiter.allow(key)
+    if (!budget.ok) return sendRateLimited(res, budget)
 
     let body
     try {
@@ -363,8 +389,13 @@ function statusForProviderError(err) {
   switch (err.kind) {
     case 'not-configured':
       return 503
+    // 402, not 429 (T035). A 429 from this server means one thing only —
+    // its own limiter, with a `Retry-After` and a remedy of waiting. The
+    // provider being out of credits is not a wait; it is a bill, and a
+    // client that retries it forever is burning battery on a call that
+    // cannot succeed until somebody pays.
     case 'quota':
-      return 429
+      return 402
     case 'unreadable':
       return 422
     default:

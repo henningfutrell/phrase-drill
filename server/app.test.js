@@ -355,17 +355,23 @@ describe('server app (integration, fake upstreams)', () => {
       expect(res.status).toBe(503)
     })
 
-    it('returns 429 when the upstream reports quota exhaustion after retrying', async () => {
+    // T035: 402, not 429. "The provider is out of credits" and "you are
+    // asking this server too fast" are different facts with different
+    // remedies, and collapsing them onto one status is what made a whole
+    // library's worth of Phrases die on our own limiter.
+    it('returns 402 when the upstream reports quota exhaustion after retrying', async () => {
       await boot({ elevenLabsFetch: fetchThatFailsWith(429) })
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
         headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: ttsBody(),
       })
-      expect(res.status).toBe(429)
+      expect(res.status).toBe(402)
+      expect(await res.json()).toEqual({ error: 'quota' })
+      expect(res.headers.get('retry-after')).toBe(null)
     })
 
-    it('enforces the per-key rate limit', async () => {
+    it('enforces the per-key rate limit, and says how long to wait', async () => {
       await boot()
       const request = () =>
         fetch(`${baseUrl}/api/tts`, {
@@ -378,6 +384,9 @@ describe('server app (integration, fake upstreams)', () => {
       await request()
       const fourth = await request()
       expect(fourth.status).toBe(429)
+      expect(await fourth.json()).toEqual({ error: 'rate-limited' })
+      // capacity 3 per 60s in this harness: one token back every 20s.
+      expect(Number(fourth.headers.get('retry-after'))).toBe(20)
     })
   })
 
@@ -871,6 +880,9 @@ describe('server app (integration, fake upstreams)', () => {
       }
       const sixth = await attempt()
       expect(sixth.status).toBe(429)
+      // Every rate-limited response carries the wait, not just /api/tts —
+      // one helper writes them all (T035).
+      expect(Number(sixth.headers.get('retry-after'))).toBe(12)
     })
 
     it('never logs the password, on success or failure', async () => {

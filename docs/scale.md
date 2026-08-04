@@ -81,16 +81,21 @@ its limit regardless of n; it did not.
 **Wall-clock — modelled, not measured** (no key, no real request timing
 available). Two plausible bottlenecks, in order of likely severity:
 
-- **Provider concurrency/rate limits.** A personal ElevenLabs plan's
+- **Provider concurrency/rate limits — FIXED by T035; kept here because the
+  measurement above is what found it.** A personal ElevenLabs plan's
   concurrent-request limit is almost certainly far below "hundreds to tens
-  of thousands of simultaneous connections." `429` maps to `SynthError.kind
-  === 'quota'` in this codebase (`eleven-labs-synth-client.ts`), which
-  `generation-queue.ts` **never retries** — it is a terminal, permanent
-  failure for that Clip. A cold fill of even the 100-Phrase size (200
-  simultaneous calls) is a plausible trigger for widespread, permanent
-  `quota` failures on the very first drill-readiness sweep, before storage
-  is even a factor. This is the most likely single point of breakage, and
-  the smallest n at which it plausibly bites.
+  of thousands of simultaneous connections." `429` used to map to
+  `SynthError.kind === 'quota'`, which `generation-queue.ts` never retried —
+  a terminal, permanent failure for that Clip. It bit before ElevenLabs ever
+  saw it: this app's *own* `/api/tts` limiter (60 per 60s) refused ~1,940 of
+  a cold 1,000-Phrase library's 2,000 requests, and every one of them died.
+  Since T035 the two are different statuses (429 = ours, wait; 402 = the
+  provider's, terminal), the device holds at most 4 requests in flight, and a
+  429 pauses the whole queue for `Retry-After` and then carries on. See
+  `docs/server.md` "429 is ours, 402 is the provider's", and
+  `src/adapters/audio/generation-sweep.integration.test.ts`, which drives
+  1,000 Phrases through the real queue against the real limiter and ends with
+  zero permanently-failed Clips.
 - **Safari per-host connection ceiling** (commonly ~6 concurrent
   connections to one host; not verified against this build) would serialize
   the rest into batches. At an assumed ~1.5 s/call (a plausible order of
@@ -184,14 +189,14 @@ export, by construction, regardless of library size.
 
 Ranked by how small an n it takes to hit, and how automatic the trigger is:
 
-1. **Cold-fill concurrency exhausting the ElevenLabs account limit —
-   breaks first, at the smallest library.** 2n simultaneous, unthrottled
-   calls (measured, exactly 2n at every size tested, down to n=100 → 200
-   calls) almost certainly exceeds a personal-tier concurrency limit long
-   before storage is a factor. `429` → `quota` is never retried
-   (`generation-queue.ts`), so this is a **permanent** failure for whatever
-   Clips lose the race, on the very first sweep — self-inflicted, and
-   present even at scales well short of "thousands."
+1. **Cold-fill concurrency — was first, now fixed (T035).** 2n simultaneous,
+   unthrottled calls (measured, exactly 2n at every size tested, down to
+   n=100 → 200 calls) exceeded this app's own `/api/tts` limiter long before
+   ElevenLabs was a factor, and `429` → `quota` was never retried, so
+   whatever Clips lost the race failed **permanently** on the very first
+   sweep. The device now bounds itself to 4 in flight and waits out a 429
+   instead of dying on it; a provider quota exhaustion (402) stays terminal,
+   because waiting does not buy credits.
 2. **Clip cache growth — no bound, no eviction, hundreds of MB by
    thousands of Phrases.** Modelled at 424.7 MB (5,000 Phrases) to 847.8 MB
    (10,000 Phrases; §1), with **nothing in the code that would ever shrink
@@ -220,8 +225,9 @@ Ranked by how small an n it takes to hit, and how automatic the trigger is:
   clone of hundreds of MB) — the in-memory `idb` fake used throughout this
   harness does not model that cost, and is a known blind spot (§3).
   Likewise, real ElevenLabs concurrency/rate-limit behavior — the specific
-  number where `quota` responses start — is asserted from the 429→`quota`
-  code path, not observed against the live API.
+  number where a genuine 402 starts — is asserted from the provider client's
+  code path, not observed against the live API. What *was* observed is this
+  app's own limiter firing, which is what T035 fixed.
 - **Assumed:** phrase length distribution (4–12 words, French/English word
   lists built for this benchmark) — a stand-in for the real library's
   actual phrases, which were not available to this task.
