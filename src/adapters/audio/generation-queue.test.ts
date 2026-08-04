@@ -60,8 +60,8 @@ describe('createGenerationQueue', () => {
     await flush()
 
     expect(synthesize).toHaveBeenCalledTimes(2)
-    expect(synthesize).toHaveBeenCalledWith('Bonjour', 'fr-FR', { modelId: VOICE.modelId, voiceId: VOICE.voiceId })
-    expect(synthesize).toHaveBeenCalledWith('Hello', 'en-US', { modelId: VOICE.modelId, voiceId: VOICE.voiceId })
+    expect(synthesize).toHaveBeenCalledWith('Bonjour', 'fr-FR', { provider: VOICE.provider, modelId: VOICE.modelId, voiceId: VOICE.voiceId })
+    expect(synthesize).toHaveBeenCalledWith('Hello', 'en-US', { provider: VOICE.provider, modelId: VOICE.modelId, voiceId: VOICE.voiceId })
     const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
     expect(await clipCache.has(frHash)).toBe(true)
     expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'ready' })
@@ -95,7 +95,7 @@ describe('createGenerationQueue', () => {
     await flush()
 
     expect(synthesize).toHaveBeenCalledTimes(1)
-    expect(synthesize).toHaveBeenCalledWith('Hello', 'en-US', { modelId: VOICE.modelId, voiceId: VOICE.voiceId })
+    expect(synthesize).toHaveBeenCalledWith('Hello', 'en-US', { provider: VOICE.provider, modelId: VOICE.modelId, voiceId: VOICE.voiceId })
   })
 
   it('retries a network failure and succeeds on a later attempt', async () => {
