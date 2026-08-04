@@ -100,4 +100,97 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     expect(Number(sized[0].s), 'the byte cap must bind').toBeLessThanOrEqual(2000)
     expect(Number(sized[0].c), 'but never prune the last version away').toBeGreaterThanOrEqual(1)
   })
+
+  /**
+   * T082's SQL, which the fake cannot speak for: `BEGIN`/`COMMIT`/`ROLLBACK`
+   * on a checked-out client, `SELECT … FOR UPDATE`, and a prune that now also
+   * selects `archived_at`. The fake serializes at `BEGIN` on one process; only
+   * a real server can show the row lock actually holds.
+   */
+  it('SELECT … FOR UPDATE really blocks the second writer until the first commits', async () => {
+    // The lock semantics themselves — the one thing no fake can speak for,
+    // and the whole reason `put` runs in a transaction. Both connections are
+    // checked out up front: `pool.connect()` latency on a cold pool is enough
+    // to make two "concurrent" puts run one after the other by accident, and
+    // a race test that passes because nothing raced is worse than none.
+    const lib = createLibraryStore(pool)
+    await lib.init()
+    await lib.put('lock', 'the row', 1, { now: 0 })
+
+    const first = await pool.connect()
+    const second = await pool.connect()
+    try {
+      await first.query('BEGIN')
+      await first.query('SELECT data FROM libraries WHERE library_key = $1 FOR UPDATE', ['lock'])
+
+      let secondGotTheLock = false
+      const secondTurn = (async () => {
+        await second.query('BEGIN')
+        await second.query('SELECT data FROM libraries WHERE library_key = $1 FOR UPDATE', ['lock'])
+        secondGotTheLock = true
+        await second.query('COMMIT')
+      })()
+
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(secondGotTheLock, 'the second writer must wait on the row lock, not read past it').toBe(false)
+
+      await first.query('COMMIT')
+      await secondTurn
+      expect(secondGotTheLock).toBe(true)
+    } finally {
+      first.release()
+      second.release()
+    }
+  })
+
+  it('serializes two concurrent puts on the row lock, archiving the loser instead of dropping it', async () => {
+    const lib = createLibraryStore(pool, { snapshotIntervalMs: 3_600_000 })
+    await lib.init()
+    const envelope = (mark) => JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 6, decks: [{ mark }] })
+
+    await lib.put('race', envelope('p0'), 1, { now: 0 })
+
+    // Warm two pooled connections, for the reason above: without this the two
+    // puts below serialize by accident and the test proves nothing.
+    const warm = await Promise.all([pool.connect(), pool.connect()])
+    warm.forEach((client) => client.release())
+
+    await Promise.all([lib.put('race', envelope('pA'), 2, { now: 1_000 }), lib.put('race', envelope('pB'), 3, { now: 1_001 })])
+
+    const live = (await lib.get('race')).data
+    const history = (await lib.versions('race')).map((v) => v.data)
+    const everywhere = [live, ...history].join('|')
+    expect(everywhere, 'neither push may be dropped without being archived').toContain('pA')
+    expect(everywhere).toContain('pB')
+  })
+
+  it('archives every replaced version inside one interval, so a wipe cannot take the session with it', async () => {
+    const lib = createLibraryStore(pool, { snapshotIntervalMs: 3_600_000 })
+    await lib.init()
+    const envelope = (mark) => JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 6, decks: [{ mark }] })
+
+    await lib.put('burst', envelope('week-old'), 1, { now: 0 })
+    for (let i = 1; i <= 30; i++) await lib.put('burst', envelope(`edit-${i}`), i + 1, { now: 604_800_000 + i * 2_000 })
+    await lib.put('burst', JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 6, decks: [] }), 999, { now: 604_800_000 + 61_000 })
+
+    const history = (await lib.versions('burst')).map((v) => v.data).join('|')
+    expect(history, 'the state the wipe replaced must still exist').toContain('edit-30')
+  })
+
+  it('rolls the whole put back when the overwrite fails, leaving neither table half-written', async () => {
+    const lib = createLibraryStore(pool, { snapshotIntervalMs: 3_600_000 })
+    await lib.init()
+    await lib.put('rb', 'first', 1, { now: 0 })
+
+    const before = (await lib.versions('rb')).length
+    // A `data` value Postgres will refuse: TEXT rejects a NUL byte.
+    await expect(lib.put('rb', 'second bad', 2, { now: 10 })).rejects.toThrow()
+
+    expect((await lib.get('rb')).data, 'the previous library must survive a failed put').toBe('first')
+    expect((await lib.versions('rb')).length, 'and no orphan archive row may be left behind').toBe(before)
+
+    // The pool is usable afterwards — a failed put must not leak a client.
+    await lib.put('rb', 'third', 3, { now: 20 })
+    expect((await lib.get('rb')).data).toBe('third')
+  })
 })

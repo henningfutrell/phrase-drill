@@ -99,25 +99,72 @@ library_versions (id BIGSERIAL PRIMARY KEY, library_key TEXT NOT NULL,
 **Archiving is the store's invariant, not the route's.** It happens inside
 `libraryStore.put` (`server/db.js`), before the overwrite, so there is no
 code path — route, script, future caller — that can replace the only copy by
-forgetting a step. The two statements are deliberately unordered by any
-transaction: a crash between them leaves the previous version archived and
-the new one unwritten, which is a duplicate at worst and never a loss.
+forgetting a step.
 
-**Snapshots are throttled by time, not by content**, at most one per hour
-per key. The tempting rule is "archive whenever the push shrinks the
-library", and it is worse: a bad push repeated then archives its own
-shrunken states and prunes the good one out of the retention window. An
-hourly snapshot cannot be accelerated by any push pattern at all, so the
-worst case is bounded — *up to one hour of edits lost* — whatever the client
-does. A push whose bytes are identical to what is stored archives nothing.
+**Archive and overwrite are one transaction, and the row is locked before it
+is read** (`BEGIN`, `SELECT … FOR UPDATE`, archive, overwrite, `COMMIT`).
+Before T082 they were separate autocommitted statements, and the paragraph
+here claimed no code path could replace the only copy. That claim was about a
+*crash* between the statements and it did not survive *interleaving*: two
+requests both read the same previous version, both archived it, and the
+second overwrote the first — so one device's push was in neither table. Both
+her phones sync on the same triggers (launch, reconnect, the phone being
+locked), so that is the ordinary case. The statement order still matters and
+is unchanged, so a crash or a rollback leaves the previous version in place,
+never both gone. One residual, bounded: `FOR UPDATE` locks a row that
+exists, so two concurrent puts for a key with *no row yet* still race —
+nothing the server ever held is lost, and it is reachable only on the
+first-ever write for an account.
 
-**Retention: 72 snapshots or 32 MB per key, whichever binds first, and never
-the last one.** 72 hourly snapshots is three days of history. 32 MB is ~26
-copies of the largest library `docs/scale.md` models (1.2 MB at 10,000
-Phrases) or ~250 copies of a 1,000-Phrase one, against the deployed plan's 1
-GB — so a big library trades depth for size automatically instead of
-quietly filling the disk `clips` shares. The newest archived version is
-never a prune candidate however large it is.
+**Every replaced version is archived. The hourly throttle is applied to
+retention, not to the write** (T082). A push whose bytes are identical to
+what is stored still archives nothing.
+
+The throttle used to be on `put`: at most one archive per hour per key. The
+reasoning was right and is kept — the tempting rule is "archive whenever the
+push shrinks the library", and it is worse, because a bad push repeated then
+archives its own shrunken states and prunes the good one out of the window,
+whereas an interval cannot be accelerated by any push pattern at all. What
+was wrong was the *place*. The client debounces at 2 s and pushes per edit,
+so an hour of ordinary editing is ~1,800 pushes and exactly **one** archive —
+of the *oldest* state in the window. Everything she typed after the first
+push of the hour lived in the live row and nowhere else, and a wipe inside
+the window took the lot, with two 204s and no log line.
+
+**Retention, in order: thin, then budget.**
+
+1. **Thinning.** The newest 8 archived versions are kept whatever the push
+   rate. Everything older collapses to the **oldest** row per hour — the
+   state a burst began from, which is what is worth recovering. A flood
+   therefore still cannot flush the aged history.
+2. **Budgets: 72 versions or 32 MB per key, whichever binds first, and never
+   the last one.** 72 hourly rows is three days of history. 32 MB is ~26
+   copies of the largest library `docs/scale.md` models (1.2 MB at 10,000
+   Phrases) or ~250 copies of a 1,000-Phrase one, against the deployed plan's
+   1 GB — so a big library trades depth for size automatically instead of
+   quietly filling the disk `clips` shares. The 8 recent rows are exempt from
+   thinning, never from the budgets. The newest archived version is never a
+   prune candidate however large it is.
+
+**`schemaVersion` is bounded, and what is stored is what was validated**
+(T082). A push is refused with 400 unless its `schemaVersion` is an integer
+in `1 .. LIBRARY_MAX_SCHEMA_VERSION` (`server/app.js`, kept equal to the
+client's `CURRENT_SCHEMA_VERSION` — they are one build and one deploy).
+
+Two things this closes. `1e999` is legal JSON, parses to `Infinity`, and
+`typeof Infinity === 'number'`, so the old shape test passed it; the row was
+then written as `JSON.stringify(parsed)`, which emits `"schemaVersion":null`,
+and every later `GET` failed the *same* shape test on the way out and
+answered 500 `library-unreadable` — over a row that had already replaced
+hers, forever. And `schemaVersion` gates every push, so one stored rogue
+value (999, a replayed body, a hand `curl`) 409'd every honest push from both
+phones for good. The route now stores the request's own bytes rather than a
+re-serialization of them, so "byte for byte, not re-serialized" is true of
+the write path as well as the read path.
+
+A row already holding an out-of-range version is not a manual repair:
+`storedSchemaVersion` reads anything outside the accepted range as `0`, so
+her next honest push is accepted and archives the bad bytes on the way past.
 
 ### Recovering a library a bad push destroyed
 
@@ -322,6 +369,19 @@ smaller cache — while leaving ~65% of the disk for `libraries`,
 `library_versions`, WAL and Postgres's own overhead. Crossing it on a `put`
 evicts down to 90% of it, the same hysteresis the device's cache uses, so one
 sweep is not one delete per write.
+
+**A malformed `CLIP_STORE_MAX_BYTES` falls back to the default, loudly**
+(T082, `clipStoreMaxBytesFrom`). It used to reach the store through a bare
+`Number(...)`, and this value is only ever set by typing into a deploy
+dashboard field: `'300MB'` gave `NaN`, every comparison against which is
+false, so the store was **unbounded** — `clips` fills the 1 GB instance and
+the write that starts failing is `libraryStore.put`, i.e. her phrases stop
+reaching the server while the sync line still reads "waiting". `''` gave `0`,
+so every put evicted everything. Anything that is not a whole number of bytes
+at or above 128 KB is now refused and the documented default used instead,
+with one `error` line at boot naming what was provided. It does not refuse to
+boot: this process holds the only off-device copy of her library, and serving
+`GET /api/library` is exactly what a misconfigured deploy must not take away.
 
 **Oldest-first, on the `created_at` the table already carried.** Least
 recently *played* is better policy and would cost a column plus a write on
