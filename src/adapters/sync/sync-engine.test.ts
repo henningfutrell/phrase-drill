@@ -119,6 +119,23 @@ function createFakeBaseline() {
   }
 }
 
+/**
+ * Every place the round-trip touches something that can *throw* rather than
+ * return a result: the two device stores, the baseline, the sync-time record,
+ * and the pull itself. Set one and that call rejects; clear it and the same
+ * engine recovers on its next attempt — which is the property being pinned,
+ * not the throw itself.
+ */
+interface Faults {
+  pull?: Error
+  readLocal?: Error
+  writeLocal?: Error
+  baselineRead?: Error
+  baselineWrite?: Error
+  recordSync?: Error
+  readLastSyncAt?: Error
+}
+
 function createHarness(options: { local?: Library; server?: ReturnType<typeof createFakeServer>; lastSyncAt?: number | null } = {}) {
   const server = options.server ?? createFakeServer()
   let local = options.local ?? library([])
@@ -127,15 +144,40 @@ function createHarness(options: { local?: Library; server?: ReturnType<typeof cr
   const baseline = createFakeBaseline()
   const recorded: number[] = []
   const clock = { value: 1_000 }
+  const faults: Faults = {}
+  const client = server.client()
   const engine: SyncEngine = createSyncEngine({
-    client: server.client(),
-    readLocal: async () => local,
+    client: {
+      async pull() {
+        if (faults.pull) throw faults.pull
+        return client.pull()
+      },
+      push: (pushed) => client.push(pushed),
+    },
+    readLocal: async () => {
+      if (faults.readLocal) throw faults.readLocal
+      return local
+    },
     writeLocal: async (written) => {
+      if (faults.writeLocal) throw faults.writeLocal
       local = written
     },
-    baseline,
-    readLastSyncAt: async () => options.lastSyncAt ?? null,
+    baseline: {
+      async read() {
+        if (faults.baselineRead) throw faults.baselineRead
+        return baseline.read()
+      },
+      async write(written) {
+        if (faults.baselineWrite) throw faults.baselineWrite
+        await baseline.write(written)
+      },
+    },
+    readLastSyncAt: async () => {
+      if (faults.readLastSyncAt) throw faults.readLastSyncAt
+      return options.lastSyncAt ?? null
+    },
     recordSync: async (timestamp) => {
+      if (faults.recordSync) throw faults.recordSync
       recorded.push(timestamp)
     },
     now: () => clock.value,
@@ -151,6 +193,7 @@ function createHarness(options: { local?: Library; server?: ReturnType<typeof cr
     baseline,
     recorded,
     clock,
+    faults,
     get local() {
       return local
     },
@@ -514,6 +557,169 @@ describe('createSyncEngine — the two failures a retry cannot fix', () => {
 
     expect(h.engine.snapshot().state).toBe('needs-update')
     expect(server.pushes).toEqual([])
+  })
+})
+
+/**
+ * iOS refusing a write because the origin is full. The name is what a real
+ * `IDBTransaction` abort carries; the engine reacts to the throw, not to the
+ * name, and the test says so by using a plain Error.
+ */
+function quotaError(): Error {
+  return Object.assign(new Error('the quota has been exceeded'), { name: 'QuotaExceededError' })
+}
+
+describe('createSyncEngine — an exception never ends the session (T069)', () => {
+  it('treats a device store that refuses the merged library as retryable, not as a finished sync', async () => {
+    const server = createFakeServer(library([deck('remote', 'From the web', 5)]))
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    h.faults.writeLocal = quotaError()
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('waiting')
+    expect(h.scheduler.pending.length).toBe(1)
+    expect(h.engine.snapshot().lastSyncAt).toBeNull()
+    // Local first: a merge that could not be saved here must not be pushed.
+    expect(server.pushes).toEqual([])
+  })
+
+  it('completes the round-trip on the retry once the device has room again', async () => {
+    const server = createFakeServer(library([deck('remote', 'From the web', 5)]))
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    h.faults.writeLocal = quotaError()
+
+    h.engine.start()
+    await settle()
+    h.faults.writeLocal = undefined
+    await h.scheduler.fire()
+
+    expect(h.engine.snapshot().state).toBe('idle')
+    expect(h.local.decks.map((d) => d.name).sort()).toEqual(['From the web', 'Home'])
+    expect(server.pushes).toHaveLength(1)
+  })
+
+  it('handles a server copy this build cannot even parse, and leaves the local library alone', async () => {
+    const server = createFakeServer(library([deck('remote', 'From the web', 5)]))
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    // What a corrupt `libraries.data` row does to `response.json()`.
+    h.faults.pull = new SyntaxError('Unexpected end of JSON input')
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('waiting')
+    expect(h.scheduler.pending.length).toBe(1)
+    expect(h.local.decks.map((d) => d.name)).toEqual(['Home'])
+    expect(server.pushes).toEqual([])
+  })
+
+  it('recovers by itself once the server serves a readable copy again', async () => {
+    const server = createFakeServer(library([deck('remote', 'From the web', 5)]))
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    h.faults.pull = new SyntaxError('Unexpected end of JSON input')
+
+    h.engine.start()
+    await settle()
+    h.faults.pull = undefined
+    await h.scheduler.fire()
+
+    expect(h.engine.snapshot().state).toBe('idle')
+    expect(h.local.decks.map((d) => d.name).sort()).toEqual(['From the web', 'Home'])
+  })
+
+  it('treats a local library it cannot read as retryable, never as an app that needs updating', async () => {
+    const h = createHarness({ local: library([deck('d1', 'Home')]) })
+    h.faults.readLocal = quotaError()
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('waiting')
+    expect(h.scheduler.pending.length).toBe(1)
+  })
+
+  it('treats a baseline it cannot read as retryable', async () => {
+    const h = createHarness({ local: library([deck('d1', 'Home')]) })
+    h.faults.baselineRead = quotaError()
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('waiting')
+    expect(h.scheduler.pending.length).toBe(1)
+  })
+
+  it('does not claim a sync time when the baseline could not be written', async () => {
+    const h = createHarness({ local: library([deck('d1', 'Home')]) })
+    h.faults.baselineWrite = quotaError()
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('waiting')
+    expect(h.scheduler.pending.length).toBe(1)
+    expect(h.engine.snapshot().lastSyncAt).toBeNull()
+  })
+
+  it('does not claim a sync time when the sync time itself could not be recorded', async () => {
+    const h = createHarness({ local: library([deck('d1', 'Home')]) })
+    h.faults.recordSync = quotaError()
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('waiting')
+    expect(h.scheduler.pending.length).toBe(1)
+    expect(h.engine.snapshot().lastSyncAt).toBeNull()
+    expect(h.recorded).toEqual([])
+  })
+
+  it('still syncs when the stored last-sync time cannot be read at launch', async () => {
+    const h = createHarness({ local: library([deck('d1', 'Home')]) })
+    h.faults.readLastSyncAt = quotaError()
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('idle')
+    expect(h.server.pushes).toHaveLength(1)
+  })
+
+  it('is not taken down by a subscriber that throws', async () => {
+    const h = createHarness({ local: library([deck('d1', 'Home')]) })
+    h.engine.subscribe(() => {
+      throw new Error('a screen blew up while rendering')
+    })
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('idle')
+    expect(h.server.pushes).toHaveLength(1)
+  })
+
+  it('keeps 401 a full stop even now that other failures retry', async () => {
+    const h = createHarness()
+    h.server.pullResult = { ok: false, reason: 'unauthorized' }
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('signed-out')
+    expect(h.scheduler.pending).toEqual([])
+  })
+
+  it('keeps a 409 stale-client a full stop even now that other failures retry', async () => {
+    const h = createHarness()
+    h.server.pushResult = { ok: false, reason: 'stale-client' }
+
+    h.engine.start()
+    await settle()
+
+    expect(h.engine.snapshot().state).toBe('needs-update')
+    expect(h.scheduler.pending).toEqual([])
   })
 })
 
