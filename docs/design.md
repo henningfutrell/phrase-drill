@@ -130,11 +130,16 @@ Reused across every screen — a component built once is not rebuilt per screen.
   for a single-field edit — respects the product doctrine against modal-as-first-
   thought.
 - **Banner** — full-width, fixed under the safe-area top inset, `--danger` or
-  neutral background, used exactly once for the interrupted-Drill state. Never
-  for confirmations (those use the `--ok` toast, 2s auto-dismiss,
-  non-blocking). T041 removed the second use this bullet used to name (a "no
-  API key" Scan state) — the device holds no provider key any more, so there
-  is nothing left to warn about at that point in the flow.
+  neutral background. Two uses, and only two: the interrupted-Drill state, and
+  the **Write failure notice** (T069) — a write this phone refused, which is
+  the one event that can leave a Phrase on screen that is not on disk. The
+  second one carries a `--danger` bottom edge, sits above every screen
+  including a running Drill, and is dismissed by her rather than by a timer:
+  it has to survive being seen twice. Never for confirmations (those use the
+  `--ok` toast, 2s auto-dismiss, non-blocking). T041 removed a third use this
+  bullet used to name (a "no API key" Scan state) — the device holds no
+  provider key any more, so there is nothing left to warn about at that point
+  in the flow.
 
 ---
 

@@ -109,6 +109,51 @@ written by a newer build than this one) are the two failures a retry cannot
 fix, so the engine stops retrying and says what only she can do about it. A
 local change made in either state does not paint over the message.
 
+## Nothing in the round-trip may throw (T069)
+
+`run()` used to be `try`/`finally` with no `catch`, and four of the calls
+`roundTrip` awaits raise their failures by throwing rather than returning
+them. One of those — a `QuotaExceededError` from `writeLocal`, or a
+`response.json()` on a truncated body — rejected `run()` into a promise
+nobody read, and the engine stopped at `syncing` with no retry scheduled and
+no way back. The line said **"Syncing…"** for the rest of the session while
+nothing left the phone, which is exactly the condition the Backup age
+indicator exists to expose, defeated.
+
+So `roundTrip` now **returns** every failure, including the thrown ones, and
+each maps onto a state the engine already had:
+
+| Throws | Reported as | Ends in |
+| ------ | ----------- | ------- |
+| `client.pull()` / `client.push()` | `network` | `waiting`, retry scheduled |
+| `readLocal()`, `baseline.read()` | `device-storage` | `waiting`, retry scheduled |
+| `writeLocal()` | `device-storage` | `waiting`, retry scheduled — **and the push is skipped**, so a merge this device could not save is never made the agreed state |
+| `baseline.write()`, `recordSync()` | `device-storage` | `waiting`, retry scheduled, and no sync time claimed |
+
+`device-storage` is the storage counterpart of `network`: a condition that
+passes, so it waits and tries again. It is deliberately **not** `unreadable`
+— an app update does not create disk space, and mapping it to `needs-update`
+would stop sync for good over a full origin.
+
+`run()` also has a `catch` of its own. Reaching it is a fault in the engine
+rather than in the device, but the one outcome that must be impossible is an
+engine that stops without scheduling anything, because that failure is silent
+and permanent. `emit` swallows a subscriber's exception for the same reason: a
+screen that fails to render must not be able to stop the thing that is getting
+her phrases off this phone.
+
+**A corrupt server row** is handled where it happens:
+`library-sync-client.ts` reads `response.json()` inside its `try` and reports
+`network`. Retryable on purpose — a truncated transfer is far likelier than a
+permanently unreadable `libraries.data` row, and a build that declares itself
+stale cannot repair either one. The local library is untouched: a pull that
+fails means no push, per rule 1 above.
+
+The residual gap: a row that really is permanently corrupt leaves the line
+reading `Saved on this phone · will sync when back online` forever, which is
+true about her phrases and misleading about the cause. The Backup age
+indicator is what surfaces it, and repairing the row is a server-side job.
+
 ## Known gaps
 
 - **Two devices editing the *same Phrase* between round-trips.** The later

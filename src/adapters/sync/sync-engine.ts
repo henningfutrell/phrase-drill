@@ -147,7 +147,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
   function emit(next: Partial<SyncSnapshot>): void {
     snapshot = { ...snapshot, ...next }
-    for (const listener of [...listeners]) listener(snapshot)
+    for (const listener of [...listeners]) {
+      try {
+        listener(snapshot)
+      } catch {
+        // A subscriber is a screen. A screen that fails to render is that
+        // screen's problem; it must not be able to stop the engine that is
+        // getting her phrases off this phone.
+      }
+    }
   }
 
   function clearTimer(): void {
@@ -156,20 +164,42 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   }
 
   /**
-   * One round-trip. Returns the failure reason rather than throwing, so the
-   * caller decides between retrying, stopping, and asking her for something.
+   * One round-trip. **Returns** every failure, including the ones its
+   * dependencies raise by throwing — a rejected promise here would leave the
+   * engine at 'syncing' with nothing scheduled to end it, which reads as
+   * working while nothing leaves the phone (T069). Every await below is
+   * therefore inside a `try`, and each one maps to the state the engine
+   * already understands.
    */
   async function roundTrip(): Promise<
-    { ok: true } | { ok: false; reason: 'network' | 'unauthorized' | 'stale-client' | 'unreadable' }
+    { ok: true } | { ok: false; reason: 'network' | 'unauthorized' | 'stale-client' | 'unreadable' | 'device-storage' }
   > {
-    const pulled = await deps.client.pull()
+    let pulled: Awaited<ReturnType<LibrarySyncClient['pull']>>
+    try {
+      pulled = await deps.client.pull()
+    } catch {
+      return { ok: false, reason: 'network' }
+    }
     if (!pulled.ok && pulled.reason !== 'not-found') return { ok: false, reason: pulled.reason }
+
+    // The two device reads. They fail for storage reasons — a quota, an
+    // aborted transaction, a connection iOS killed — none of which an app
+    // update fixes, so they are retryable and must not be confused with an
+    // envelope this build cannot read.
+    let stored: Library
+    let baseline: Library | undefined
+    try {
+      stored = await deps.readLocal()
+      baseline = await deps.baseline.read()
+    } catch {
+      return { ok: false, reason: 'device-storage' }
+    }
 
     let outgoing: Library
     let local: Library
     try {
-      local = normalizeLibrary(await deps.readLocal())
-      outgoing = pulled.ok ? mergeLibraries(local, normalizeLibrary(pulled.library), await deps.baseline.read()) : local
+      local = normalizeLibrary(stored)
+      outgoing = pulled.ok ? mergeLibraries(local, normalizeLibrary(pulled.library), baseline) : local
     } catch {
       // The only way normalization or the merge refuses is an envelope this
       // build cannot read — one written by a newer build. Her library is
@@ -178,18 +208,39 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     }
 
     // Local first: whatever the other device had is saved here before
-    // anything is asked of the network again.
+    // anything is asked of the network again. A merge that could not be saved
+    // here is also not pushed — the push is what moves the baseline, and a
+    // baseline for state this device does not hold is a lie the next merge
+    // would act on.
     if (!sameLibrary(local, outgoing)) {
-      await deps.writeLocal(outgoing)
+      try {
+        await deps.writeLocal(outgoing)
+      } catch {
+        return { ok: false, reason: 'device-storage' }
+      }
       emit({ libraryRevision: snapshot.libraryRevision + 1 })
     }
 
-    const pushed = await deps.client.push(outgoing)
+    let pushed: Awaited<ReturnType<LibrarySyncClient['push']>>
+    try {
+      pushed = await deps.client.push(outgoing)
+    } catch {
+      return { ok: false, reason: 'network' }
+    }
     if (!pushed.ok) return { ok: false, reason: pushed.reason }
 
-    await deps.baseline.write(outgoing)
+    // The server has it. If the two bookkeeping writes below fail, the sync
+    // itself really happened — but a sync time this device could not record
+    // is not a sync time it may claim, so this reports a failure and retries.
+    // The retry re-merges against a stale baseline, which costs precision and
+    // never a Phrase.
     const at = now()
-    await deps.recordSync(at)
+    try {
+      await deps.baseline.write(outgoing)
+      await deps.recordSync(at)
+    } catch {
+      return { ok: false, reason: 'device-storage' }
+    }
     emit({ lastSyncAt: at })
     return { ok: true }
   }
@@ -220,8 +271,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       return
     }
     running = true
-    emit({ state: 'syncing' })
     try {
+      emit({ state: 'syncing' })
       const result = await roundTrip()
       if (result.ok) {
         retries = 0
@@ -233,9 +284,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // Retrying the same build gets the same answer.
         emit({ state: 'needs-update' })
       } else {
+        // 'network' and 'device-storage': both are conditions that pass. Say
+        // her work is safe here, and try again.
         emit({ state: 'waiting' })
         scheduleRetry()
       }
+    } catch {
+      // `roundTrip` is written to return every failure, so reaching this is a
+      // fault in the engine itself. It is caught anyway: the one outcome that
+      // must be impossible is an engine that stops without scheduling
+      // anything, because that is silent and permanent.
+      emit({ state: 'waiting' })
+      scheduleRetry()
     } finally {
       running = false
     }
@@ -261,10 +321,17 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           if (cancelTimer || snapshot.state === 'waiting') syncNow()
         }),
       ]
-      void deps.readLastSyncAt().then((lastSyncAt) => {
-        // Never overwrite a time this run has already earned.
-        if (snapshot.lastSyncAt === null) emit({ lastSyncAt })
-      })
+      void deps.readLastSyncAt().then(
+        (lastSyncAt) => {
+          // Never overwrite a time this run has already earned.
+          if (snapshot.lastSyncAt === null) emit({ lastSyncAt })
+        },
+        () => {
+          // Not knowing when the last sync was costs one line of text. It is
+          // not a reason to leave a rejection unhandled, and not a reason to
+          // stop the round-trip that is starting below.
+        },
+      )
       void run()
     },
 

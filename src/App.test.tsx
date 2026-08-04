@@ -1823,7 +1823,10 @@ describe('App when a local write fails (T069)', () => {
   })
 
   it('says a Mix could not be saved, and takes it back off the screen', async () => {
-    const deckStore = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const deckStore = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+      { id: 'd2', name: 'Work', phrases: [{ id: 'p2', french: 'Réunion', english: 'Meeting' }] },
+    ])
     const mixStore = createFakeMixStore([])
     mixStore.save = async () => {
       throw quotaError()
@@ -1854,7 +1857,10 @@ describe('App when a local write fails (T069)', () => {
   })
 
   it('says a Mix could not be deleted, and puts it back on the screen', async () => {
-    const deckStore = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const deckStore = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+      { id: 'd2', name: 'Work', phrases: [{ id: 'p2', french: 'Réunion', english: 'Meeting' }] },
+    ])
     const mixStore = createFakeMixStore([{ id: 'm1', name: 'Mornings', deckIds: ['d1'] }])
     mixStore.remove = async () => {
       throw quotaError()
@@ -1910,8 +1916,10 @@ describe('App when a local write fails (T069)', () => {
     await flushMicrotasks()
 
     expect(notice()?.textContent).toContain('backup')
-    expect(container.querySelector('[data-testid="deck-row-d1"]')).not.toBeNull()
     expect(container.textContent).not.toContain('From the file')
+
+    await act(async () => click(container.querySelector('[data-testid="settings-back"]')!))
+    expect(container.querySelector('[data-testid="deck-row-d1"]')).not.toBeNull()
   })
 
   it('says the chosen voice could not be saved, and does not keep showing it as chosen', async () => {

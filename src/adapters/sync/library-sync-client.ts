@@ -40,7 +40,15 @@ export function createLibrarySyncClient(deps: LibrarySyncClientDeps): LibrarySyn
 
   return {
     async push(library) {
-      const accessToken = await deps.getAccessToken()
+      let accessToken: string
+      try {
+        accessToken = await deps.getAccessToken()
+      } catch {
+        // The only reason there is no token is that there is no session:
+        // none stored, or the stored one is past its expiry. Retrying cannot
+        // mint one, which is exactly what `unauthorized` means here.
+        return { ok: false, reason: 'unauthorized' }
+      }
       let response: Response
       try {
         response = await fetchImpl('/api/library', {
@@ -58,7 +66,12 @@ export function createLibrarySyncClient(deps: LibrarySyncClientDeps): LibrarySyn
     },
 
     async pull() {
-      const accessToken = await deps.getAccessToken()
+      let accessToken: string
+      try {
+        accessToken = await deps.getAccessToken()
+      } catch {
+        return { ok: false, reason: 'unauthorized' }
+      }
       let response: Response
       try {
         response = await fetchImpl('/api/library', {
@@ -70,8 +83,19 @@ export function createLibrarySyncClient(deps: LibrarySyncClientDeps): LibrarySyn
       if (response.status === 401) return { ok: false, reason: 'unauthorized' }
       if (response.status === 404) return { ok: false, reason: 'not-found' }
       if (!response.ok) return { ok: false, reason: 'network' }
-      const library = (await response.json()) as Library
-      return { ok: true, library }
+      // Reading the body is part of the request, not something that happens
+      // after it: a truncated response, or a `libraries.data` row the server
+      // streams back raw without validating (`server/app.js` handleLibraryGet),
+      // makes this throw. Reported as `network` — a body this device cannot
+      // read is a round-trip that did not complete, and it is retryable
+      // because the likeliest cause is a truncated transfer. It is not
+      // `stale-client`: an app update cannot repair a corrupt server row, and
+      // saying so would stop sync for good over something transient.
+      try {
+        return { ok: true, library: (await response.json()) as Library }
+      } catch {
+        return { ok: false, reason: 'network' }
+      }
     },
   }
 }
