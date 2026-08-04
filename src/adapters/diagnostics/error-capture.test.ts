@@ -3,8 +3,7 @@ import { installErrorCapture } from './error-capture'
 import type { ErrorLog } from './error-log'
 
 /** Minimal stand-in for `window` — only the two listener methods this
- * adapter actually calls (mirrors idb.test-support.ts's "deliberately
- * minimal" convention for mocking an external seam). */
+ * adapter actually calls. */
 function createFakeTarget() {
   const listeners = new Map<string, Set<(event: unknown) => void>>()
   return {

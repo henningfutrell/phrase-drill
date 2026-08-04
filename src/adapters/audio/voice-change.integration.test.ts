@@ -17,18 +17,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetFakeIdb } from '../storage/idb.test-support'
 
-vi.mock('idb', async () => {
-  const fake = await import('../storage/idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbClipCache, computeClipHash } = await import('../storage/clip-cache')
-const { createIndexedDbSettingsStore } = await import('../storage/settings-store')
-const { createGenerationQueue } = await import('./generation-queue')
-const { computeDrillReadiness } = await import('./drill-readiness')
-const { createClipPlayer } = await import('./clip-player')
-const { knownVoices, VOICE_CATALOGUE } = await import('./voice-catalogue')
+import { createIndexedDbClipCache, computeClipHash } from '../storage/clip-cache'
+import { createIndexedDbSettingsStore } from '../storage/settings-store'
+import { createGenerationQueue } from './generation-queue'
+import { computeDrillReadiness } from './drill-readiness'
+import { createClipPlayer } from './clip-player'
+import { knownVoices, VOICE_CATALOGUE } from './voice-catalogue'
 
 type Voice = import('../../domain').Voice
 type Phrase = import('../../domain').Phrase

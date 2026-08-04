@@ -1,17 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Clip } from './clip-cache'
-import { idbDestructiveOperations, idbOperations, openDB, resetFakeIdb } from './idb.test-support'
+import { openDB } from 'idb'
+import { idbDestructiveOperations, idbOperations, resetFakeIdb } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 
-vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbClipCache, computeClipHash, DEFAULT_CLIP_CACHE_MAX_BYTES, CLIP_META_BACKFILL_CHUNK } =
-  await import('./clip-cache')
-const { CLIPS_STORE, CLIP_META_STORE, DB_NAME, openDatabase } = await import('./database')
+import {
+  createIndexedDbClipCache,
+  computeClipHash,
+  DEFAULT_CLIP_CACHE_MAX_BYTES,
+  CLIP_META_BACKFILL_CHUNK,
+} from './clip-cache'
+import { CLIPS_STORE, CLIP_META_STORE, DB_NAME, openDatabase } from './database'
 
 const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
@@ -337,6 +336,10 @@ describe('createIndexedDbClipCache', () => {
       })
       await legacy.put(CLIPS_STORE, sizedClip('old-1', 4096))
       await legacy.put(CLIPS_STORE, sizedClip('old-2', 2048))
+      // A previous page load's connection is gone by the time the app opens
+      // the database again; under real IndexedDB, leaving it open blocks the
+      // v5 -> v6 upgrade forever.
+      legacy.close()
 
       const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
 

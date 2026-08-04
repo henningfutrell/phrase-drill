@@ -1,8 +1,8 @@
 import type { ErrorLog } from './error-log'
 
-/** Minimal surface this adapter needs from `window` — mirrors
- * `idb.test-support.ts`'s "deliberately minimal" convention for mocking an
- * external seam. */
+/** Minimal surface this adapter needs from `window` — only what this
+ * adapter calls, so a test can stand in for the seam without standing in for
+ * the browser. */
 export interface CaptureTarget {
   addEventListener(type: string, listener: (event: unknown) => void): void
   removeEventListener(type: string, listener: (event: unknown) => void): void

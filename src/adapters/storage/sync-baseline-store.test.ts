@@ -1,16 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetFakeIdb } from './idb.test-support'
 
-vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbSyncBaselineStore } = await import('./sync-baseline-store')
-const { createIndexedDbSettingsStore } = await import('./settings-store')
-const { LIBRARY_FORMAT } = await import('../../domain')
-const { CURRENT_SCHEMA_VERSION } = await import('./migrations')
+import { createIndexedDbSyncBaselineStore } from './sync-baseline-store'
+import { createIndexedDbSettingsStore } from './settings-store'
+import { LIBRARY_FORMAT } from '../../domain'
+import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 type Library = import('../../domain').Library
 
