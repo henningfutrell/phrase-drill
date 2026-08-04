@@ -288,7 +288,14 @@ export function createApp({
       typeof parsed.schemaVersion !== 'number' ||
       !Array.isArray(parsed.decks) ||
       (parsed.mixes !== undefined && !Array.isArray(parsed.mixes)) ||
-      (parsed.tombstones !== undefined && !Array.isArray(parsed.tombstones))
+      (parsed.tombstones !== undefined && !Array.isArray(parsed.tombstones)) ||
+      // The pinned voice (T067): an object or nothing. Absent is every
+      // envelope written before T067 and means "no voice recorded". The
+      // server stores the envelope verbatim and never reads inside this
+      // field, so a shallow check is all it owes — the device validates the
+      // three parts of the content address itself (`domain/voice.ts`).
+      (parsed.voice !== undefined &&
+        (typeof parsed.voice !== 'object' || parsed.voice === null || Array.isArray(parsed.voice)))
     ) {
       return sendJson(res, 400, { error: 'invalid-request' })
     }

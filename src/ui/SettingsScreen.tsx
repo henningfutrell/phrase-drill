@@ -299,8 +299,9 @@ export function SettingsScreen({
         <div className="sheet" data-testid="voice-confirm-sheet">
           <p className="sheet-title">Switch to {confirmingVoice.name}?</p>
           <p className="sheet-label">
-            The audio for every phrase will be made again in this voice — that takes a
-            little while, so phrases will be briefly silent while it catches up.
+            New phrases will be spoken in this voice. The phrases you already have keep
+            the audio they have and go on playing — nothing is remade unless you ask for
+            it, from a deck or a single phrase.
           </p>
           <div className="sheet-actions">
             <button type="button" data-testid="voice-cancel" className="btn-secondary" onClick={handleCancelVoice}>

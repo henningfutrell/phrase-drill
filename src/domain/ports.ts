@@ -7,6 +7,7 @@
 
 import type { Deck, DeckId } from './deck'
 import type { Mix, MixId } from './mix'
+import type { Voice } from './voice'
 
 /** Closed on purpose — widening it later is a type change, not a data migration. */
 export type Language = 'fr-FR' | 'en-US'
@@ -119,6 +120,26 @@ export interface Library {
    * be deleted", never "invalid file".
    */
   readonly tombstones?: readonly Tombstone[]
+  /**
+   * The voice pinned on the device that wrote this envelope (T067). Carried
+   * so a new phone restores the preference instead of leaving her to guess
+   * which voice she had.
+   *
+   * **Named explicitly, rather than exporting the settings record.** The
+   * export deliberately does not read the `settings` store, and what crosses
+   * the wire is enumerated here field by field — the store's other contents
+   * have no route out.
+   *
+   * Optional for the same reason `mixes` and `tombstones` are: an envelope
+   * written before T067 has no such field, and absent means "no voice
+   * recorded", never "invalid file" and never "clear the voice".
+   *
+   * It cannot invalidate anything. Since T067 a Clip is playable in the
+   * voice it was made in, so the pinned voice decides only what the next new
+   * Phrase is generated in — which is what makes plain last-writer-wins the
+   * right merge rule for it (`library-merge.ts`).
+   */
+  readonly voice?: Voice
 }
 
 export interface DeckStore {
@@ -127,7 +148,9 @@ export interface DeckStore {
   /** Whole-aggregate put: insert or replace. No transaction spans stores. */
   save(deck: Deck): Promise<void>
   remove(id: DeckId): Promise<void>
-  /** Whole-library snapshot. Never carries anything from settings (the API key). */
+  /** Whole-library snapshot: Decks, Mixes and Tombstones. Reads no settings
+   * — the pinned voice is joined onto the envelope by name, outside this
+   * port (`adapters/sync/synced-library.ts`). */
   exportAll(): Promise<Library>
   /** Replaces the whole library. Never merges. */
   importAll(library: Library): Promise<void>

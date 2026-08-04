@@ -35,6 +35,7 @@ vi.mock('idb', async () => {
 // same pattern as clip-cache.test.ts / indexed-db-deck-store.test.ts.
 const { createIndexedDbClipCache, computeClipHash } = await import('./clip-cache')
 const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
+const { knownVoices } = await import('../audio/voice-catalogue')
 
 const RUN = process.env.RUN_SCALE_BENCH === '1'
 
@@ -293,13 +294,16 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
       const serialized = JSON.stringify(exported)
       const exportBytesMeasured = new TextEncoder().encode(serialized).byteLength
 
-      // 5. readyPhraseIds — the drill-start sweep. computeClipHash is
-      // called twice per phrase (drill-readiness.ts -> clip-cache.ts),
-      // real SHA-256 via crypto.subtle, real per-call cost measured.
+      // 5. readyPhraseIds — the drill-start sweep. Since T067 the sweep asks
+      // about every voice a Clip could be in, pinned first, and stops at the
+      // first hit: the WARM number below is therefore still two digests per
+      // phrase (everything is in the pinned voice), and the COLD number is
+      // the worst case, `knownVoices().length` digests per side, because no
+      // voice has anything. Real SHA-256 via crypto.subtle either way.
       const clipCache = createIndexedDbClipCache()
 
       const coldStart = performance.now()
-      const readyCold = await clipCache.readyPhraseIds(phrases, VOICE)
+      const readyCold = await clipCache.readyPhraseIds(phrases, knownVoices(VOICE))
       const readyPhraseIdsColdMsMeasured = performance.now() - coldStart
       expect(readyCold.size).toBe(0) // nothing cached yet
 
@@ -328,7 +332,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
       }
 
       const warmStart = performance.now()
-      const readyWarm = await clipCache.readyPhraseIds(phrases, VOICE)
+      const readyWarm = await clipCache.readyPhraseIds(phrases, knownVoices(VOICE))
       const readyPhraseIdsWarmMsMeasured = performance.now() - warmStart
       expect(readyWarm.size).toBe(n) // everything now ready
 

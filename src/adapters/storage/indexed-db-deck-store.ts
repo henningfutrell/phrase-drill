@@ -15,9 +15,20 @@ import { requestPersistence } from './persistence'
  * Decks *and* saved Mixes. They read and write both stores — `importAll`
  * inside one transaction spanning the two, because a restore that replaced
  * the Decks and then failed before the Mixes would leave her library in a
- * state she never had. Neither ever reads `settings`, so an export
- * structurally cannot carry a credential; there is nothing to redact
- * because nothing is read.
+ * state she never had.
+ *
+ * **Neither ever reads `settings`, and that is still the rule** — but the
+ * reason has changed, so the old one is not left here to mislead. It used to
+ * be that the `settings` store held the library key, and an export that
+ * could not see it structurally could not carry a credential. There is no
+ * credential in there any more: the device's identity is an opaque session
+ * token held in `localStorage` by `session-auth.ts` (T050). What the rule
+ * protects now is the shape of the envelope — what leaves this device is
+ * ENUMERATED, field by field, rather than being whatever happens to be in a
+ * store. The one settings field that does travel, the pinned voice (T067),
+ * is joined on by name outside this adapter, in
+ * `adapters/sync/synced-library.ts`. Anything else added to `settings` stays
+ * on this phone until somebody names it too.
  */
 export function createIndexedDbDeckStore(): DeckStore {
   let persistenceRequested = false

@@ -1,17 +1,14 @@
 import type { IDBPDatabase } from 'idb'
+import type { Voice } from '../../domain'
 import { openDatabase, SETTINGS_STORE } from './database'
-
-/** The pinned text-to-speech voice — provider, model, and voice id, together. */
-export interface Voice {
-  readonly provider: string
-  readonly modelId: string
-  readonly voiceId: string
-}
 
 /**
  * The pinned voice and small UI flags, as read from the `settings` store.
- * Never part of `Library` — `DeckStore.exportAll()` reads only the `decks`
- * store and structurally cannot see this data (see its own test).
+ * `DeckStore.exportAll()` reads only the `decks`, `mixes` and `tombstones`
+ * stores and structurally cannot see this data (see its own test). Since
+ * T067 exactly one field of it does travel — the pinned voice, joined onto
+ * the `Library` envelope by name in `adapters/sync/synced-library.ts`, never
+ * by exporting this record.
  *
  * There is no identity field here (T043, T050): the device's identity on
  * the server is an opaque session token, held by `session-auth.ts` in
@@ -54,6 +51,17 @@ export interface SettingsStore {
   load(): Promise<Settings>
   /** `null` clears the pinned voice. */
   setVoice(voice: Voice | null): Promise<void>
+  /**
+   * Take the pinned voice carried by an arriving `Library` — a merge from
+   * the server, or a backup file she restored (T067).
+   *
+   * `undefined` is a no-op, never a clear: an envelope written before T067
+   * has no voice field, and reading its absence as "she has no voice" would
+   * unpin the one on this phone. What to do when BOTH sides have one is
+   * already settled by then — `mergeLibraries` decided it — so this just
+   * writes what it is given.
+   */
+  adoptVoice(voice: Voice | undefined): Promise<void>
   /** Records the epoch-ms time of a sync that just completed successfully,
    * replacing whatever was there before. */
   recordSync(timestamp: number): Promise<void>
@@ -106,6 +114,11 @@ export function createIndexedDbSettingsStore(): SettingsStore {
 
     setVoice(voice: Voice | null): Promise<void> {
       return put(VOICE, voice)
+    },
+
+    async adoptVoice(voice: Voice | undefined): Promise<void> {
+      if (!voice) return
+      await put(VOICE, voice)
     },
 
     recordSync(timestamp: number): Promise<void> {

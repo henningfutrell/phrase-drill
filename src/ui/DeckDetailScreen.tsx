@@ -33,6 +33,8 @@ export function DeckDetailScreen({
   onMovePhraseUp,
   onMovePhraseDown,
   onDrillDeck,
+  onRegenerateDeckAudio,
+  onRegeneratePhraseAudio,
   backupAge,
   onExportBackup,
   onCopyText,
@@ -54,6 +56,17 @@ export function DeckDetailScreen({
   /** Launches a Drill over this whole Deck (docs/design.md §3.3, T006). */
   onDrillDeck: () => void
   /**
+   * Makes the audio for every Phrase of this Deck again, in the voice pinned
+   * now (T067). Confirmed first: it is one request per side per Phrase, the
+   * only control in the app that spends real money in bulk, and she has no
+   * other signal of what it costs. Optional — a caller that wires nothing
+   * gets no control.
+   */
+  onRegenerateDeckAudio?: () => void
+  /** The same for one Phrase. One tap, no confirmation: two Clips is not a
+   * decision worth a sheet. */
+  onRegeneratePhraseAudio?: (id: PhraseId) => void
+  /**
    * How long since the library was last safe somewhere else (T031). Shown
    * here only once it is urgent — the home screen states it at every level,
    * and repeating a calm fact on every screen is how a status line becomes
@@ -71,6 +84,7 @@ export function DeckDetailScreen({
     undefined,
   )
   const [confirmingDeleteDeck, setConfirmingDeleteDeck] = useState(false)
+  const [confirmingRegenerate, setConfirmingRegenerate] = useState(false)
 
   const editingPhrase =
     phraseSheet?.kind === 'edit' ? deck.phrases.find((p) => p.id === phraseSheet.phraseId) : undefined
@@ -120,6 +134,31 @@ export function DeckDetailScreen({
         </button>
       )}
 
+      {deck.phrases.length > 0 && onRegenerateDeckAudio && (
+        confirmingRegenerate ? (
+          <button
+            type="button"
+            data-testid="confirm-regenerate-deck-audio"
+            className="btn-secondary"
+            onClick={() => {
+              setConfirmingRegenerate(false)
+              onRegenerateDeckAudio()
+            }}
+          >
+            Make the audio for all {deck.phrases.length} phrases again?
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-testid="regenerate-deck-audio"
+            className="btn-secondary"
+            onClick={() => setConfirmingRegenerate(true)}
+          >
+            Redo audio in the current voice
+          </button>
+        )
+      )}
+
       {deck.phrases.length === 0 ? (
         <p className="empty-state">Add phrases to drill this Deck.</p>
       ) : (
@@ -151,6 +190,16 @@ export function DeckDetailScreen({
                 </button>
               </div>
               <div className="phrase-actions">
+                {onRegeneratePhraseAudio && (
+                  <button
+                    type="button"
+                    data-testid={`regenerate-phrase-audio-${phrase.id}`}
+                    className="btn-icon"
+                    onClick={() => onRegeneratePhraseAudio(phrase.id)}
+                  >
+                    Redo audio
+                  </button>
+                )}
                 <button
                   type="button"
                   data-testid={`edit-phrase-${phrase.id}`}

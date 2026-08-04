@@ -189,7 +189,9 @@ than blocking the whole Drill.
 **Both of those lines have an offline form, and it is not cosmetic (T036).**
 Since the clip cache became bounded, a Phrase can lose its audio to
 **Eviction** (glossary) as well as never have had any. Online the difference
-does not matter — the readiness sweep queues regeneration either way. Offline
+does not matter — the readiness sweep queues generation either way (in the
+pinned voice; a Phrase that has audio in ANY voice is ready and is not
+queued, T067). Offline
 it is the whole answer: nothing is being made, waiting achieves nothing, and
 it returns with the connection. So with no network the blocked copy reads
 `This drill's audio isn't on this phone right now, and there's no connection
@@ -460,12 +462,36 @@ account.
      always attempted; if the server has no speech provider configured, the
      failure is surfaced with copy naming the server, not a device fix.
    - **Use this voice**, which does not switch immediately — it opens a
-     **confirmation sheet**: "Switch to `<voice>`? The audio for every phrase
-     will be made again in this voice — that takes a little while, so phrases
-     will be briefly silent while it catches up." Only `Switch voice` on that
-     sheet actually pins the new voice, because every cached Clip is
-     content-addressed by voice (glossary) and a change orphans the whole
-     cache.
+     **confirmation sheet**: "Switch to `<voice>`? New phrases will be spoken
+     in this voice. The phrases you already have keep the audio they have and
+     go on playing — nothing is remade unless you ask for it, from a deck or
+     a single phrase."
+
+     **That copy was the exact opposite until T067, and the reversal is the
+     point.** It used to promise that every phrase would be made again,
+     because the drill-start readiness sweep asked only about the *pinned*
+     voice: switching made a fully generated library read as entirely
+     unready and queued all of it — ~2,000 requests and real money for a
+     preference. The owner rejected it in one line: "If they are generated in
+     a voice, just keep it that way." So a Clip's voice is now a property of
+     that Clip. Readiness is asked over every voice a Clip could be in
+     (`knownVoices`, pinned first), playback plays the pinned voice where it
+     exists and otherwise whatever does, and the pinned voice decides one
+     thing only — what the next new Phrase is generated in. The sheet
+     survives because it still states what changes; it no longer warns about
+     a cost that no longer exists.
+   - **Re-generating on purpose (T067).** Because a switch no longer remakes
+     anything, there is a control that does, and it is hers to press: *Redo
+     audio in the current voice* on a Deck (confirmed, naming the phrase
+     count — it is the one control that spends real money in bulk) and *Redo
+     audio* on a single Phrase (one tap; two Clips). It ADDS Clips and
+     deletes none: a Clip is content-addressed by
+     `provider|modelId|voiceId|lang|text`, so the old voice's audio sits at a
+     different hash and simply stays, and asking twice for the same voice and
+     statement costs no request at all — the second ask hits the cache.
+     There is deliberately **no library-wide button**: a one-tap
+     re-generation of everything is precisely the event this design exists to
+     prevent, and making it one tap would make the failure mode a feature.
 2. **Saved audio (T036)** — the one card that reports rather than offers a
    choice, because the clip cache is now bounded and evicts, and something
    that quietly deletes has to say so. Three facts, in her words: how much is

@@ -86,6 +86,41 @@ store of its own, because a new store is a schema version bump and a migration
 for every existing database, and this is derived data whose loss costs one
 round-trip's precision.
 
+## The pinned voice (T067)
+
+The envelope carries one field that is not a Deck, a Mix or a Tombstone: the
+**pinned voice**. It is a preference, and losing it on a new phone was
+expensive — the decks arrived, the drill was blocked on `no-voice`, and she
+had no way to know which voice she had before.
+
+Three rules, and they are all short:
+
+- **It is joined on by name, never exported wholesale.** `DeckStore.exportAll()`
+  still reads only `decks`, `mixes` and `tombstones`;
+  `adapters/sync/synced-library.ts` adds `voice` and nothing else. What leaves
+  this device is enumerated, so a field added to the `settings` store later
+  stays on the phone until somebody names it too.
+- **Last writer wins, with no timestamp.** `mergeLibraries` takes
+  `local.voice ?? remote.voice`: this device's, unless this device has none.
+  No `pinnedAt` was invented, because since T067 there is nothing left for one
+  to protect — a Clip is playable in the voice it was made in, so losing this
+  conflict changes what the next NEW Phrase is generated in and nothing else.
+  Before T067 the same rule would have been reckless: it could have re-pinned
+  her voice and regenerated the whole library.
+- **Absent means "none recorded", never "clear it".** An envelope written
+  before T067 has no `voice` field at all; it leaves the local pin alone. That
+  also makes the field safe against an older build, which strips it on push:
+  the next sync from any device that has one puts it back, and the worst case
+  in between is the status quo before this feature existed. That is why this
+  is an optional additive field and **not** a `schemaVersion` bump — a bump
+  would 409 her other phone out of syncing her *phrases* until it updated, to
+  protect a field that heals itself.
+
+The same field travels in a backup FILE, and restore treats it the same way:
+`parseLibraryFile` accepts a file with it and a file without it, and a
+restore pins the file's voice if it has one and leaves the local pin alone if
+it does not.
+
 ## What she sees
 
 One line on the Decks screen (`src/ui/sync-status-text.ts`). The time is
