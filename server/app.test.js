@@ -783,8 +783,9 @@ describe('server app (integration, fake upstreams)', () => {
       for (const exportedAt of [2, 3]) {
         expect((await putLibrary(library([], { exportedAt }))).status).toBe(204)
       }
-      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
-      expect((await get.json()).decks).toEqual([])
+      // Read through the store, not a fourth HTTP call — the library limiter
+      // is wired to 3/window in these tests.
+      expect(JSON.parse((await libraryStore.get(SUB)).data).decks).toEqual([])
     })
 
     /**
