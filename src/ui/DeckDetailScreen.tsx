@@ -1,8 +1,10 @@
 import { useState } from 'react'
-import type { Deck, Translator } from '../domain'
+import type { BackupAge, Deck, Translator } from '../domain'
 import type { PhraseId } from '../domain'
+import { isBackupUrgent } from '../domain'
 import { NameSheet } from './NameSheet'
 import { PhraseSheet } from './PhraseSheet'
+import { BackupStatus, type ExportOutcome } from './BackupStatus'
 
 interface AcceptedCandidate {
   french: string
@@ -31,6 +33,9 @@ export function DeckDetailScreen({
   onMovePhraseUp,
   onMovePhraseDown,
   onDrillDeck,
+  backupAge,
+  onExportBackup,
+  onCopyText,
 }: {
   deck: Deck
   /** All Decks, so a Phrase Candidate can be routed to one other than this one (T057). */
@@ -48,6 +53,17 @@ export function DeckDetailScreen({
   onMovePhraseDown: (id: PhraseId) => void
   /** Launches a Drill over this whole Deck (docs/design.md §3.3, T006). */
   onDrillDeck: () => void
+  /**
+   * How long since the library was last safe somewhere else (T031). Shown
+   * here only once it is urgent — the home screen states it at every level,
+   * and repeating a calm fact on every screen is how a status line becomes
+   * wallpaper. This is the screen she adds Phrases on, so it is where an
+   * urgent one has to reach her: the work at risk is the work being made here.
+   */
+  backupAge?: BackupAge
+  /** Required whenever `backupAge` is passed. */
+  onExportBackup?: () => Promise<ExportOutcome>
+  onCopyText?: (text: string) => Promise<boolean>
 }) {
   const [renaming, setRenaming] = useState(false)
   const [phraseSheet, setPhraseSheet] = useState<PhraseSheetState>(undefined)
@@ -88,6 +104,10 @@ export function DeckDetailScreen({
           </button>
         )}
       </header>
+
+      {backupAge && onExportBackup && isBackupUrgent(backupAge) && (
+        <BackupStatus age={backupAge} onExportBackup={onExportBackup} onCopyText={onCopyText} />
+      )}
 
       {deck.phrases.length > 0 && (
         <button

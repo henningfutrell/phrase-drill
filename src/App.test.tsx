@@ -940,6 +940,7 @@ describe('App — restore is reachable from the screen a wiped phone opens on (T
     store.importAll = async (library) => {
       store.decks = new Map(library.decks.map((d) => [d.id, { id: d.id, name: d.name, phrases: d.phrases }]))
     }
+    store.loadAll = async () => [...store.decks.values()]
     await renderApp(store)
 
     const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement

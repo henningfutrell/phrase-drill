@@ -256,7 +256,7 @@ describe('SettingsScreen', () => {
     it('confirms once the export has gone through the share sheet', async () => {
       renderScreen({ onExportBackup: vi.fn().mockResolvedValue({ kind: 'shared' }) })
       await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
-      expect(container.querySelector('[data-testid="backup-status-result"]')?.textContent).toMatch(/shar/i)
+      expect(container.querySelector('[data-testid="backup-status-result"]')?.textContent).toMatch(/saved/i)
     })
 
     it('tells her where to look when the share sheet is not available and it fell back to a download', async () => {

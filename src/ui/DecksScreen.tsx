@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import type { Deck, DeckId } from '../domain'
+import type { BackupAge, Deck, DeckId } from '../domain'
 import { NameSheet } from './NameSheet'
+import { BackupStatus, type ExportOutcome } from './BackupStatus'
+import { RestoreControl, type RestoreFileResult } from './RestoreControl'
 
 type SheetState = { kind: 'create' } | { kind: 'rename'; deckId: DeckId; name: string } | undefined
 
@@ -18,8 +20,12 @@ export function DecksScreen({
   onOpenSettings,
   onOpenMix,
   onOpenImport,
-  showBackupNudge = false,
-  onDismissBackupNudge,
+  backupAge,
+  onExportBackup,
+  onCopyText,
+  onRestoreFileChosen,
+  onConfirmRestore,
+  onCancelRestore,
 }: {
   decks: readonly Deck[]
   onCreateDeck: (name: string) => void
@@ -33,13 +39,28 @@ export function DecksScreen({
   /** Entry point to Scan / correction (docs/design.md §3.5) — omitted only in tests that don't exercise it. */
   onOpenImport?: () => void
   /**
-   * The first-run backup nudge (docs/design.md §3.6, T027) — shown only
-   * alongside the empty state, and only until she's dismissed it once
-   * (anywhere it appears; the flag is shared with the after-Scan nudge).
+   * How long since the library was last safe somewhere else (T031). Stated
+   * here at every level, including fresh: this is the screen she lands on,
+   * so it is the one place the answer is always available rather than only
+   * when something is wrong. Omitted only in tests that don't exercise it.
    */
-  showBackupNudge?: boolean
-  /** Required whenever `showBackupNudge` can be true. */
-  onDismissBackupNudge?: () => void
+  backupAge?: BackupAge
+  /** Required whenever `backupAge` is passed. */
+  onExportBackup?: () => Promise<ExportOutcome>
+  /** Required whenever `backupAge` is passed. */
+  onCopyText?: (text: string) => Promise<boolean>
+  /**
+   * Restore, on the empty state (T031). A wiped or replaced phone opens here
+   * and nowhere else, and this is the screen she is looking at when her
+   * phrases are gone — so this is where restore has to be, not three taps
+   * into a settings screen she has no reason to open. Omitted only in tests
+   * that don't exercise it.
+   */
+  onRestoreFileChosen?: (file: File) => Promise<RestoreFileResult>
+  /** Required whenever `onRestoreFileChosen` is passed. */
+  onConfirmRestore?: () => void
+  /** Required whenever `onRestoreFileChosen` is passed. */
+  onCancelRestore?: () => void
 }) {
   const [sheet, setSheet] = useState<SheetState>(undefined)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<DeckId | undefined>(undefined)
@@ -90,23 +111,26 @@ export function DecksScreen({
         </div>
       </header>
 
+      {/* Nothing saved yet is nothing to lose — the age is silent until there is. */}
+      {decks.length > 0 && backupAge && onExportBackup && (
+        <BackupStatus age={backupAge} onExportBackup={onExportBackup} onCopyText={onCopyText} />
+      )}
+
       {decks.length === 0 ? (
         <>
           <p className="empty-state">
             Nothing here yet — start a Deck for one of your contexts.
           </p>
-          {showBackupNudge && (
-            <p className="backup-nudge" data-testid="backup-nudge">
-              Tip: back up your phrases in Settings.{' '}
-              <button
-                type="button"
-                data-testid="dismiss-backup-nudge"
-                className="link-action"
-                onClick={onDismissBackupNudge}
-              >
-                Got it
-              </button>
-            </p>
+          {onRestoreFileChosen && onConfirmRestore && onCancelRestore && (
+            <div className="empty-state-recovery">
+              <p className="settings-help">Already have a backup file?</p>
+              <RestoreControl
+                label="Restore from a backup file"
+                onRestoreFileChosen={onRestoreFileChosen}
+                onConfirmRestore={onConfirmRestore}
+                onCancelRestore={onCancelRestore}
+              />
+            </div>
           )}
         </>
       ) : (

@@ -22,37 +22,45 @@ export interface Voice {
 export interface Settings {
   readonly voice: Voice | null
   /**
-   * The first-run backup nudge (docs/design.md §3.6, T027), dismissed once
-   * and for good — shown on the Decks empty state and after the first
-   * successful Scan until she dismisses it from either place. Additive field:
-   * missing in previously-stored settings reads as `false` (never dismissed),
-   * so existing data needs no migration.
-   */
-  readonly backupNudgeDismissed: boolean
-  /**
-   * Epoch ms of the last successful Library sync (`docs/sync.md`), or `null`
-   * if none has ever completed. Diagnostics (T039) is the first reader;
-   * nothing writes this yet — the sync feature that calls `recordSync` is a
-   * separate change. Additive field: missing in previously-stored settings
-   * reads as `null`, same treatment as `backupNudgeDismissed`.
+   * Epoch ms of the last successful Library push to the server, or `null` if
+   * none has ever completed. Half of the Backup age (`domain/backup-age`);
+   * Diagnostics (T039) also reads it. Additive field: missing in
+   * previously-stored settings reads as `null`, so existing data needs no
+   * migration.
    */
   readonly lastSyncAt: number | null
+  /**
+   * Epoch ms of the last backup file she exported herself, or `null` if she
+   * never has. The other half of the Backup age. Kept separate from
+   * `lastSyncAt` rather than folded into one "last backup" number, because
+   * they fail independently — an age driven only by exports would stay loud
+   * while sync worked perfectly, and one driven only by sync would go quiet
+   * for a file she never actually saved.
+   *
+   * The retired `backupNudgeDismissed` flag (T027) is gone, deleted rather
+   * than deprecated: the nudge it silenced no longer exists. An old value
+   * left in the `settings` store by a previous build is simply never read.
+   * Nothing of hers is at stake in that — this store holds UI flags and the
+   * pinned voice, never drill data.
+   */
+  readonly lastExportAt: number | null
 }
 
 export interface SettingsStore {
   load(): Promise<Settings>
   /** `null` clears the pinned voice. */
   setVoice(voice: Voice | null): Promise<void>
-  /** One-way: there is no way back to `false` once dismissed. */
-  dismissBackupNudge(): Promise<void>
   /** Records the epoch-ms time of a sync that just completed successfully,
    * replacing whatever was there before. */
   recordSync(timestamp: number): Promise<void>
+  /** Records the epoch-ms time of a backup file that actually left the app,
+   * replacing whatever was there before. A cancelled share is not one. */
+  recordExport(timestamp: number): Promise<void>
 }
 
 const VOICE = 'voice'
-const BACKUP_NUDGE_DISMISSED = 'backupNudgeDismissed'
 const LAST_SYNC_AT = 'lastSyncAt'
+const LAST_EXPORT_AT = 'lastExportAt'
 
 /**
  * The IndexedDB implementation of `SettingsStore`, via `idb`. Shares the one
@@ -80,15 +88,15 @@ export function createIndexedDbSettingsStore(): SettingsStore {
   return {
     async load(): Promise<Settings> {
       const db = await getDatabase()
-      const [voice, backupNudgeDismissed, lastSyncAt] = await Promise.all([
+      const [voice, lastSyncAt, lastExportAt] = await Promise.all([
         db.get(SETTINGS_STORE, VOICE) as Promise<Voice | undefined>,
-        db.get(SETTINGS_STORE, BACKUP_NUDGE_DISMISSED) as Promise<boolean | undefined>,
         db.get(SETTINGS_STORE, LAST_SYNC_AT) as Promise<number | undefined>,
+        db.get(SETTINGS_STORE, LAST_EXPORT_AT) as Promise<number | undefined>,
       ])
       return {
         voice: voice ?? null,
-        backupNudgeDismissed: backupNudgeDismissed ?? false,
         lastSyncAt: lastSyncAt ?? null,
+        lastExportAt: lastExportAt ?? null,
       }
     },
 
@@ -96,12 +104,12 @@ export function createIndexedDbSettingsStore(): SettingsStore {
       return put(VOICE, voice)
     },
 
-    dismissBackupNudge(): Promise<void> {
-      return put(BACKUP_NUDGE_DISMISSED, true)
-    },
-
     recordSync(timestamp: number): Promise<void> {
       return put(LAST_SYNC_AT, timestamp)
+    },
+
+    recordExport(timestamp: number): Promise<void> {
+      return put(LAST_EXPORT_AT, timestamp)
     },
   }
 }

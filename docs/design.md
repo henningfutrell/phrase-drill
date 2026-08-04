@@ -456,7 +456,8 @@ account.
 2. **Backup** — still present alongside server sync, in its own card
    treatment, reframed as extra insurance rather than the only copy: "Your
    phrases sync to the server automatically, but you can also save a backup
-   file you keep or send yourself, for extra peace of mind." Clips are not
+   file you keep or send yourself, for extra peace of mind." The section leads
+   with the Backup age (below). Clips are not
    part of the backup — they regenerate automatically next time she's online,
    in the same voice, so a freshly restored phrase is normal to sit briefly
    silent. `Export backup` invokes the native iOS share sheet
@@ -476,15 +477,71 @@ here: app name, nothing else. Not built — there is no About section in the
 shipped screen. A small, low-risk omission, named here rather than silently
 dropped.
 
-**First-run backup nudge (T027).** A one-line, dismiss-once nudge — `Tip: back
-up your phrases in Settings.` plus a `Got it` dismiss — appears in two places:
-the Decks empty state (§3.2, below the `Nothing here yet…` line) and the Scan
-review step (§3.5 Step 3, above the Draft Phrase list), the moment a Scan has
-actually produced phrases to save. One flag backs both: `Settings.
-backupNudgeDismissed`, `false` until she dismisses the nudge from either
-place, `true` and permanent after — there is no way back to shown. It is not
-part of the exported backup itself, same treatment as the pinned voice
-(§3.6, `DeckStore.exportAll()` cannot see it).
+**Backup age, in place of the first-run nudge (T031).** The dismiss-once
+nudge T027 shipped — `Tip: back up your phrases in Settings.` plus a `Got it`
+— is **deleted**, along with its `Settings.backupNudgeDismissed` flag. One tap
+of `Got it` retired the only thing in the app that ever mentioned durability,
+permanently, on a device where losing the library is the one unrecoverable
+failure. A dismiss-once nudge is not a durability strategy.
+
+What replaces it is a **Backup age** (glossary): how long since the library was
+last safe somewhere else, measured from the more recent of the last successful
+server sync and the last file she exported herself. Both count, because a
+server-side copy is a backup; and because sync runs after every save, an age
+that climbs past a week is really the app reporting that **sync has been
+failing silently** — every push is fire-and-forget by design, so this is the
+only place that failure is visible at all.
+
+- **It escalates in tone and in reach, never in frequency.** `fresh` (under a
+  week) is one dim italic line and a quiet link, on the Decks screen only.
+  `aging` (7–29 days) gains the gilt-hairline card and one line of consequence,
+  and starts appearing on the Deck screen too — the screen she adds Phrases on,
+  which is where the work at risk is being made. `overdue` (30+) and `never`
+  gain the danger border, the lace selvedge across the head of the card, and a
+  full-width rose action. At every level it appears **exactly once per screen**.
+  Nothing repeats, nothing interrupts, nothing is modal.
+- **There is nothing to dismiss.** That is the whole design. A dismiss control
+  is what trains a person to ignore a warning, because dismissing is a reflex
+  that can be built; a line of status has no reflex to build. It also goes quiet
+  by itself the moment a sync or an export succeeds, so the loud state is always
+  exactly one tap from ending — and cannot return for another week.
+- **It is silent when there is nothing to lose.** No Decks, no indicator.
+- **Thresholds:** 7 days, because a week of practice is the smallest amount of
+  work worth its own warning; 30 days, because a month of it is a loss she would
+  feel for a long time. Under a week, sync covers it.
+
+**Restore, on the screen a wiped phone actually opens on (T031).** `Restore
+from a backup file` now sits on the **Decks empty state**, beside `Already have
+a backup file?`, as well as in Settings. A replaced or wiped phone opens on an
+empty Decks list and nowhere else, and that is the one screen she is looking at
+when her phrases are gone — three taps into a settings screen she has no reason
+to open is not findable while panicking. Both places use the same control, so
+the confirmation sheet and the refusal copy cannot drift apart between the calm
+path and the panicking one. **Backup is also now the first section in
+Settings**, above Voice.
+
+**What Export actually does on the one device this app runs on (T031).** The
+export path was verified against WebKit's own record rather than assumed, and
+two things it did were broken on an installed iOS web app:
+
+- **The share call had lost its user activation before it ran.** WebKit expires
+  transient activation across an `await`, and its own worked example is exactly
+  the shape this app had — a click handler that awaits an async read, then calls
+  `navigator.share()`. The backup `File` is now built **ahead of the tap**, on
+  every change to the library, so `share()` is reached with nothing awaited in
+  front of it.
+- **The download fallback was worse than no fallback.** WebKit 290847 (filed
+  2025-04-01, still open): a download inside a standalone web app opens an
+  "Open in…" splash that "prohibits further navigation inside the Web App" —
+  no chrome, no back gesture — and the only way out is force-quitting. Bug
+  236943 was closed `MOVED` in 2022, which is not `FIXED`, and nothing in the
+  Safari 26 notes addresses it. So an **installed** app never gets a download:
+  when the share sheet is unavailable it gets the backup text in a sheet with a
+  **Copy** button, which is worse than a file but visible, dismissible, and
+  loses nothing. An ordinary browser tab still downloads, where a download is
+  safe.
+- `share()` is called with `{ files }` **alone** — no `title`, `text` or `url`.
+  WebKit 251500 and 316518 are both mixed payloads.
 
 ### 3.7 Diagnostics — answer "it's not working" without guessing (T039)
 

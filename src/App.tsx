@@ -29,6 +29,8 @@ import {
 } from './domain'
 import type { ClipCache, Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, normalizeLibrary, parseLibraryFile } from './adapters/storage'
+import { backupAge, lastBackupAt } from './domain'
+import { readInstallStateFromBrowser } from './adapters/device/install-state'
 import type { ErrorLog } from './adapters/diagnostics'
 import { collectDiagnostics, copyText, formatDiagnosticsReport, getBuildInfo, getStorageEstimate } from './adapters/diagnostics'
 import { shareBackupFile } from './adapters/share/web-share'
@@ -45,13 +47,15 @@ import { DeckDetailScreen } from './ui/DeckDetailScreen'
 import { MixSelectScreen } from './ui/MixSelectScreen'
 import { ImportScreen, type ImportTarget } from './ui/ImportScreen'
 import { DrillScreen, type DrillReadinessResult } from './ui/DrillScreen'
-import { SettingsScreen, type ExportOutcome, type PreviewOutcome, type RestoreFileResult } from './ui/SettingsScreen'
+import { SettingsScreen, type PreviewOutcome } from './ui/SettingsScreen'
+import type { ExportOutcome } from './ui/BackupStatus'
+import type { RestoreFileResult } from './ui/RestoreControl'
 import { DiagnosticsScreen } from './ui/DiagnosticsScreen'
 
 const EMPTY_SETTINGS: Settings = {
   voice: null,
-  backupNudgeDismissed: false,
   lastSyncAt: null,
+  lastExportAt: null,
 }
 
 /**
@@ -86,11 +90,19 @@ function playPreviewClip(bytes: ArrayBuffer, mime: string): void {
 }
 
 /**
- * The fallback for a platform that cannot share files (Web Share Level 2
- * file support is not universal — see adapters/share/web-share.ts). A
- * plain anchor download is the desktop-style pattern docs/design.md §3.6
- * explicitly wants to avoid as the *primary* path, but it is the only
- * available recovery when the share sheet itself is unavailable.
+ * The fallback for a platform that cannot share files — **and only in an
+ * ordinary browser tab.**
+ *
+ * In an installed iOS web app this is not a fallback, it is a trap: WebKit
+ * 290847 (filed 2025-04-01, still NEW) reports that a download inside a
+ * standalone web app opens an "Open in…" splash which "prohibits further
+ * navigation inside the Web App" — no chrome, no back gesture, no Done — and
+ * the only way out is force-quitting and relaunching. Serving the file inline
+ * traps it the same way. Bug 236943 ("File download link in PWA cannot be
+ * exited") was closed MOVED in 2022, which is not the same as fixed, and
+ * nothing in the Safari 26 release notes addresses it. So an installed app
+ * gets the copy-the-text fallback instead: worse than a file, but visible,
+ * dismissible, and it loses nothing.
  */
 function downloadFile(file: File): void {
   const url = URL.createObjectURL(file)
@@ -138,6 +150,7 @@ function App({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   const [diagnosticsReport, setDiagnosticsReport] = useState<string | undefined>(undefined)
   const [pendingRestore, setPendingRestore] = useState<Library | undefined>(undefined)
+  const [backupFile, setBackupFile] = useState<File | undefined>(undefined)
   const [mixOpen, setMixOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [drillTarget, setDrillTarget] = useState<
@@ -210,6 +223,36 @@ function App({
       cancelled = true
     }
   }, [settingsStore])
+
+  /**
+   * Keeps a backup File built and ready **before** she taps Export (T031).
+   *
+   * This is not an optimization. WebKit expires transient activation across an
+   * `await` (webkit.org/blog/13862/the-user-activation-api/), and its own
+   * worked example is this exact shape: a click handler that awaits an async
+   * read and then calls `navigator.share()`, annotated "Oh no!!! transient
+   * activation expired". Reading the library inside the handler therefore
+   * makes Export a button that appears to work and produces nothing. Building
+   * the File here, off the gesture, is what lets `handleExportBackup` reach
+   * `share()` with no await in front of it.
+   *
+   * Rebuilt on every change to the library, so the ready file is never stale.
+   */
+  useEffect(() => {
+    if (decks === undefined) return
+    let cancelled = false
+    void deckStore.exportAll().then((library) => {
+      if (cancelled) return
+      setBackupFile(
+        new File([JSON.stringify(library, null, 2)], backupFilename(new Date()), {
+          type: 'application/json',
+        }),
+      )
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [deckStore, decks, mixes])
 
   /** Whole-Deck upsert into local state and the store — an unknown id is a
    * newly-created Deck (Import's "New Deck…" path shares this with
@@ -309,17 +352,44 @@ function App({
     if (selectedDeckId === id) setSelectedDeckId(undefined)
   }
 
-  async function handleExportBackup(): Promise<ExportOutcome> {
-    const library = await deckStore.exportAll()
-    const file = new File([JSON.stringify(library, null, 2)], backupFilename(new Date()), {
-      type: 'application/json',
-    })
-    const outcome = await shareBackupFile(file)
-    if (outcome === 'unsupported') {
+  /**
+   * Puts the prepared backup File somewhere she can keep it, and records that
+   * it happened (T031).
+   *
+   * Deliberately NOT `async`: the whole point is that `shareBackupFile` is
+   * reached with no await in front of it, so the tap's transient activation is
+   * still live when `navigator.share()` runs. Everything asynchronous happens
+   * after the share call, never before it.
+   *
+   * A tap before the first File is ready reports `cancelled` — nothing left
+   * the app, and nothing claims otherwise.
+   */
+  function handleExportBackup(): Promise<ExportOutcome> {
+    const file = backupFile
+    if (!file) return Promise.resolve<ExportOutcome>({ kind: 'cancelled' })
+
+    return shareBackupFile(file).then(async (outcome): Promise<ExportOutcome> => {
+      if (outcome === 'shared') {
+        recordExport()
+        return { kind: 'shared' }
+      }
+      if (outcome === 'cancelled') return { kind: 'cancelled' }
+      // 'unsupported' — no share sheet. See downloadFile's comment for why an
+      // installed app must not be handed a download here.
+      if (readInstallStateFromBrowser().installed) {
+        return { kind: 'unavailable', text: await file.text(), filename: file.name }
+      }
       downloadFile(file)
-      return 'downloaded'
-    }
-    return outcome
+      recordExport()
+      return { kind: 'downloaded' }
+    })
+  }
+
+  /** A backup file actually left the app, so the Backup age starts again from now. */
+  function recordExport(): void {
+    const timestamp = Date.now()
+    setSettings((current) => ({ ...current, lastExportAt: timestamp }))
+    void settingsStore.recordExport(timestamp)
   }
 
   async function handleRestoreFileChosen(file: File): Promise<RestoreFileResult> {
@@ -377,16 +447,6 @@ function App({
   }
 
   /**
-   * The first-run backup nudge (docs/design.md §3.6, T027) — one flag,
-   * dismissed once from wherever it's shown (Decks empty state or after a
-   * successful Scan), never shown again.
-   */
-  function handleDismissBackupNudge(): void {
-    setSettings((current) => ({ ...current, backupNudgeDismissed: true }))
-    void settingsStore.dismissBackupNudge()
-  }
-
-  /**
    * Diagnostics (T039): gathers the snapshot fresh every time it's opened —
    * counts and status can change between visits (a key just saved, a Clip
    * that just finished generating) — and formats it once, so the screen
@@ -406,6 +466,14 @@ function App({
   }
 
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
+
+  /**
+   * How long since her library was last safe somewhere else (T031). Measured
+   * from whichever of the automatic sync and her own last export happened
+   * later — a server-side copy is a backup, so a sync that just succeeded
+   * makes the answer honest without her doing anything.
+   */
+  const age = backupAge(lastBackupAt(settings.lastSyncAt, settings.lastExportAt), Date.now())
 
   function withSelectedDeck(fn: (deck: Deck) => Deck): Deck | undefined {
     if (!selectedDeck) return undefined
@@ -501,7 +569,9 @@ function App({
         previewText={previewText}
         onPreviewVoice={handlePreviewVoice}
         onChooseVoice={handleChooseVoice}
+        backupAge={age}
         onExportBackup={handleExportBackup}
+        onCopyText={(text) => copyText(text)}
         onRestoreFileChosen={handleRestoreFileChosen}
         onConfirmRestore={handleConfirmRestore}
         onCancelRestore={handleCancelRestore}
@@ -571,8 +641,6 @@ function App({
         scanReader={scanReader}
         onSave={handleImportSave}
         onCancel={() => setImportOpen(false)}
-        showBackupNudge={!settings.backupNudgeDismissed}
-        onDismissBackupNudge={handleDismissBackupNudge}
       />
     )
   }
@@ -582,6 +650,9 @@ function App({
       <DeckDetailScreen
         deck={selectedDeck}
         decks={decks}
+        backupAge={age}
+        onExportBackup={handleExportBackup}
+        onCopyText={(text) => copyText(text)}
         translator={translator}
         onAddPhraseCandidates={handleAddCandidates}
         onBack={() => setSelectedDeckId(undefined)}
@@ -626,8 +697,12 @@ function App({
       onOpenSettings={() => setSettingsOpen(true)}
       onOpenMix={() => setMixOpen(true)}
       onOpenImport={() => setImportOpen(true)}
-      showBackupNudge={!settings.backupNudgeDismissed}
-      onDismissBackupNudge={handleDismissBackupNudge}
+      backupAge={age}
+      onExportBackup={handleExportBackup}
+      onCopyText={(text) => copyText(text)}
+      onRestoreFileChosen={handleRestoreFileChosen}
+      onConfirmRestore={handleConfirmRestore}
+      onCancelRestore={handleCancelRestore}
     />
   )
 }
