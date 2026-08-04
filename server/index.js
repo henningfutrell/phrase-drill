@@ -1,8 +1,8 @@
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { createApp } from './app.js'
-import { createLibraryStore, createPool, waitForDatabase, extractPassword } from './db.js'
-import { createTokenVerifier } from './jwt-verifier.js'
+import { createLibraryStore, createAuthStore, createPool, waitForDatabase, extractPassword } from './db.js'
+import { createSessionAuth } from './session-auth.js'
 import { createLogger } from './logger.js'
 import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
@@ -28,9 +28,6 @@ export async function buildServer(env = process.env) {
   const distDir = env.DIST_DIR ?? fileURLToPath(new URL('../dist', import.meta.url))
   const elevenLabsApiKey = env.ELEVENLABS_API_KEY || null
   const anthropicApiKey = env.ANTHROPIC_API_KEY || null
-  const keycloakIssuer = env.KEYCLOAK_ISSUER ?? 'http://localhost:8081/realms/phrase-drill'
-  const keycloakJwksUri = env.KEYCLOAK_JWKS_URI ?? 'http://localhost:8081/realms/phrase-drill/protocol/openid-connect/certs'
-  const tokenAudience = env.TOKEN_AUDIENCE ?? 'phrase-drill-app'
 
   const logger = createLogger({ secrets: [elevenLabsApiKey, anthropicApiKey, extractPassword(databaseUrl)] })
   if (!elevenLabsApiKey) logger.warn('ELEVENLABS_API_KEY is not set — speech generation will return not-configured')
@@ -40,8 +37,12 @@ export async function buildServer(env = process.env) {
   await waitForDatabase(pool)
   const libraryStore = createLibraryStore(pool)
   await libraryStore.init()
+  const authStore = createAuthStore(pool)
+  await authStore.init()
 
-  const tokenVerifier = createTokenVerifier({ issuer: keycloakIssuer, audience: tokenAudience, jwksUri: keycloakJwksUri })
+  // T050: identity is a session row in Postgres, not a Keycloak-issued
+  // JWT — no issuer, no audience, no JWKS to configure or trust.
+  const sessionAuth = createSessionAuth({ userStore: authStore, sessionStore: authStore })
 
   const elevenLabsQueue = createBoundedQueue({ concurrency: 4 })
   const anthropicQueue = createBoundedQueue({ concurrency: 2 })
@@ -56,6 +57,10 @@ export async function buildServer(env = process.env) {
   const ttsLimiter = createRateLimiter({ capacity: 60, refillMs: 60_000 })
   const scanLimiter = createRateLimiter({ capacity: 10, refillMs: 60_000 })
   const libraryLimiter = createRateLimiter({ capacity: 30, refillMs: 60_000 })
+  // Hard, per-username: T050 "rate-limit login hard" — 5 attempts/60s means
+  // a brute force against one username gets nowhere before the account
+  // owner would notice.
+  const loginLimiter = createRateLimiter({ capacity: 5, refillMs: 60_000 })
 
   const handleRequest = createApp({
     libraryStore,
@@ -64,13 +69,14 @@ export async function buildServer(env = process.env) {
     ttsLimiter,
     scanLimiter,
     libraryLimiter,
+    loginLimiter,
     distDir,
     logger,
-    tokenVerifier,
+    sessionAuth,
   })
 
   const server = createServer(handleRequest)
-  return { server, port, logger, libraryStore }
+  return { server, port, logger, libraryStore, authStore }
 }
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`

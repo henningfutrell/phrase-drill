@@ -16,13 +16,6 @@ function render(ui: ReactElement) {
   })
 }
 
-function click(el: Element | null) {
-  if (!el) throw new Error('element not found')
-  act(() => {
-    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-  })
-}
-
 function typeInto(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
   setter.call(input, value)

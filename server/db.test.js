@@ -142,20 +142,21 @@ function fakeAuthPool() {
         if (!tablesCreated) throw new Error('relation "users" does not exist')
         const [username] = params
         const row = users.get(username)
-        return { rows: row ? [row] : [] }
+        // Column aliases (`AS "passwordHash"` etc.) are applied by Postgres
+        // itself, so a real query already comes back camelCase — this fake
+        // shapes its rows the same way `createAuthStore`'s SQL asks for.
+        return { rows: row ? [{ id: row.id, username: row.username, passwordHash: row.password_hash, createdAt: row.created_at }] : [] }
       }
 
       if (sql.startsWith('INSERT INTO users')) {
         if (!tablesCreated) throw new Error('relation "users" does not exist')
         const [id, username, passwordHash, createdAt] = params
-        for (const existing of users.values()) {
-          if (existing.username === username) {
-            const err = new Error('duplicate key value violates unique constraint "users_username_key"')
-            err.code = '23505'
-            throw err
-          }
+        if (users.has(username)) {
+          const err = new Error('duplicate key value violates unique constraint "users_username_key"')
+          err.code = '23505'
+          throw err
         }
-        users.set(id, { id, username, password_hash: passwordHash, created_at: createdAt })
+        users.set(username, { id, username, password_hash: passwordHash, created_at: createdAt })
         return { rows: [] }
       }
 
@@ -163,7 +164,7 @@ function fakeAuthPool() {
         if (!tablesCreated) throw new Error('relation "sessions" does not exist')
         const [tokenHash] = params
         const row = sessions.get(tokenHash)
-        return { rows: row ? [row] : [] }
+        return { rows: row ? [{ userId: row.user_id, expiresAt: row.expires_at }] : [] }
       }
 
       if (sql.startsWith('INSERT INTO sessions')) {

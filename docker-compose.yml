@@ -1,12 +1,11 @@
-# phrase-drill server (T041/T043). `docker compose up --build` runs the
-# whole stack locally with no cloud account: the app, Postgres (one
-# instance, two logical databases — see server/db.js), and Keycloak in
-# production mode fronting login. Set provider keys and admin passwords in
-# a `.env` file next to this one (git-ignored) — `.env.example` documents
-# every variable. The same file deploys unchanged on Coolify: point it at
-# this repo, set the secrets in Coolify's env UI, attach a volume for the
-# one Postgres-backed volume below (Keycloak stores its data in Postgres,
-# not a volume of its own).
+# phrase-drill server (T041/T050). `docker compose up --build` runs the
+# whole stack locally with no cloud account: the app and Postgres, nothing
+# else — the app authenticates its one user itself (T050), so there is no
+# third service to run or an account with a vendor to hold. Set provider
+# keys in a `.env` file next to this one (git-ignored) — `.env.example`
+# documents every variable. The same file deploys unchanged on Coolify:
+# point it at this repo, set the secrets in Coolify's env UI, attach a
+# volume for the Postgres data volume below.
 
 services:
   postgres:
@@ -17,7 +16,6 @@ services:
       POSTGRES_DB: '${POSTGRES_DB:-phrase_drill}'
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./scripts/postgres/init-multi-db.sh:/docker-entrypoint-initdb.d/init-multi-db.sh:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
       interval: 5s
@@ -25,57 +23,18 @@ services:
       retries: 20
     restart: unless-stopped
 
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.0
-    entrypoint: ['/opt/keycloak/entrypoint.sh']
-    environment:
-      KC_DB: postgres
-      KC_DB_URL: 'jdbc:postgresql://postgres:5432/keycloak'
-      KC_DB_USERNAME: '${POSTGRES_USER:-phrase_drill}'
-      KC_DB_PASSWORD: '${POSTGRES_PASSWORD:-phrase_drill}'
-      KC_HOSTNAME_STRICT: 'false'
-      KC_HTTP_ENABLED: 'true'
-      KC_HEALTH_ENABLED: 'true'
-      KEYCLOAK_ADMIN: '${KEYCLOAK_ADMIN:-admin}'
-      KEYCLOAK_ADMIN_PASSWORD: '${KEYCLOAK_ADMIN_PASSWORD:-admin}'
-      APP_REDIRECT_URI: '${APP_REDIRECT_URI:-http://localhost:8080/*}'
-    volumes:
-      - ./keycloak/realm-template.json:/opt/keycloak/realm-template.json:ro
-      - ./scripts/keycloak/entrypoint.sh:/opt/keycloak/entrypoint.sh:ro
-    ports:
-      - '8081:8080'
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ['CMD-SHELL', 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf "GET /realms/phrase-drill HTTP/1.1\r\nhost: localhost\r\nConnection: close\r\n\r\n" >&3 && grep -q "phrase-drill" <&3']
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
-
   phrase-drill:
     build:
       context: .
-      args:
-        VITE_KEYCLOAK_URL: '${VITE_KEYCLOAK_URL:-http://localhost:8081}'
-        VITE_KEYCLOAK_REALM: '${VITE_KEYCLOAK_REALM:-phrase-drill}'
-        VITE_KEYCLOAK_CLIENT_ID: '${VITE_KEYCLOAK_CLIENT_ID:-phrase-drill-app}'
     ports:
       - '8080:8080'
     environment:
       PORT: '8080'
       DATABASE_URL: 'postgres://${POSTGRES_USER:-phrase_drill}:${POSTGRES_PASSWORD:-phrase_drill}@postgres:5432/${POSTGRES_DB:-phrase_drill}'
-      KEYCLOAK_ISSUER: '${KEYCLOAK_ISSUER:-http://localhost:8081/realms/phrase-drill}'
-      KEYCLOAK_JWKS_URI: '${KEYCLOAK_JWKS_URI:-http://keycloak:8080/realms/phrase-drill/protocol/openid-connect/certs}'
-      TOKEN_AUDIENCE: '${TOKEN_AUDIENCE:-phrase-drill-app}'
       ELEVENLABS_API_KEY: '${ELEVENLABS_API_KEY:-}'
       ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
     depends_on:
       postgres:
-        condition: service_healthy
-      keycloak:
         condition: service_healthy
     restart: unless-stopped
 
