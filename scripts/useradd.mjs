@@ -9,7 +9,7 @@
 //   npm run useradd -- her
 //   (then type the password, Enter, Ctrl-D)
 //
-// An existing username is refused (server/db.js#createAuthStore.createUser
+// An existing username is refused (server/db.js#createAuthStore.users.create
 // raises Postgres's own unique-violation on `users.username`) — this script
 // never overwrites an account; use it to create one, not to reset a
 // password (also fine: same command, since a fresh id/hash simply won't be
@@ -54,7 +54,7 @@ async function main() {
   const authStore = createAuthStore(pool)
   await authStore.init()
 
-  const existing = await authStore.getUserByUsername(username)
+  const existing = await authStore.users.getByUsername(username)
   if (existing) {
     console.error(`user "${username}" already exists — this script never overwrites an account.`)
     console.error('To reset a password, delete the row from `users` and re-run this script (there is no admin UI, by design).')
@@ -63,7 +63,7 @@ async function main() {
     return
   }
 
-  await authStore.createUser({
+  await authStore.users.create({
     id: randomUUID(),
     username,
     passwordHash: hashPassword(password),

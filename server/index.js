@@ -41,8 +41,11 @@ export async function buildServer(env = process.env) {
   await authStore.init()
 
   // T050: identity is a session row in Postgres, not a Keycloak-issued
-  // JWT — no issuer, no audience, no JWKS to configure or trust.
-  const sessionAuth = createSessionAuth({ userStore: authStore, sessionStore: authStore })
+  // JWT — no issuer, no audience, no JWKS to configure or trust. T052:
+  // authStore.users/.sessions match createSessionAuth's seam name for name
+  // (server/auth-store-contract.test.js pins it) — this used to pass the
+  // same flat, mismatched object as both arguments and every login 500'd.
+  const sessionAuth = createSessionAuth({ userStore: authStore.users, sessionStore: authStore.sessions })
 
   const elevenLabsQueue = createBoundedQueue({ concurrency: 4 })
   const anthropicQueue = createBoundedQueue({ concurrency: 2 })
