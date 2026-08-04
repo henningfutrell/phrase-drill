@@ -83,8 +83,17 @@ const LAST_EXPORT_AT = 'lastExportAt'
 export function createIndexedDbSettingsStore(): SettingsStore {
   let dbPromise: Promise<IDBPDatabase> | undefined
 
+  // A failed open is forgotten again, so one refusal is not replayed for the
+  // rest of the session (T087; see `indexed-db-deck-store.ts` for why). What
+  // is at stake in this store is the pinned voice and `lastSyncAt` — and
+  // `lastSyncAt` is half the Backup age, so a settings store stuck on a
+  // remembered rejection is also a backup warning that can never be quieted
+  // by a sync that really happened.
   function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase()
+    dbPromise ??= openDatabase().catch((error: unknown) => {
+      dbPromise = undefined
+      throw error
+    })
     return dbPromise
   }
 
