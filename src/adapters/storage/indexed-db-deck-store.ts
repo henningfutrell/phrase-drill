@@ -1,9 +1,9 @@
 import type { IDBPDatabase } from 'idb'
 import type { Deck, DeckId, DeckStore, Library } from '../../domain'
-import { DECKS_STORE, MIXES_STORE, openDatabase } from './database'
-import { buildLibrary, migrateLibraryDecks, migrateLibraryMixes } from './library'
+import { DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE, openDatabase } from './database'
+import { buildLibrary, migrateLibraryDecks, migrateLibraryMixes, migrateLibraryTombstones } from './library'
 import { fromRecord, toRecord } from './mapping'
-import type { DeckRecord, MixRecord } from './migrations'
+import type { DeckRecord, MixRecord, Tombstone } from './migrations'
 import { requestPersistence } from './persistence'
 
 /**
@@ -62,32 +62,51 @@ export function createIndexedDbDeckStore(): DeckStore {
       await db.put(DECKS_STORE, record)
     },
 
+    /**
+     * Deleting a Deck writes a Tombstone in the same transaction (T060).
+     * One transaction because the two halves are one fact: a delete with no
+     * Tombstone is a delete every other device undoes on the next sync, and
+     * this is the only ordering under which that cannot happen — not even
+     * if the tab is closed between the two writes.
+     */
     async remove(id: DeckId): Promise<void> {
       const db = await getDatabase()
-      await db.delete(DECKS_STORE, id)
+      const tx = db.transaction([DECKS_STORE, TOMBSTONES_STORE], 'readwrite')
+      await tx.objectStore(DECKS_STORE).delete(id)
+      await tx
+        .objectStore(TOMBSTONES_STORE)
+        .put({ id, kind: 'deck', deletedAt: Date.now() } satisfies Tombstone)
+      await tx.done
     },
 
     async exportAll(): Promise<Library> {
       const db = await getDatabase()
       const decks = (await db.getAll(DECKS_STORE)) as DeckRecord[]
       const mixes = (await db.getAll(MIXES_STORE)) as MixRecord[]
-      return buildLibrary(decks, mixes, Date.now())
+      const tombstones = (await db.getAll(TOMBSTONES_STORE)) as Tombstone[]
+      return buildLibrary(decks, mixes, tombstones, Date.now())
     },
 
     async importAll(library: Library): Promise<void> {
       const migratedDecks = migrateLibraryDecks(library)
       const migratedMixes = migrateLibraryMixes(library)
+      const migratedTombstones = migrateLibraryTombstones(library)
       const db = await getDatabase()
-      const tx = db.transaction([DECKS_STORE, MIXES_STORE], 'readwrite')
+      const tx = db.transaction([DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
       const deckStore = tx.objectStore(DECKS_STORE)
       const mixStore = tx.objectStore(MIXES_STORE)
+      const tombstoneStore = tx.objectStore(TOMBSTONES_STORE)
       await deckStore.clear()
       await mixStore.clear()
+      await tombstoneStore.clear()
       for (const record of migratedDecks) {
         await deckStore.put(record)
       }
       for (const record of migratedMixes) {
         await mixStore.put(record)
+      }
+      for (const record of migratedTombstones) {
+        await tombstoneStore.put(record)
       }
       await tx.done
     },
