@@ -130,7 +130,10 @@ const DEFAULT_RETRY_MS = [5_000, 15_000, 60_000, 300_000] as const
  *   of the server copy and this device's, so pushing cannot remove a record
  *   only the server had.
  * - A pull that fails means this device cannot know what it would overwrite,
- *   so it does not push at all. Her change stays local and goes up later.
+ *   so it does not push at all. Her change stays local and goes up later. The
+ *   one exception is the server reporting that the copy it holds is not a
+ *   library at all (T089): that is the server's verdict on its own bytes, so
+ *   there is nothing readable to overwrite and the push is the repair.
  * - The merge is written back locally BEFORE the push. If the push then
  *   fails, what came down from the other device is already saved here.
  * - The local read and the local write are ONE step (T074). She is holding
@@ -215,7 +218,48 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     } catch {
       return { ok: false, reason: 'network' }
     }
-    if (!pulled.ok && pulled.reason !== 'not-found') return { ok: false, reason: pulled.reason }
+    // Two reasons are not failures of this round-trip, and they are the same
+    // reason: there is nothing on the server this device could lose by
+    // pushing. `not-found` is nobody has ever pushed. `server-copy-unreadable`
+    // is the server having read its own row and reported that the row is not a
+    // library envelope (T089) — the way OUT of a poisoned row, which T082
+    // closed the way IN to and left permanent.
+    //
+    // Permanent is not an overstatement: the pull failed, and the rule below
+    // says a failed pull skips the push, so the intact library on her phone
+    // could never go back up over the bad row. One lost phone and handwriting
+    // that exists nowhere else is gone. She cannot be asked to notice a subtle
+    // state and take an unusual action, so this repairs itself on the next
+    // round-trip and says nothing.
+    //
+    // Why this is safe, and why NO OTHER pull failure gets this treatment:
+    //
+    // - It is the server's verdict on its own stored bytes, reached after a
+    //   successful read, not this device's guess about a server it could not
+    //   reach. `network` means a copy that may be perfectly good is simply
+    //   unreachable, and pushing over that is how stale data overwrites good
+    //   data. The client keeps the two apart at the wire (status 500 AND this
+    //   server's own `library-unreadable` code); everything else is `network`.
+    // - Nothing readable is discarded. A row that is not an envelope has no
+    //   records in it to merge, so `remote` stays undefined below and the push
+    //   carries this device's library — which is the only readable copy there
+    //   is.
+    // - The bytes survive anyway: `libraryStore.put` archives every version it
+    //   replaces (T071/T082), so the poisoned row goes into the history rather
+    //   than being dropped on the floor.
+    // - The server had already decided this row is replaceable —
+    //   `storedSchemaVersion` reads an unreadable row as 0 precisely so it can
+    //   never lock a client out of syncing (T082). This device was the only
+    //   part of the system not acting on that decision.
+    //
+    // The residual: a future build could write an envelope shaped in a way
+    // THIS server's `isLibraryEnvelope` rejects, and an older phone would then
+    // push over it. That envelope has to lose `format` or `decks` to get
+    // there, which is a persisted-state change requiring a migration and a
+    // server deployed with it — and even then the replaced bytes are archived.
+    if (!pulled.ok && pulled.reason !== 'not-found' && pulled.reason !== 'server-copy-unreadable') {
+      return { ok: false, reason: pulled.reason }
+    }
 
     let remote: Library | undefined
     try {

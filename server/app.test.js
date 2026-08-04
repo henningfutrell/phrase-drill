@@ -835,10 +835,12 @@ describe('server app (integration, fake upstreams)', () => {
      * `response.json()` on a 200, it threw, and the sync engine died for the
      * whole session while the UI still said "syncing".
      *
-     * 500 is the honest answer — the fault is the server's — and the client
-     * already maps it to `network`, which is a *handled* result it retries,
-     * not an exception. The row itself is the last copy, so it is neither
-     * deleted nor overwritten here.
+     * 500 is the honest answer — the fault is the server's — and it is a
+     * *handled* result at the device, not an exception. Since T089 the body
+     * is a contract too: `library-unreadable` is the one verdict this server
+     * gives on its own stored bytes, and it is what licenses the device to
+     * push over the row (see the repair-loop test below). The row itself is
+     * the last copy, so it is neither deleted nor overwritten here.
      */
     it('answers 500 library-unreadable instead of streaming back a stored row that will not parse', async () => {
       await boot()
@@ -882,6 +884,42 @@ describe('server app (integration, fake upstreams)', () => {
       expect((await putLibrary(library(['d1']))).status).toBe(204)
       const versions = await libraryStore.versions(SUB)
       expect(versions[0].data).toBe('not json at all')
+    })
+
+    /**
+     * The repair loop, end to end (T089). The 500 above is the whole reason a
+     * poisoned row used to be permanent: the pull failed, and a device that
+     * could not read the server copy will not push over it, so the intact
+     * library on her phone could never go back up.
+     *
+     * The server half of the way out is already open — `storedSchemaVersion`
+     * answers 0 for an unreadable row, so the PUT is accepted, and the store
+     * archives the bytes it replaces. What this pins is that the loop closes:
+     * the same row that answered 500 answers 200 with her library afterwards,
+     * with nothing run by hand against the database.
+     *
+     * `{"error":"library-unreadable"}` is the exact body the device keys on
+     * (`src/adapters/sync/library-sync-client.ts`, `server-copy-unreadable`).
+     * Change this string and sync stops repairing itself silently, so it is
+     * asserted here rather than assumed.
+     */
+    it('a poisoned row is repaired by the next push: 500 library-unreadable, then 204, then her library back', async () => {
+      await boot()
+      await libraryStore.put(SUB, '{"schemaVersion":null}', Date.now())
+
+      const before = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(before.status).toBe(500)
+      expect(await before.json()).toEqual({ error: 'library-unreadable' })
+
+      expect((await putLibrary(library(['d1']))).status).toBe(204)
+
+      const after = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(after.status).toBe(200)
+      expect((await after.json()).decks.map((d) => d.id)).toEqual(['d1'])
+
+      // The poisoned bytes are kept, not dropped — they are the only record
+      // of what went wrong.
+      expect((await libraryStore.versions(SUB))[0].data).toBe('{"schemaVersion":null}')
     })
   })
 

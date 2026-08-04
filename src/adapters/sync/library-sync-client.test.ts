@@ -91,6 +91,49 @@ describe('createLibrarySyncClient', () => {
     await expect(client.pull()).resolves.toEqual({ ok: false, reason: 'network' })
   })
 
+  /**
+   * The one signal that licenses a repair push (T089). `500
+   * {"error":"library-unreadable"}` is `server/app.js` handleLibraryGet
+   * saying it read its own row and the row is not a library envelope — a
+   * fact about the stored bytes, not about this request. It has to survive
+   * the trip into the engine intact, because it is the only thing that tells
+   * "there is nothing readable there to lose" apart from "I could not reach
+   * what may be a perfectly good copy".
+   */
+  it('reports server-copy-unreadable when the server says the row it holds is not a library', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(500, { error: 'library-unreadable' }))
+    const { client } = makeClient(fetchImpl)
+
+    await expect(client.pull()).resolves.toEqual({ ok: false, reason: 'server-copy-unreadable' })
+  })
+
+  it('reports network on any other 500 — a server that fell over says nothing about the row it holds', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(500, { error: 'server-error' }))
+    const { client } = makeClient(fetchImpl)
+
+    await expect(client.pull()).resolves.toEqual({ ok: false, reason: 'network' })
+  })
+
+  it('reports network on a 500 whose body is not this server’s at all — a proxy error page is not a verdict on her library', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON at position 0')),
+    } as Response)
+    const { client } = makeClient(fetchImpl)
+
+    await expect(client.pull()).resolves.toEqual({ ok: false, reason: 'network' })
+  })
+
+  it('reports network on a 502 or 503 — an upstream hiccup is not a verdict on her library either', async () => {
+    for (const status of [502, 503]) {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(status, { error: 'library-unreadable' }))
+      const { client } = makeClient(fetchImpl)
+
+      await expect(client.pull()).resolves.toEqual({ ok: false, reason: 'network' })
+    }
+  })
+
   it('reports unauthorized when there is no session to pull with, rather than rejecting', async () => {
     const fetchImpl = vi.fn<typeof fetch>()
     const client = createLibrarySyncClient({

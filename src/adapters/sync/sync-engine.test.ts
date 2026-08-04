@@ -844,3 +844,86 @@ describe('createSyncEngine — a restore outranks a deletion the server still ho
     expect(h.local.decks).toEqual([])
   })
 })
+
+/**
+ * The way out of a poisoned server row (T089).
+ *
+ * T082 closed the way one gets written. Nothing closed the way out of one:
+ * `GET /api/library` answers 500 `library-unreadable` over a row it cannot
+ * parse, the pull fails, and rule 1 of the round-trip — a pull that failed
+ * means no push — means the intact copy on her phone can never go back up.
+ * The bad row is permanent, and the only readable copy of handwriting that
+ * exists nowhere else is one lost phone away from gone.
+ *
+ * The distinction this turns on, and the only thing that makes the push safe:
+ * **"the pull failed" and "the server read its row and reports it is not a
+ * library" are different facts.** The first is a server that might be holding
+ * something good this device simply could not fetch; pushing over it is how
+ * stale data overwrites good data. The second is the server itself asserting,
+ * after a successful read, that there is nothing readable there to lose. Only
+ * the second licenses a push, and only the server can state it.
+ */
+describe('createSyncEngine — a server copy the server itself cannot read (T089)', () => {
+  it('pushes this phone’s library over a copy the server reports as unreadable, with nothing asked of her', async () => {
+    const server = createFakeServer()
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    expect(server.pushes).toHaveLength(1)
+    expect(server.pushes[0]!.decks.map((d) => d.name)).toEqual(['Home'])
+    expect(h.engine.snapshot().state).toBe('idle')
+  })
+
+  it('merges against nothing when the server copy is unreadable — there is nothing readable to merge with', async () => {
+    const server = createFakeServer()
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    // Exactly what this phone holds, and the baseline records that as the new
+    // agreed state — the repair push is the agreement.
+    expect(h.local.decks.map((d) => d.id)).toEqual(['d1'])
+    expect(h.baseline.value!.decks.map((d) => d.id)).toEqual(['d1'])
+    expect(h.engine.snapshot().lastSyncAt).toBe(1_000)
+  })
+
+  it('still refuses to push when the pull merely failed — a copy this device could not read is not a copy the server cannot read', async () => {
+    const server = createFakeServer(library([deck('remote', 'Only on the server', 5)]))
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    server.pullResult = { ok: false, reason: 'network' }
+
+    h.engine.start()
+    await settle()
+
+    expect(server.pushes).toEqual([])
+    expect(server.library!.decks.map((d) => d.name)).toEqual(['Only on the server'])
+  })
+
+  it('still refuses to push when the body itself would not parse — a truncated transfer says nothing about the stored row', async () => {
+    const server = createFakeServer(library([deck('remote', 'Only on the server', 5)]))
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    h.faults.pull = new SyntaxError('Unexpected end of JSON input')
+
+    h.engine.start()
+    await settle()
+
+    expect(server.pushes).toEqual([])
+    expect(h.engine.snapshot().state).toBe('waiting')
+  })
+
+  it('is one round-trip, not a state she has to notice — no retry is left pending afterwards', async () => {
+    const server = createFakeServer()
+    const h = createHarness({ local: library([deck('d1', 'Home')]), server })
+    server.pullResult = { ok: false, reason: 'server-copy-unreadable' }
+
+    h.engine.start()
+    await settle()
+
+    expect(h.scheduler.pending).toEqual([])
+  })
+})

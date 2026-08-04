@@ -45,7 +45,7 @@ deleted the moment it's found, not left to expire on its own schedule.
 | POST   | `/api/tts`     | Speech for one phrase (`{text, voiceId, modelId, provider, lang}` → audio/mpeg), served from the shared Clip store when it holds it — see below. All five fields are required. | 8 KB       | 60 / 60s per session |
 | POST   | `/api/scan`    | Read handwritten phrases from an uploaded photo (image bytes → `{phrases}`). | 6 MB       | 10 / 60s per session |
 | POST   | `/api/translate` | Propose one or more Phrase Candidates translating one phrase (`{text, direction, deckName}` → `{candidates}`). | 4 KB | 30 / 60s per session |
-| GET    | `/api/library` | Fetch the stored library JSON for this user. `500 library-unreadable` if the stored row will not parse as a library envelope — see below. | —          | 30 / 60s per session |
+| GET    | `/api/library` | Fetch the stored library JSON for this user. `500 library-unreadable` if the stored row will not parse as a library envelope — a contract the device acts on, see below. | —          | 30 / 60s per session |
 | PUT    | `/api/library` | Replace the stored library JSON for this user, keeping the version it replaces. `409 stale-client` if the body's `schemaVersion` is *lower* than the stored envelope's — see below. | 8 MB | 30 / 60s per session |
 | \*     | anything else under `/api/` | `404 not-found`.                        | —          | —                  |
 | \*     | anything not under `/api/`  | Falls back to the built PWA (`dist/`, SPA fallback to `index.html`). | — | — |
@@ -218,15 +218,37 @@ Everything written after that stayed on the phone.
 It now parses and shape-checks the row before serving it — the same envelope
 test a `PUT` body must pass — and answers `500 {"error":"library-unreadable"}`
 otherwise, with an `error`-level log line carrying the key, the byte count and
-`updated_at`. `500` is the honest status (the fault is this server's) and the
-one that behaves: the device maps it to `network`, a *handled* result it
-retries, not an exception nothing catches.
+`updated_at`. `500` is the honest status — the fault is this server's, not the
+request's — and it is also a *handled* result at the device rather than an
+exception nothing catches.
 
 **The row is not repaired, deleted or overwritten by the read path.** It is
 the last copy of something even when what it is is unreadable. A `PUT` may
 still replace it — `storedSchemaVersion` answers `0` for an unparseable row,
 deliberately, so a corrupt row can never lock her out of syncing — and that
 `PUT` archives the corrupt bytes into `library_versions` on the way past.
+
+#### `library-unreadable` is a contract, not a log line (T089)
+
+The body matters as much as the status. `500 {"error":"library-unreadable"}`
+is the **only** thing this server says that is a verdict on its own stored
+bytes rather than on the request, and the device reads it as exactly that: a
+pull that returns it is the one pull failure after which the phone is allowed
+to push (`src/adapters/sync/library-sync-client.ts` →
+`server-copy-unreadable`, `docs/sync.md`). That is what makes a poisoned row
+repairable — the `PUT` path above was already open, and until T089 nothing
+ever walked through it, because a pull that failed skips the push and the
+intact library on her phone could never go back up.
+
+So this string is load-bearing. Answering `404` here instead was considered
+and refused (T082, upheld T089): `404` means "no server copy", the device
+already has a meaning for it, and conflating the two throws away the one loud
+signal that a row needs looking at. Answering a *generic* `500` — the
+catch-all `{"error":"server-error"}` — is not the same thing either, and the
+device treats it as `network` and does not push, because a server that fell
+over says nothing about the row it holds. Rename or drop the code and sync
+silently stops repairing itself; both sides assert the literal
+(`server/app.test.js`, `src/adapters/sync/library-sync-client.test.ts`).
 
 A valid response is still served byte for byte out of the stored row, not
 re-serialized, so nothing here can quietly reshape what she stored.

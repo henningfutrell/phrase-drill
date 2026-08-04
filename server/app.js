@@ -330,9 +330,25 @@ export function createApp({
    * finding 2). Everything she wrote after that stayed on the phone.
    *
    * 500 is the honest status: the fault is this server's, not the request's.
-   * It is also the one that behaves — the device maps every unrecognised
-   * status to `network`, a *handled* result it retries with backoff, rather
-   * than to an exception nothing catches.
+   * It is also a *handled* result at the device rather than an exception
+   * nothing catches.
+   *
+   * **The status AND this body are a contract (T089).** This is the only
+   * thing this server says that is a verdict on its own stored bytes rather
+   * than on the request, and the device reads it as exactly that: a pull that
+   * returns it is the one pull failure after which the phone is allowed to
+   * push (`src/adapters/sync/library-sync-client.ts` →
+   * `server-copy-unreadable`). That is what makes a poisoned row repairable
+   * rather than permanent — the PUT path below was already open, and until
+   * T089 nothing walked through it, because a pull that failed skips the push
+   * and the intact library on her phone could never go back up.
+   *
+   * So `library-unreadable` is load-bearing, and asserted on both sides of
+   * the boundary. Answering 404 here instead was refused in T082 and upheld
+   * in T089: 404 means "no server copy", the device already has a meaning for
+   * it, and conflating the two throws away the loud signal. A generic 500
+   * (`server-error`) is not this and must not be read as this — a server that
+   * fell over says nothing about the row it holds.
    *
    * The row is not repaired, deleted or overwritten here. It is the last copy
    * of something, even when what it is is unreadable; a PUT may still replace
