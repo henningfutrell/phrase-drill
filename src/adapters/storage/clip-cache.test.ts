@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Clip } from './clip-cache'
-import { idbOperations, openDB, resetFakeIdb } from './idb.test-support'
+import { idbDestructiveOperations, idbOperations, openDB, resetFakeIdb } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 
 vi.mock('idb', async () => {
@@ -425,14 +425,148 @@ describe('createIndexedDbClipCache', () => {
       expect(await db.get(CLIP_META_STORE, 'indexed')).toEqual({ hash: 'indexed', bytes: 400, lastUsedAt: 99 })
     })
 
-    it('asks nothing of the clip store once every clip is indexed', async () => {
+    it('reads keys, never audio, from the clip store once every clip is indexed', async () => {
       const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
       await cache.put(sizedClip('a', 400))
       idbOperations.length = 0
 
       await createIndexedDbClipCache({ maxBytes: 1_000_000 }).usage()
 
-      expect(idbOperations.filter((op) => op.store === CLIPS_STORE && op.op !== 'count')).toEqual([])
+      // Exactly one read of the clip store, and it is the key list. `get` or
+      // `getAll` here would be audio bytes pulled off disk through structured
+      // clone to answer a question about which hashes exist (docs/scale.md §3).
+      expect(idbOperations.filter((op) => op.store === CLIPS_STORE).map((op) => op.op)).toEqual(['getAllKeys'])
+    })
+  })
+
+  /**
+   * The ceiling has to keep binding after an upgrade, not only during a `put`
+   * (T076). Two ways it stopped.
+   *
+   * **The accounting drifts.** The ceiling is computed from the `clipMeta`
+   * index, and an index row can outlive the Clip it describes — an eviction
+   * interrupted between its two deletes leaves one behind. Once the two stores
+   * disagree, every number the ceiling is enforced against is wrong: bytes she
+   * no longer has are charged against it, `has()` claims audio that is gone,
+   * and — because the backfill is driven off a size comparison — an orphan can
+   * mask a genuinely unindexed Clip one-for-one, so a Clip on disk is never
+   * indexed and is re-fetched forever.
+   *
+   * **Nothing sweeps.** `evictDownToTarget` ran only from `put`, so a phone
+   * carrying a pre-T036 cache (modelled up to ~890 MB, docs/scale.md §1) stayed
+   * that fat until the next Clip was generated. Generate nothing, shrink never
+   * — and a fat origin is what iOS discards *whole*, her Phrases with it.
+   *
+   * `clipMeta` is derived, like the audio it indexes: deleting a row whose Clip
+   * is gone loses nothing, because the thing it described is already gone. The
+   * `decks`, `mixes` and `tombstones` stores are hers and are not reachable
+   * from here — asserted below, not promised.
+   */
+  describe('the ceiling still binds after an upgrade', () => {
+    function sizedClip(hash: string, bytes: number, createdAt = 1): Clip {
+      return { hash, bytes: new ArrayBuffer(bytes), mime: 'audio/mpeg', durationMs: 1000, createdAt }
+    }
+
+    /** Clips on disk with no index row beside them — the post-upgrade state. */
+    async function seedUnindexedClips(clips: readonly Clip[]): Promise<void> {
+      const db = await openDatabase()
+      for (const clip of clips) await db.put(CLIPS_STORE, clip)
+    }
+
+    /** An index row whose Clip is not there — what an interrupted eviction leaves. */
+    async function seedOrphanedIndexRow(hash: string, bytes: number, lastUsedAt: number): Promise<void> {
+      const db = await openDatabase()
+      await db.put(CLIP_META_STORE, { hash, bytes, lastUsedAt })
+    }
+
+    it('stops charging the ceiling for a Clip whose audio is gone', async () => {
+      const first = createIndexedDbClipCache({ maxBytes: 1_000_000 })
+      await first.put(sizedClip('gone', 400))
+      await first.put(sizedClip('here', 600))
+      // An eviction that got as far as the audio and no further.
+      await (await openDatabase()).delete(CLIPS_STORE, 'gone')
+
+      const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
+
+      expect(await cache.usage()).toEqual({ bytes: 600, clipCount: 1, maxBytes: 1_000_000 })
+      expect(await cache.has('gone')).toBe(false)
+      expect(await cache.has('here')).toBe(true)
+    })
+
+    it('deletes the index row the audio left behind, rather than carrying it forever', async () => {
+      const first = createIndexedDbClipCache({ maxBytes: 1_000_000 })
+      await first.put(sizedClip('gone', 400))
+      await first.put(sizedClip('here', 600))
+      await (await openDatabase()).delete(CLIPS_STORE, 'gone')
+
+      await createIndexedDbClipCache({ maxBytes: 1_000_000 }).usage()
+
+      const db = await openDatabase()
+      expect(await db.getAllKeys(CLIP_META_STORE)).toEqual(['here'])
+    })
+
+    it('indexes an unindexed Clip even when an orphaned row makes the two stores the same size', async () => {
+      // One row too many and one row too few: the two cancel, so a size
+      // comparison reports the index complete while it describes the wrong
+      // Clip entirely. She has audio for `real` and is told she has none.
+      await seedOrphanedIndexRow('gone', 4096, 1)
+      await seedUnindexedClips([sizedClip('real', 400, 2)])
+
+      const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
+
+      expect(await cache.usage()).toEqual({ bytes: 400, clipCount: 1, maxBytes: 1_000_000 })
+      expect(await cache.has('real')).toBe(true)
+      expect(await cache.has('gone')).toBe(false)
+    })
+
+    it('sweeps a cache found over the ceiling on that launch, without waiting for a put', async () => {
+      await seedUnindexedClips([sizedClip('oldest', 500, 1), sizedClip('middle', 500, 2), sizedClip('newest', 500, 3)])
+
+      const cache = createIndexedDbClipCache({ maxBytes: 1000 })
+      const usage = await cache.usage()
+
+      // MEASURED off the store, not off the cache's bookkeeping: the audio is
+      // actually gone from the disk, which is the only thing iOS can see.
+      const db = await openDatabase()
+      const resident = (await db.getAll(CLIPS_STORE)) as Clip[]
+      const residentBytes = resident.reduce((sum, clip) => sum + clip.bytes.byteLength, 0)
+      expect(residentBytes).toBeLessThanOrEqual(1000)
+      expect(usage.bytes).toBe(residentBytes)
+      // Least recently played goes first, on this path as on the put path.
+      expect(await cache.has('newest')).toBe(true)
+      expect(await cache.has('oldest')).toBe(false)
+      // And the index does not outlive the audio it indexed.
+      expect((await db.getAll(CLIP_META_STORE)).length).toBe(resident.length)
+    })
+
+    it('sweeping on launch cannot delete anything but a Clip and its index row', async () => {
+      const deckStore = createIndexedDbDeckStore()
+      await deckStore.save({ id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] })
+      const { decks } = await deckStore.exportAll()
+      await seedUnindexedClips([sizedClip('a', 500, 1), sizedClip('b', 500, 2), sizedClip('c', 500, 3)])
+      idbDestructiveOperations.length = 0
+
+      await createIndexedDbClipCache({ maxBytes: 1000 }).usage()
+
+      expect(idbDestructiveOperations.length).toBeGreaterThan(0)
+      expect([...new Set(idbDestructiveOperations.map((op) => op.store))].sort()).toEqual(
+        [CLIP_META_STORE, CLIPS_STORE].sort(),
+      )
+      expect(idbDestructiveOperations.some((op) => op.op === 'clear')).toBe(false)
+      expect((await deckStore.exportAll()).decks).toEqual(decks)
+    })
+
+    it('does not read a byte of audio to reconcile the index', async () => {
+      await seedOrphanedIndexRow('gone', 4096, 1)
+      const indexed = createIndexedDbClipCache({ maxBytes: 1_000_000 })
+      await indexed.put(sizedClip('here', 400))
+      idbOperations.length = 0
+
+      await createIndexedDbClipCache({ maxBytes: 1_000_000 }).usage()
+
+      // Deciding an index row is orphaned is a question about keys. Reading the
+      // Clip to answer it is the ~890 MB load T072 moved out of the upgrade.
+      expect(idbOperations.filter((op) => op.store === CLIPS_STORE).map((op) => op.op)).toEqual(['getAllKeys'])
     })
   })
 })
