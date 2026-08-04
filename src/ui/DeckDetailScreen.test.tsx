@@ -66,12 +66,21 @@ describe('DeckDetailScreen', () => {
     expect(onDrillDeck).toHaveBeenCalledTimes(1)
   })
 
-  it('renders each Phrase, French over English, in author order', () => {
+  it('renders each Phrase, English over French, in author order', () => {
     renderScreen(threePhraseDeck)
     const rows = container.querySelectorAll('[data-testid^="phrase-row-"]')
     expect(rows).toHaveLength(3)
     expect(rows[0].textContent).toContain('Bonjour')
     expect(rows[0].textContent).toContain('Hello')
+
+    // She works English -> French, so the English is the entry the row leads
+    // with and the French is the answer under it (T062).
+    const lines = rows[0].querySelectorAll('.phrase-text > *')
+    expect(lines).toHaveLength(2)
+    expect(lines[0].className).toBe('phrase-english')
+    expect(lines[0].textContent).toBe('Hello')
+    expect(lines[1].className).toBe('phrase-french')
+    expect(lines[1].textContent).toBe('Bonjour')
   })
 
   it('shows an empty-state prompt when the Deck has no Phrases', () => {
