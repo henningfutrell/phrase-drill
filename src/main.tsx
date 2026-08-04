@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
 import { createIndexedDbClipCache, createIndexedDbDeckStore, createIndexedDbSettingsStore } from './adapters/storage'
@@ -6,7 +6,8 @@ import { createServerSynthClient } from './adapters/audio/server-synth-client'
 import { createGenerationQueue } from './adapters/audio/generation-queue'
 import { createServerScanReader } from './adapters/vision/server-scan-reader'
 import { createLibrarySyncClient } from './adapters/sync/library-sync-client'
-import { createKeycloakAuth, AuthRequiredError } from './adapters/auth/keycloak-auth'
+import { createSessionAuth, AuthRequiredError } from './adapters/auth/session-auth'
+import { LoginScreen } from './ui/LoginScreen'
 import { createIndexedDbErrorLog, installErrorCapture, withAdapterErrorLogging } from './adapters/diagnostics'
 import './styles.css'
 
@@ -22,53 +23,43 @@ const clipCache = createIndexedDbClipCache()
 // Diagnostics (T039): the ring buffer that backs Diagnostics and the two
 // global error hooks that feed it. Installed here, at the composition root,
 // not scattered through components (AGENTS.md ports-and-adapters, T039).
-// T043: the device holds no provider key or library key to redact any more
-// — its one credential is a Keycloak access token, held in memory by
-// keycloak-auth.ts and never written to a Deck/Phrase/diagnostics record.
+// T050: the device holds no provider key to redact any more, and its one
+// credential — an opaque session token, held in `localStorage` by
+// session-auth.ts — is a bearer credential, not a server secret; logging
+// one is not the same failure class as logging a provider key.
 const errorLog = createIndexedDbErrorLog({ getSecrets: () => Promise.resolve([]) })
 installErrorCapture(errorLog)
 
-// Realm/client come from Vite build-time env (VITE_-prefixed, baked into
-// the static build — Dockerfile/docker-compose.yml `build.args`), same as
-// any other public OAuth client config. `redirectUri` is the page itself:
-// Keycloak sends the browser straight back to wherever the PWA is served.
-const auth = createKeycloakAuth({
-  issuerUrl: import.meta.env.VITE_KEYCLOAK_URL ?? 'http://localhost:8081',
-  realm: import.meta.env.VITE_KEYCLOAK_REALM ?? 'phrase-drill',
-  clientId: import.meta.env.VITE_KEYCLOAK_CLIENT_ID ?? 'phrase-drill-app',
-  redirectUri: `${window.location.origin}/`,
-})
+// T050: replaces the Keycloak/PKCE flow entirely — a plain login form
+// posted to this app's own /api/login, in exchange for an opaque session
+// token this device stores itself. `render()` is called once at boot and
+// again by `showApp()`/`showLogin()` below, whichever the current auth
+// state calls for; there is no client-side router, same as the rest of the
+// app (App.tsx switches screens by state, never a URL).
+const auth = createSessionAuth({ onUnauthorized: () => showLogin() })
 
-async function getAccessToken(): Promise<string> {
-  try {
-    return await auth.getAccessToken()
-  } catch (err) {
-    if (err instanceof AuthRequiredError) {
-      await auth.login() // full-page redirect — never resolves
-      return await new Promise<string>(() => {})
-    }
-    throw err
-  }
+function renderRoot(children: ReactNode): void {
+  createRoot(rootElement as HTMLElement).render(<StrictMode>{children}</StrictMode>)
 }
 
-async function boot(): Promise<void> {
-  // Completes the PKCE round trip if this load is Keycloak redirecting
-  // back with `?code=...&state=...`; a no-op on every other load.
-  await auth.handleRedirectCallback(window.location.href)
-  if (window.location.search.includes('code=')) {
-    window.history.replaceState({}, '', window.location.pathname)
-  }
-  try {
-    await auth.getAccessToken()
-  } catch (err) {
-    if (err instanceof AuthRequiredError) {
-      await auth.login()
-      return // login() redirects the page away; nothing below ever runs
-    }
-    throw err
-  }
+function showLogin(): void {
+  renderRoot(
+    <LoginScreen
+      onLogin={async (username, password) => {
+        const result = await auth.login(username, password)
+        if (result.ok) showApp()
+        return result
+      }}
+    />,
+  )
+}
 
-  const rawSynthClient = createServerSynthClient({ getAccessToken })
+async function getAccessToken(): Promise<string> {
+  return auth.getAccessToken()
+}
+
+function showApp(): void {
+  const rawSynthClient = createServerSynthClient({ getAccessToken, fetchImpl: auth.authFetch })
   const synthClient = {
     ...rawSynthClient,
     synthesize: withAdapterErrorLogging('synth', rawSynthClient.synthesize.bind(rawSynthClient), errorLog),
@@ -92,27 +83,38 @@ async function boot(): Promise<void> {
       }
     },
   })
-  const rawScanReader = createServerScanReader({ getAccessToken })
+  const rawScanReader = createServerScanReader({ getAccessToken, fetchImpl: auth.authFetch })
   const scanReader = {
     ...rawScanReader,
     read: withAdapterErrorLogging('scan', rawScanReader.read.bind(rawScanReader), errorLog),
   }
-  const librarySyncClient = createLibrarySyncClient({ getAccessToken })
+  const librarySyncClient = createLibrarySyncClient({ getAccessToken, fetchImpl: auth.authFetch })
 
-  createRoot(rootElement as HTMLElement).render(
-    <StrictMode>
-      <App
-        deckStore={deckStore}
-        settingsStore={settingsStore}
-        synthClient={synthClient}
-        generationQueue={generationQueue}
-        clipCache={clipCache}
-        scanReader={scanReader}
-        errorLog={errorLog}
-        librarySyncClient={librarySyncClient}
-      />
-    </StrictMode>,
+  renderRoot(
+    <App
+      deckStore={deckStore}
+      settingsStore={settingsStore}
+      synthClient={synthClient}
+      generationQueue={generationQueue}
+      clipCache={clipCache}
+      scanReader={scanReader}
+      errorLog={errorLog}
+      librarySyncClient={librarySyncClient}
+    />,
   )
+}
+
+async function boot(): Promise<void> {
+  try {
+    await auth.getAccessToken()
+    showApp()
+  } catch (err) {
+    if (err instanceof AuthRequiredError) {
+      showLogin()
+      return
+    }
+    throw err
+  }
 }
 
 void boot()

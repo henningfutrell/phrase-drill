@@ -85,7 +85,7 @@ describe('SettingsScreen', () => {
     expect(props.onOpenDiagnostics).toHaveBeenCalledTimes(1)
   })
 
-  it('no longer offers a Sync section — identity is a Keycloak login now, not a pasted key (T043)', () => {
+  it('no longer offers a Sync section — identity is a session login now, not a pasted key (T050)', () => {
     renderScreen()
     expect(container.querySelector('[data-testid="sync-section"]')).toBeNull()
     expect(container.querySelector('[data-testid="library-key-display"]')).toBeNull()

@@ -27,7 +27,7 @@ export interface LibrarySyncClient {
  * a wiped or replaced phone" (T041): pushes the full local `Library`
  * envelope (the same shape `DeckStore.exportAll()`/backup files already
  * use) to `/api/library`, and pulls it back down. Same-origin,
- * authenticated with a Keycloak access token (T043).
+ * authenticated with a session token (T050).
  */
 export function createLibrarySyncClient(deps: LibrarySyncClientDeps): LibrarySyncClient {
   const fetchImpl = deps.fetchImpl ?? fetch
