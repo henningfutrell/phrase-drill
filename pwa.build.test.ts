@@ -101,7 +101,7 @@ describe('PWA build output', () => {
   })
 
   // T041: this build now ships to two different roots — GitHub Pages under
-  // /phrase-drill/ (scripts/deploy.sh) and the Docker/Coolify server
+  // /phrase-drill/ (scripts/deploy.sh) and the Node server
   // (server/static.js) at a domain root. The app has no URL-based routing
   // (App.tsx switches screens by React state, never the path), so
   // vite.config.ts uses a relative base ('./'): every emitted path resolves

@@ -284,8 +284,8 @@ one is future work if `init()`'s `IF NOT EXISTS` approach stops being enough
 there yet). Until then, a schema change ships as: (1) a migration SQL step
 added to `init()` guarded by its own existence check (e.g. `ALTER TABLE ...
 ADD COLUMN IF NOT EXISTS`), so it's still safe to run against both an old and
-an already-migrated database, then (2) redeploy — Coolify (or `docker compose
-up --build`) restarts the `phrase-drill` container, `init()` runs the guarded
+an already-migrated database, then (2) redeploy — Render (or `docker compose
+up --build` locally) restarts the `phrase-drill` service, `init()` runs the guarded
 `ALTER`, the app comes back up. No manual `psql` step, no downtime beyond a
 normal redeploy.
 
@@ -330,7 +330,7 @@ Render's managed database — is `docs/deploy.md`.
 One JSON line per event on stdout (`server/logger.js`): `{level, ts, msg,
 ...fields}`. Every inbound request logs one `"request"` line at `info` with
 `method`, `path`, `status`, `ms`. `docker compose logs -f phrase-drill` (or
-Coolify's log viewer) shows them as they happen. Every field is redacted
+the service's Logs tab in the Render dashboard) shows them as they happen. Every field is redacted
 against both provider keys and the database password before the line is
 written, so a raw secret can never appear even if a deeper error message
 happened to contain one.
