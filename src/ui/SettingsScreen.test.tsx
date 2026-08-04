@@ -56,6 +56,7 @@ function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> =
     onConfirmRestore: vi.fn().mockResolvedValue(undefined),
     onCancelRestore: vi.fn(),
     onOpenDiagnostics: vi.fn(),
+    savedAudio: undefined as { bytes: number; clipCount: number; maxBytes: number } | undefined,
     ...overrides,
   }
   act(() => {
@@ -354,6 +355,68 @@ describe('SettingsScreen', () => {
 
       const error = container.querySelector('[data-testid="restore-error"]')
       expect(error).not.toBeNull()
+    })
+  })
+
+  /**
+   * T036 — the clip cache is bounded and evicts, so the app has to say what
+   * it is holding, what it will throw away, and what she will notice when it
+   * does. Every one of those is a thing she would otherwise discover as a
+   * phrase that mysteriously went quiet.
+   */
+  describe('saved audio', () => {
+    const USAGE = { bytes: 149_100_000, clipCount: 3190, maxBytes: 209_715_200 }
+
+    it('states how much audio it is holding, against the ceiling', () => {
+      renderScreen({ savedAudio: USAGE })
+      const usage = container.querySelector('[data-testid="saved-audio-usage"]')
+      expect(usage?.textContent).toMatch(/142 MB/)
+      expect(usage?.textContent).toMatch(/200 MB/)
+      expect(usage?.textContent).toMatch(/3,190/)
+    })
+
+    /**
+     * The meter is driven by `transform: scaleX()` rather than `width`, so that
+     * it composites instead of laying out every frame. That makes the fill a
+     * ratio between 0 and 1, not a percentage string, and nothing else in the
+     * screen would notice if the two were confused — a `scaleX(71)` reads as a
+     * full bar exactly like `scaleX(0.71)` does, because the track clips it.
+     */
+    it('fills the meter to the fraction of the ceiling actually in use', () => {
+      renderScreen({ savedAudio: USAGE })
+      const fill = container.querySelector<HTMLElement>('.audio-meter-fill')
+      const scale = Number(/scaleX\(([\d.]+)\)/.exec(fill?.style.transform ?? '')?.[1])
+      expect(scale).toBeCloseTo(USAGE.bytes / USAGE.maxBytes, 3)
+      expect(scale).toBeLessThanOrEqual(1)
+    })
+
+    it('never overfills the meter when the cache is over its ceiling', () => {
+      renderScreen({ savedAudio: { ...USAGE, bytes: USAGE.maxBytes * 2 } })
+      const fill = container.querySelector<HTMLElement>('.audio-meter-fill')
+      const scale = Number(/scaleX\(([\d.]+)\)/.exec(fill?.style.transform ?? '')?.[1])
+      expect(scale).toBe(1)
+    })
+
+    it('says the least-drilled audio goes first, and that her library never does', () => {
+      renderScreen({ savedAudio: USAGE })
+      const section = container.querySelector('[data-testid="saved-audio-section"]')
+      expect(section?.textContent).toMatch(/longest|least/i)
+      expect(section?.textContent).toMatch(/never/i)
+      expect(section?.textContent).toMatch(/phrases/i)
+    })
+
+    it('answers what happens offline when the audio she needs was cleared', () => {
+      renderScreen({ savedAudio: USAGE })
+      const note = container.querySelector('[data-testid="saved-audio-offline-note"]')
+      expect(note?.textContent).toMatch(/offline/i)
+      expect(note?.textContent).toMatch(/back|again|online/i)
+    })
+
+    it('says it does not know yet rather than showing a fabricated zero', () => {
+      renderScreen({ savedAudio: undefined })
+      expect(container.querySelector('[data-testid="saved-audio-usage"]')?.textContent).toMatch(
+        /checking|working|yet/i,
+      )
     })
   })
 })

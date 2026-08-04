@@ -24,7 +24,7 @@ falls out of sync with `CURRENT_SCHEMA_VERSION`.
 
 ## The stores
 
-One database (`phrase-drill`), one version number, six stores — all declared
+One database (`phrase-drill`), one version number, seven stores — all declared
 in the single `openDatabase()` upgrade path (`database.ts`):
 
 | Store | Holds | Added |
@@ -35,6 +35,37 @@ in the single `openDatabase()` upgrade path (`database.ts`):
 | `errors` | diagnostics ring buffer | v3 |
 | `mixes` | saved Mixes — Deck **ids**, never Phrases | v4 (T059) |
 | `tombstones` | what was deleted, and when — so sync can merge | v5 (T060) |
+| `clipMeta` | size index over `clips` — `{ hash, bytes, lastUsedAt }` | v6 (T036) |
+
+## The clip cache is bounded, and eviction cannot reach a Phrase
+
+`clips` grew forever until T036: ~890 MB at a 10,000-Phrase library
+(`docs/scale.md` §1), with nothing that ever shrank it. On iOS storage
+pressure is itself an eviction trigger, so an origin that fat is one Safari
+may discard **whole** — taking the Decks and Phrases with it. The audio cache
+was on course to destroy the library it exists to serve.
+
+`clip-cache.ts` now holds a ceiling (`DEFAULT_CLIP_CACHE_MAX_BYTES`, 200 MB)
+and evicts **least recently played** down to 90% of it whenever a `put`
+crosses the line. Two things make that safe rather than merely intended:
+
+- **`get()` is what counts as playing; `has()` is not.** `has` is the
+  readiness sweep's question, asked of every Phrase at every drill start — if
+  it counted as use, one sweep would reset every Clip's age at once and there
+  would be nothing left to order by.
+- **Eviction can name exactly two stores.** `delete` is only ever called with
+  `CLIPS_STORE` and `CLIP_META_STORE`. It is not a rule someone has to
+  remember: `clip-cache-eviction.test.ts` runs a 20,000-Clip cold fill and
+  asserts, against a log of every destructive IndexedDB operation the fake
+  received, that no other store was touched — and that the Decks, Phrases and
+  Mixes are byte-identical afterwards.
+
+`clipMeta` is a separate store rather than fields on the Clip because the
+whole point is that reading it is cheap: `getAll(CLIPS_STORE)` deserializes
+every `ArrayBuffer` off disk (`docs/scale.md` §3), which at a full cache is
+hundreds of MB to answer a question about numbers. `readyPhraseIds` and
+`has` now read the index too, which removes that whole-cache load from every
+drill start.
 
 `decks` and `mixes` are separate stores on purpose: it makes "deleting a Mix
 never touches its source Decks" — and its converse — structural rather than a

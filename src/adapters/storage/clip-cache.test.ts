@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { resetFakeIdb } from './idb.test-support'
+import type { Clip } from './clip-cache'
+import { openDB, resetFakeIdb } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 
 vi.mock('idb', async () => {
@@ -8,7 +9,8 @@ vi.mock('idb', async () => {
 })
 
 // Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbClipCache, computeClipHash } = await import('./clip-cache')
+const { createIndexedDbClipCache, computeClipHash, DEFAULT_CLIP_CACHE_MAX_BYTES } = await import('./clip-cache')
+const { CLIPS_STORE, CLIP_META_STORE, DB_NAME } = await import('./database')
 
 const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
@@ -157,6 +159,145 @@ describe('createIndexedDbClipCache', () => {
       const serialized = JSON.stringify(library)
       expect(serialized).not.toContain(hash)
       expect(serialized).not.toContain('clip-bytes-should-not-leak')
+    })
+  })
+
+  /**
+   * T036 — the cache is bounded and evicts, because on iOS an origin that
+   * grows to hundreds of MB is an origin the browser may evict *whole*,
+   * Phrases included. A Clip is regenerable; a Phrase is not, so the cache
+   * throws Clips away readily rather than risk the library that gives them
+   * meaning.
+   */
+  describe('the bound', () => {
+    function sizedClip(hash: string, bytes: number): Clip {
+      return { hash, bytes: new ArrayBuffer(bytes), mime: 'audio/mpeg', durationMs: 1000, createdAt: 1 }
+    }
+
+    /** A strictly increasing clock, so "least recently played" is unambiguous. */
+    function ticking(): () => number {
+      let t = 0
+      return () => (t += 1)
+    }
+
+    it('has a ceiling even when created with no options', async () => {
+      expect(DEFAULT_CLIP_CACHE_MAX_BYTES).toBeGreaterThan(0)
+      expect((await createIndexedDbClipCache().usage()).maxBytes).toBe(DEFAULT_CLIP_CACHE_MAX_BYTES)
+    })
+
+    it('states what it is holding: bytes, clip count, and the ceiling', async () => {
+      const cache = createIndexedDbClipCache({ maxBytes: 1000 })
+      await cache.put(sizedClip('a', 100))
+      await cache.put(sizedClip('b', 250))
+
+      expect(await cache.usage()).toEqual({ bytes: 350, clipCount: 2, maxBytes: 1000 })
+    })
+
+    it('counts a re-put of the same hash once, not twice', async () => {
+      const cache = createIndexedDbClipCache({ maxBytes: 1000 })
+      await cache.put(sizedClip('a', 100))
+      await cache.put(sizedClip('a', 300))
+
+      expect(await cache.usage()).toEqual({ bytes: 300, clipCount: 1, maxBytes: 1000 })
+    })
+
+    it('evicts the least recently played clip when a put crosses the ceiling', async () => {
+      const cache = createIndexedDbClipCache({ maxBytes: 1000, now: ticking() })
+      await cache.put(sizedClip('a', 400))
+      await cache.put(sizedClip('b', 400))
+      // She drills the Deck holding `a` again; `b` is the one she left behind.
+      await cache.get('a')
+
+      await cache.put(sizedClip('c', 400))
+
+      expect(await cache.has('b')).toBe(false)
+      expect(await cache.has('a')).toBe(true)
+      expect(await cache.has('c')).toBe(true)
+      expect((await cache.usage()).bytes).toBeLessThanOrEqual(1000)
+    })
+
+    it('does not treat a readiness check as playing a clip — only a real play counts', async () => {
+      const cache = createIndexedDbClipCache({ maxBytes: 1000, now: ticking() })
+      await cache.put(sizedClip('a', 400))
+      await cache.put(sizedClip('b', 400))
+      // `has` is the generation/readiness question, asked of every Phrase in
+      // the library. If it counted as use, the sweep would reset every clip's
+      // age at once and the policy would degrade to "evict whatever is last".
+      await cache.has('a')
+
+      await cache.put(sizedClip('c', 400))
+
+      expect(await cache.has('a')).toBe(false)
+      expect(await cache.has('b')).toBe(true)
+    })
+
+    it('never evicts the clip it was just asked to cache', async () => {
+      const cache = createIndexedDbClipCache({ maxBytes: 1000, now: ticking() })
+      await cache.put(sizedClip('a', 500))
+      await cache.put(sizedClip('b', 400))
+
+      await cache.put(sizedClip('c', 900))
+
+      expect(await cache.has('c')).toBe(true)
+      expect(await cache.has('a')).toBe(false)
+      expect(await cache.has('b')).toBe(false)
+    })
+
+    it('remembers when a clip was last played across a restart', async () => {
+      const clock = ticking()
+      const first = createIndexedDbClipCache({ maxBytes: 1000, now: clock })
+      await first.put(sizedClip('a', 400))
+      await first.put(sizedClip('b', 400))
+      await first.get('a')
+
+      // A new cache instance is what a fresh app launch builds — the ordering
+      // has to come off disk, not out of the instance that observed the play.
+      const second = createIndexedDbClipCache({ maxBytes: 1000, now: clock })
+      await second.put(sizedClip('c', 400))
+
+      expect(await second.has('b')).toBe(false)
+      expect(await second.has('a')).toBe(true)
+    })
+
+    it('reports an evicted Phrase as no longer ready, rather than claiming audio it threw away', async () => {
+      const cache = createIndexedDbClipCache({ maxBytes: 1600, now: ticking() })
+      const phrases = [
+        { id: 'p1', french: 'Bonjour', english: 'Hello' },
+        { id: 'p2', french: 'Salut', english: 'Hi' },
+      ]
+      for (const phrase of phrases) {
+        await cache.put(sizedClip(await computeClipHash({ ...VOICE, lang: 'fr-FR', text: phrase.french }), 500))
+        await cache.put(sizedClip(await computeClipHash({ ...VOICE, lang: 'en-US', text: phrase.english }), 500))
+      }
+
+      expect(await cache.readyPhraseIds(phrases, VOICE)).toEqual(new Set(['p2']))
+    })
+
+    it('counts clips cached before the bound existed, instead of reporting an empty cache', async () => {
+      // A schema-v5 database: the shape on her phone before this change — a
+      // `clips` store with real audio in it and no size index beside it. Her
+      // cache must not read as empty and must not have to be regenerated.
+      const legacy = await openDB(DB_NAME, 5, {
+        upgrade(db) {
+          db.createObjectStore('decks', { keyPath: 'id' })
+          db.createObjectStore('settings')
+          db.createObjectStore(CLIPS_STORE, { keyPath: 'hash' })
+          db.createObjectStore('errors', { keyPath: 'id' })
+          db.createObjectStore('mixes', { keyPath: 'id' })
+          db.createObjectStore('tombstones', { keyPath: 'id' })
+        },
+      })
+      await legacy.put(CLIPS_STORE, sizedClip('old-1', 4096))
+      await legacy.put(CLIPS_STORE, sizedClip('old-2', 2048))
+
+      const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
+
+      expect(await cache.usage()).toEqual({ bytes: 6144, clipCount: 2, maxBytes: 1_000_000 })
+      // Written down at upgrade time, not recomputed on every launch — the
+      // whole point of a separate index is that reading it never touches the
+      // audio bytes.
+      const upgraded = await openDB(DB_NAME, 6)
+      expect((await upgraded.getAll(CLIP_META_STORE)).length).toBe(2)
     })
   })
 })

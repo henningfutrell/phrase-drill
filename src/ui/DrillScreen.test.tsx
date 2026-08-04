@@ -48,8 +48,8 @@ function textOf(id: string): string | undefined {
   return testid(id)?.textContent ?? undefined
 }
 
-function ready(phrases: Phrase[], skippedCount = 0): DrillReadinessResult {
-  return { ready: phrases, skippedCount, canStart: phrases.length > 0 }
+function ready(phrases: Phrase[], skippedCount = 0, online = true): DrillReadinessResult {
+  return { ready: phrases, skippedCount, canStart: phrases.length > 0, online }
 }
 
 afterEach(() => {
@@ -105,7 +105,7 @@ describe('DrillScreen — readiness gate', () => {
       <DrillScreen
         title="Home"
         checkReadiness={() =>
-          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'no-voice' })
+          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'no-voice', online: true })
         }
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -127,7 +127,7 @@ describe('DrillScreen — readiness gate', () => {
       <DrillScreen
         title="Home"
         checkReadiness={() =>
-          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready' })
+          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready', online: true })
         }
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -139,6 +139,51 @@ describe('DrillScreen — readiness gate', () => {
 
     expect(textOf('drill-blocked')).toMatch(/isn't ready|not ready|still being made/i)
     expect(testid('drill-open-settings')).toBeNull()
+  })
+
+  /**
+   * T036 — audio can now be cleared to keep the cache under its ceiling, so
+   * "no audio" offline is not "it is still being made." Saying so would be a
+   * lie she would sit and wait on.
+   */
+  it('does not claim audio is on its way when there is no network to fetch it over', async () => {
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() =>
+          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready', online: false })
+        }
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    const blocked = textOf('drill-blocked') ?? ''
+    expect(blocked).toMatch(/online|connect/i)
+    expect(blocked).not.toMatch(/still being made|in a moment/i)
+    // And it says the thing that actually matters: nothing of hers was lost.
+    expect(blocked).toMatch(/phrases are safe|nothing.*lost/i)
+  })
+
+  it('says an excluded Phrase is waiting on a connection, not on generation, while offline', async () => {
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour], 3, false))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    const skipped = textOf('drill-skipped-count') ?? ''
+    expect(skipped).toMatch(/3 phrases/)
+    expect(skipped).toMatch(/online|connect/i)
   })
 
   it('only hands ready Phrases to the Drill — never the excluded ones', async () => {
