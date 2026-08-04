@@ -96,10 +96,9 @@ describe('two records under one id survive the store (T090)', () => {
         }),
       )
 
+      // `loadAll` reads the store in KEY order, not the order of the file.
       const stored = await store.loadAll()
-      expect(stored.map((deck) => deck.name)).toEqual(['Home', 'Work', 'Climbing'])
-      expect(new Set(stored.map((deck) => deck.id)).size).toBe(3)
-      expect(stored.map((deck) => deck.id)).toEqual(['d1', 'd1-3', 'd1-2'])
+      expect(stored.map((deck) => `${deck.id}:${deck.name}`)).toEqual(['d1:Home', 'd1-2:Climbing', 'd1-3:Work'])
     })
 
     it('converges: re-importing what was stored moves nothing', async () => {

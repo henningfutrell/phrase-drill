@@ -6,6 +6,7 @@ import {
   createDatabaseConnection,
   runTransaction,
 } from './database'
+import { splitDuplicateIds } from './duplicate-ids'
 import { buildLibrary, migrateLibraryDecks, migrateLibraryMixes, migrateLibraryTombstones } from './library'
 import { sameLibraryContent } from './library-identity'
 import { fromRecord, toRecord } from './mapping'
@@ -26,6 +27,12 @@ interface LibraryStores {
  * fact, so a replacement that left the Mixes behind would leave her library in
  * a state she never had. The caller owns the transaction and, through
  * `runTransaction`, the rollback.
+ *
+ * **One `put` per record, into stores keyed `{ keyPath: 'id' }`** — so two
+ * records under one id would collapse here, silently, and this is the exact
+ * line at which T086's merge fix used to be undone (T090). Both callers hand
+ * this `splitDuplicateIds` output for that reason; nothing arriving here may
+ * hold an id twice.
  */
 async function replaceAll(
   { deckStore, mixStore, tombstoneStore }: LibraryStores,
@@ -198,7 +205,13 @@ export function createIndexedDbDeckStore(): DeckStore {
           Date.now(),
         )
 
-        const next = update(stored)
+        // Split before anything else looks at it (T090): what is compared,
+        // what is written, and what is RETURNED must all be the same library,
+        // because the sync engine pushes what is returned and writes it into
+        // the Sync Baseline. Splitting only on the way to disk would leave the
+        // server handing the duplicate back forever and the baseline
+        // describing a device that does not exist.
+        const next = splitDuplicateIds(update(stored))
         const migratedDecks = migrateLibraryDecks(next)
         const migratedMixes = migrateLibraryMixes(next)
         const migratedTombstones = migrateLibraryTombstones(next)
@@ -212,7 +225,12 @@ export function createIndexedDbDeckStore(): DeckStore {
       })
     },
 
-    async importAll(library: Library): Promise<void> {
+    async importAll(incoming: Library): Promise<void> {
+      // A backup file she hand-edited is the one thing that mints a duplicated
+      // id, and a restore is the one path that clears all three stores first
+      // (T090). Split rather than refuse: the file is often the only copy of
+      // her phrases left, so she gets both Decks and one tap of tidying.
+      const library = splitDuplicateIds(incoming)
       const migratedDecks = migrateLibraryDecks(library)
       const migratedMixes = migrateLibraryMixes(library)
       const migratedTombstones = migrateLibraryTombstones(library)

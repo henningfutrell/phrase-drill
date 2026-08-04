@@ -227,6 +227,43 @@ backup file — which `parseLibraryFile` accepts, and which is a real path
 (`docs/backup.md`). She fixes the visible duplicate with one tap; a Deck
 deleted to tidy it up is handwriting that exists nowhere else.
 
+**And the store splits the duplicate rather than collapsing it (T090).** T086
+was half a fix on its own: `decks` and `mixes` are keyed `{ keyPath: 'id' }`
+and `replaceAll` writes one `put` per record, so two records under one id meant
+the second `put` overwrote the first. That reached her twice — a restore from a
+hand-edited file lost a whole Deck before the merge saw anything, and the
+write-back of the merged library collapsed the merge's own correct answer the
+instant it was persisted, which made T086 unobservable end to end.
+
+So `importAll` and `updateAll` both split first (`duplicate-ids.ts`): the
+second and later holder of an id keeps its content and takes `${id}-2`,
+`${id}-3`, …, skipping any candidate the library already holds. Deterministic,
+so repeated merges converge instead of minting a Deck per sync; collision-free,
+so the repair can never overwrite a record itself.
+
+**What that does to the phone/server disagreement.** `libraries.data` is whole
+JSON, so the server never collapsed the duplicate and the phone always did —
+the two disagreed about how many Decks exist. The split resolves it in the
+phone's favour and pushes the resolution up: `updateAll` returns the library it
+really stored, and the engine pushes that and writes it into the Sync Baseline
+(`outgoing = written.library`). One round-trip after a duplicate appears, both
+sides hold two Decks under two ids, the baseline agrees with both, and the next
+merge is a no-op. Returning the pre-split library instead would have left the
+server handing the duplicate back forever.
+
+Two costs, both accepted: a Mix naming the split Deck keeps the original id and
+so resolves to the first of the two (one tap to add the other), and her Deck
+name is not rewritten, so she sees two Decks under one name — which is the
+visible signal that something needs tidying.
+
+**Not covered: two Tombstones of different `kind` under one id.** The
+`tombstones` store is keyed by `id` alone, so a Deck Tombstone and a Mix
+Tombstone sharing an id still collapse there. A Tombstone's id names the record
+it deletes, so splitting it is not available; closing this needs that store's
+`keyPath` changed, which is a schema change against her data. The cost of
+leaving it is a deleted Deck or Mix coming back — one tap — and it reaches her
+only from the same hand-edited file. Nothing of hers is lost by it.
+
 **With no baseline** (the first sync ever, after IndexedDB eviction, or one
 written under a schema version this build does not read — see below) a Deck
 held by both sides keeps the later record's name and dates and the **union** of
