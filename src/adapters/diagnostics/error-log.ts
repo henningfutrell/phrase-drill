@@ -1,5 +1,4 @@
-import type { IDBPDatabase } from 'idb'
-import { openDatabase, ERRORS_STORE } from '../storage/database'
+import { createDatabaseConnection, ERRORS_STORE } from '../storage/database'
 import { redactSecrets } from './redact'
 
 /** One captured error, as stored and as shown in a diagnostic report. */
@@ -51,21 +50,13 @@ export interface ErrorLogDeps {
  * `ERROR_LOG_CAP`.
  */
 export function createIndexedDbErrorLog({ getSecrets }: ErrorLogDeps): ErrorLog {
-  let dbPromise: Promise<IDBPDatabase> | undefined
-
-  // A failed open is forgotten again, so one refusal is not replayed for the
-  // rest of the session (T087; see `adapters/storage/indexed-db-deck-store.ts`
-  // for why). This one compounds: the log is what a failure gets described in,
-  // so a log that gave up on its first bad moment records nothing about every
+  // A handle is given up again both when the open is refused (T087) and when
+  // the browser closes the connection (T077); `createDatabaseConnection` owns
+  // why. This one compounds: the log is what a failure gets described in, so a
+  // log that gave up on its first bad moment records nothing about every
   // failure after it — and the diagnostics report then describes a session
   // that looks quiet.
-  function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase().catch((error: unknown) => {
-      dbPromise = undefined
-      throw error
-    })
-    return dbPromise
-  }
+  const getDatabase = createDatabaseConnection()
 
   return {
     async record(entry: NewLogEntry): Promise<void> {

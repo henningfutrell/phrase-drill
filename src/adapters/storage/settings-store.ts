@@ -1,6 +1,5 @@
-import type { IDBPDatabase } from 'idb'
 import type { Voice } from '../../domain'
-import { openDatabase, SETTINGS_STORE } from './database'
+import { createDatabaseConnection, SETTINGS_STORE } from './database'
 
 /**
  * The pinned voice and small UI flags, as read from the `settings` store.
@@ -81,21 +80,13 @@ const LAST_EXPORT_AT = 'lastExportAt'
  * can never ride along on a Deck read or write.
  */
 export function createIndexedDbSettingsStore(): SettingsStore {
-  let dbPromise: Promise<IDBPDatabase> | undefined
-
-  // A failed open is forgotten again, so one refusal is not replayed for the
-  // rest of the session (T087; see `indexed-db-deck-store.ts` for why). What
-  // is at stake in this store is the pinned voice and `lastSyncAt` — and
-  // `lastSyncAt` is half the Backup age, so a settings store stuck on a
-  // remembered rejection is also a backup warning that can never be quieted
-  // by a sync that really happened.
-  function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase().catch((error: unknown) => {
-      dbPromise = undefined
-      throw error
-    })
-    return dbPromise
-  }
+  // A handle is given up again both when the open is refused (T087) and when
+  // the browser closes the connection (T077); `createDatabaseConnection` owns
+  // why. What is at stake in this store is the pinned voice and `lastSyncAt` —
+  // and `lastSyncAt` is half the Backup age, so a settings store stuck on a
+  // handle it should have dropped is also a backup warning that can never be
+  // quieted by a sync that really happened.
+  const getDatabase = createDatabaseConnection()
 
   async function put(key: string, value: unknown): Promise<void> {
     const db = await getDatabase()

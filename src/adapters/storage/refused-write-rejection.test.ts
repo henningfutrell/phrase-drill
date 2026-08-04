@@ -58,6 +58,20 @@ function deckRecord(id: string, name: string, phrases: Deck['phrases'] = []) {
   return { id, name, phrases: [...phrases], createdAt: 1, updatedAt: 1 }
 }
 
+/**
+ * The runner's own process, reached off `globalThis` rather than through
+ * `@types/node`: `tsc -b` compiles `src/` as browser code and has no Node
+ * types in scope, and this file is the only thing in `src/` that wants one.
+ */
+const runtime = (
+  globalThis as unknown as {
+    process: {
+      on(event: 'unhandledRejection', listener: (reason: unknown) => void): void
+      off(event: 'unhandledRejection', listener: (reason: unknown) => void): void
+    }
+  }
+).process
+
 let unhandled: unknown[] = []
 const collect = (reason: unknown): void => {
   unhandled.push(reason)
@@ -73,12 +87,12 @@ describe('a write the database refuses leaves no rejection for the crash handler
   beforeEach(() => {
     resetFakeIdb()
     unhandled = []
-    process.on('unhandledRejection', collect)
+    runtime.on('unhandledRejection', collect)
     vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
   })
 
   afterEach(() => {
-    process.off('unhandledRejection', collect)
+    runtime.off('unhandledRejection', collect)
   })
 
   it('update: the caller is told once, and nothing is left rejecting', async () => {
@@ -148,12 +162,12 @@ describe('a write that throws at request creation still rolls back (T077)', () =
   beforeEach(() => {
     resetFakeIdb()
     unhandled = []
-    process.on('unhandledRejection', collect)
+    runtime.on('unhandledRejection', collect)
     vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
   })
 
   afterEach(() => {
-    process.off('unhandledRejection', collect)
+    runtime.off('unhandledRejection', collect)
   })
 
   /**
