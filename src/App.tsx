@@ -59,12 +59,34 @@ import { SettingsScreen, type PreviewOutcome } from './ui/SettingsScreen'
 import type { ExportOutcome } from './ui/BackupStatus'
 import type { RestoreFileResult } from './ui/RestoreControl'
 import { DiagnosticsScreen } from './ui/DiagnosticsScreen'
+import { LibraryUnreadableScreen } from './ui/LibraryUnreadableScreen'
 import { WriteFailureNotice } from './ui/WriteFailureNotice'
 
 const EMPTY_SETTINGS: Settings = {
   voice: null,
   lastSyncAt: null,
   lastExportAt: null,
+}
+
+/**
+ * What a launch read that was REFUSED says (T083).
+ *
+ * It reuses the T069 notice rather than introducing a second way of speaking
+ * to her — one alert in the app is what keeps the alert worth reading, and a
+ * refused read is the same class of fact as a refused write: this phone's
+ * storage did not do what was asked. What it cannot reuse is the *screen*
+ * half of the T069 contract, because there is no rendered screen to roll back
+ * to at mount; that half is `LibraryUnreadableScreen`.
+ *
+ * The detail is given explicitly because the default ("this phone may be out
+ * of space") is a guess, and every wrong guess here sends her somewhere. The
+ * only honest statement is that the storage did not open — and, said out loud,
+ * that her phrases were not deleted, because the silence is what makes
+ * reinstalling look reasonable.
+ */
+const LIBRARY_UNREADABLE_NOTICE: { message: string; detail: string } = {
+  message: 'This phone could not open your saved phrases.',
+  detail: 'Your phrases have not been deleted. Close the app and open it again.',
 }
 
 /**
@@ -175,6 +197,11 @@ function App({
   // (T069). Holds the sentence naming what did not save; the standing
   // explanation is the notice's own.
   const [writeFailure, setWriteFailure] = useState<{ message: string; detail?: string } | undefined>(undefined)
+  // A launch read was REFUSED, not merely slow (T083). Distinct from
+  // `decks === undefined`, which is also true for the ordinary half-second
+  // before the first read lands — one of those is a spinner and the other is
+  // a dead end she needs a way out of.
+  const [libraryUnreadable, setLibraryUnreadable] = useState(false)
 
   // One Wake Lock port for the app's lifetime (T006 carried obligation:
   // hold the screen on for a Drill's duration). Stateless, so a single
@@ -211,11 +238,24 @@ function App({
     let cancelled = false
     // Local first, always: what is on this device is shown without waiting
     // for a network round-trip that may never answer.
-    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(([loadedDecks, loadedMixes]) => {
-      if (cancelled) return
-      setDecks(loadedDecks)
-      setMixes(loadedMixes)
-    })
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(
+      ([loadedDecks, loadedMixes]) => {
+        if (cancelled) return
+        setDecks(loadedDecks)
+        setMixes(loadedMixes)
+        setLibraryUnreadable(false)
+      },
+      () => {
+        // T083. This used to be a one-argument `.then`, so a database that
+        // would not open left `decks` undefined forever and the app rendered
+        // a bare `<main>`: no words, no controls, on the app holding phrases
+        // that exist nowhere else. See `LibraryUnreadableScreen` for why a
+        // blank screen here is the step before a destructive reinstall.
+        if (cancelled) return
+        setLibraryUnreadable(true)
+        setWriteFailure(LIBRARY_UNREADABLE_NOTICE)
+      },
+    )
     return () => {
       cancelled = true
     }
@@ -240,11 +280,24 @@ function App({
   useEffect(() => {
     if (revision === 0) return
     let cancelled = false
-    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(([loadedDecks, loadedMixes]) => {
-      if (cancelled) return
-      setDecks(loadedDecks)
-      setMixes(loadedMixes)
-    })
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(
+      ([loadedDecks, loadedMixes]) => {
+        if (cancelled) return
+        setDecks(loadedDecks)
+        setMixes(loadedMixes)
+        setLibraryUnreadable(false)
+      },
+      () => {
+        // Same refusal, different moment (T083). If the first read landed,
+        // what is on screen is real stored data and stays on screen — showing
+        // the recovery screen would hide her library to report a failed
+        // refresh. Only the notice is raised. If nothing has ever been read,
+        // `decks` is still undefined and the recovery screen renders.
+        if (cancelled) return
+        setLibraryUnreadable(true)
+        setWriteFailure(LIBRARY_UNREADABLE_NOTICE)
+      },
+    )
     return () => {
       cancelled = true
     }
@@ -750,6 +803,19 @@ function App({
     const age = backupAge(lastBackupAt(settings.lastSyncAt, settings.lastExportAt), Date.now())
 
     if (decks === undefined) {
+      // Refused, not merely slow (T083). The blank `<main>` is right for the
+      // half-second before the first read lands and wrong forever after a
+      // read that will never land — that is a dead end, and Restore is the
+      // only way out of it.
+      if (libraryUnreadable) {
+        return (
+          <LibraryUnreadableScreen
+            onRestoreFileChosen={handleRestoreFileChosen}
+            onConfirmRestore={handleConfirmRestore}
+            onCancelRestore={handleCancelRestore}
+          />
+        )
+      }
       return <main className="screen" />
     }
 
