@@ -104,6 +104,55 @@ opens and adopts the merged one after it closes. A voice she changes in that
 window can still be overwritten. It costs one tap in Settings (T067), and it is
 not a Phrase.
 
+### Her save is one step too (T075)
+
+T074 closed the window inside the round-trip. The same window was still open
+one level up, in the composition root, and it was worse there.
+
+`App.persist` wrote a whole `Deck` **built from React state**. React state is a
+view of the library, and a view is stale by the time a tap reaches storage: the
+merge writes a Phrase from her other phone between the render she tapped and
+the write it caused, and the rendered Deck is then put back over the merged one.
+The `libraryRevision` effect re-reads the stores, but an edit already in flight
+against the old snapshot still lands after it.
+
+The escalation is what made this data loss rather than a refresh bug. After the
+overwrite the **Sync Baseline holds that Phrase and the local Deck does not**,
+and `mergePhrases` reads exactly that as *this device deleted it* (T070). So
+the next round-trip removes the Phrase from the server as well. One dropped
+render becomes a permanent deletion on both phones.
+
+So a change to a Deck that already exists writes through **`DeckStore.update(id,
+apply)`** — the same shape as `updateAll`, at the scale of one Deck. The store
+reads the Deck and puts the result in one transaction, and `apply` is handed
+what is stored at that instant, never the Deck the render computed. `apply` is
+a pure domain function (`addPhrase`, `updatePhrase`, `renameDeck`,
+`reorderPhrase`, …), so it is run twice: once against the rendered Deck to
+change the screen immediately, once inside the transaction to decide what is
+written. The store's answer replaces the screen's as soon as it lands, so the
+merged Phrase appears without waiting for the next sync.
+
+- **`save` still exists, and is now only for a Deck that does not exist yet** —
+  a freshly generated id with nothing stored under it to overwrite. That is the
+  one condition under which a whole-Deck put is safe.
+- **Her edit is never dropped to protect the merged Phrase.** A Deck the store
+  no longer holds (deleted on the other phone, or by the merge) falls back to
+  what is on screen, so the edit lands and resurrects the Deck — one tap to
+  delete again, consistent with T070's rule that an edit outranks a delete.
+- **Nothing was added to what is stored.** `update` is a new way to write the
+  `decks` object store; no field, no version bump, no migration.
+
+`src/App.test.tsx` (`a save made while a merge is landing`) drives the real
+App, the real merge and the real round-trip with her write held in flight, and
+pins both halves: the merged Phrase survives on this phone and on the server,
+and so does hers.
+
+**Saved Mixes are not covered by this**, deliberately. `persistMix` still puts a
+whole Mix built from React state, so a Mix she edits while a merge is landing
+can lose the other side's *selection of Deck ids* — the same trade the merge
+already makes for Mixes (see Known gaps). It cannot lose a Phrase, and it cannot
+lose a whole Mix: the put names one Mix and touches no other record.
+
 ## The merge, and the Deck-level conflict T060 left open
 
 `src/domain/library-merge.ts` is pure and has three layers:
@@ -334,7 +383,10 @@ indicator is what surfaces it, and repairing the row is a server-side job.
   Deck's text wins and the other rendering is dropped. See above for why there
   is nowhere to put the loser.
 - **Mixes are still whole-record.** A Mix conflict loses one side's Deck
-  selection — a list of ids she can re-make in seconds, not text she wrote.
+  selection — a list of ids she can re-make in seconds, not text she wrote. The
+  same applies to a Mix she edits while a merge is landing: `persistMix` writes
+  a whole Mix from React state, which T075 stopped doing for Decks and did not
+  for Mixes (see above for why).
 - **A Phrase deleted on the other device comes back here** until this device
   deletes it too (T070). The fix is a Phrase-level deletion record, which is a
   change to the persisted `Library` envelope and to every write path — not a

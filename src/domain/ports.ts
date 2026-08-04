@@ -145,8 +145,40 @@ export interface Library {
 export interface DeckStore {
   loadAll(): Promise<Deck[]>
   get(id: DeckId): Promise<Deck | undefined>
-  /** Whole-aggregate put: insert or replace. No transaction spans stores. */
+  /**
+   * Whole-aggregate put: insert or replace. No transaction spans stores.
+   *
+   * For a Deck that does not exist yet — a freshly generated id, with nothing
+   * stored under it to overwrite. **Changing one that does exist goes through
+   * `update`**, and the difference is not stylistic: a put carries a whole
+   * Deck computed somewhere else and some time ago, and anything written under
+   * that id in between is gone (T075).
+   */
   save(deck: Deck): Promise<void>
+  /**
+   * Read one Deck, apply `apply` to it, and write the result back — as ONE
+   * indivisible step (T075). Resolves with the Deck that was written.
+   *
+   * This is `updateAll` at the scale of a single Deck, and it exists for the
+   * same reason. The composition root holds her library in React state, which
+   * is a VIEW: a merge can write a Phrase from her other phone between the
+   * render she tapped and the moment that tap reaches storage. `save` of a
+   * Deck built from that view then writes the Phrase away — and the Sync
+   * Baseline holds it while the local Deck does not, which `mergePhrases`
+   * reads as a deletion (T070) and takes to the server on the next round-trip.
+   * `apply` is instead handed the Deck as it is stored at the instant of the
+   * write, so her change and the merged Phrase both survive.
+   *
+   * `apply` must be pure and synchronous — the store is held open across it,
+   * and anything awaited in there reopens the window it exists to close. It
+   * must return a Deck with the id it was asked for.
+   *
+   * `stored` is `undefined` when this device no longer holds that Deck (a
+   * merge deleted it, or she did on the other phone). It is the caller's
+   * decision what that means; the composition root falls back to what is on
+   * screen, so an edit she is part-way through is never dropped by it.
+   */
+  update(id: DeckId, apply: (stored: Deck | undefined) => Deck): Promise<Deck>
   remove(id: DeckId): Promise<void>
   /** Whole-library snapshot: Decks, Mixes and Tombstones. Reads no settings
    * — the pinned voice is joined onto the envelope by name, outside this

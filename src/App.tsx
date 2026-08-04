@@ -372,15 +372,53 @@ function App({
     void settingsStore.load().then(setSettings, () => {})
   }
 
-  /** Whole-Deck upsert into local state and the store — an unknown id is a
-   * newly-created Deck (Import's "New Deck…" path shares this with
-   * `handleCreateDeck`), a known id replaces in place. */
-  function persist(deck: Deck) {
-    setDecks((current) => {
-      const list = current ?? []
-      return list.some((d) => d.id === deck.id) ? list.map((d) => (d.id === deck.id ? deck : d)) : [...list, deck]
-    })
+  /**
+   * A Deck that does not exist yet, into local state and the store. Its id was
+   * generated a moment ago, so there is nothing stored under it to overwrite —
+   * which is the only condition under which a whole-Deck put is safe here.
+   * Changing a Deck that already exists goes through `mutateDeck`.
+   */
+  function persistNewDeck(deck: Deck) {
+    setDecks((current) => [...(current ?? []), deck])
     persistLocally(deckStore.save(deck), `“${deck.name}” could not be saved on this phone.`)
+  }
+
+  /**
+   * Every change to a Deck that already exists (T075).
+   *
+   * The screen is changed straight away, from `base` — that is what makes the
+   * app feel like a phone. But **what reaches storage is `apply` run against
+   * the stored Deck, inside the store's own transaction**, never the Deck this
+   * render computed. React state is a view, and a view is stale by the time a
+   * tap lands: a merge can write a Phrase from her other phone between the
+   * render she tapped and the write. Putting the rendered Deck back overwrote
+   * that Phrase — and the Sync Baseline then held it while the local Deck did
+   * not, which `mergePhrases` reads as a deletion (T070) and carried to the
+   * server on the next round-trip. One dropped render, gone from both phones.
+   *
+   * `apply` is a pure domain function of a Deck, so running it twice — once
+   * for the screen, once for the store — is the same answer computed against
+   * two different Decks, which is exactly what is wanted. The store's answer
+   * wins as soon as it lands, so the merged Phrase appears without waiting for
+   * the next sync.
+   *
+   * A Deck the store no longer holds falls back to `base`: her edit is a
+   * keystroke, and losing it to protect a deletion made elsewhere is the same
+   * defect wearing different clothes.
+   *
+   * Returns what the SCREEN was set to — used only to queue audio generation
+   * for a Phrase she just typed, which needs the text and not the stored Deck.
+   */
+  function mutateDeck(base: Deck, apply: (deck: Deck) => Deck): Deck {
+    const shown = apply(base)
+    setDecks((current) => (current ?? []).map((d) => (d.id === shown.id ? shown : d)))
+    persistLocally(
+      deckStore.update(base.id, (stored) => apply(stored ?? base)).then((saved) => {
+        setDecks((current) => (current ?? []).map((d) => (d.id === saved.id ? saved : d)))
+      }),
+      `“${shown.name}” could not be saved on this phone.`,
+    )
+    return shown
   }
 
   /**
@@ -394,16 +432,22 @@ function App({
   }
 
   function handleCreateDeck(name: string) {
-    persist(createDeck(crypto.randomUUID(), name))
+    persistNewDeck(createDeck(crypto.randomUUID(), name))
   }
 
   function handleRenameDeck(id: DeckId, name: string) {
     const deck = (decks ?? []).find((d) => d.id === id)
     if (!deck) return
-    persist(renameDeck(deck, name))
+    mutateDeck(deck, (d) => renameDeck(d, name))
   }
 
-  /** Whole-Mix upsert into local state and the store, same shape as `persist`. */
+  /**
+   * Whole-Mix upsert into local state and the store. Still a whole-record put
+   * from React state — what T075 stopped doing for Decks and deliberately did
+   * not for Mixes: the loser of a Mix race is a selection of Deck ids she can
+   * re-make in seconds, and this write names one Mix, so it can reach no other
+   * record (docs/sync.md, Known gaps).
+   */
   function persistMix(mix: Mix) {
     setMixes((current) =>
       current.some((m) => m.id === mix.id) ? current.map((m) => (m.id === mix.id ? mix : m)) : [...current, mix],
@@ -600,9 +644,7 @@ function App({
 
   function withSelectedDeck(fn: (deck: Deck) => Deck): Deck | undefined {
     if (!selectedDeck) return undefined
-    const updated = fn(selectedDeck)
-    persist(updated)
-    return updated
+    return mutateDeck(selectedDeck, fn)
   }
 
   /**
@@ -626,13 +668,24 @@ function App({
   function handleImportSave(target: ImportTarget, drafts: readonly DraftPhrase[]): void {
     const base = target.kind === 'existing' ? (decks ?? []).find((d) => d.id === target.deckId) : createDeck(crypto.randomUUID(), target.name)
     if (!base) return
-    const newIds: PhraseId[] = []
-    const updated = drafts.reduce((deck, draft) => {
-      const id = crypto.randomUUID()
-      newIds.push(id)
-      return addPhrase(deck, { id, french: draft.french, english: draft.english })
-    }, base)
-    persist(updated)
+    // Minted once, outside `append`, because `append` runs twice — once for the
+    // screen and once inside the store's transaction (`mutateDeck`). Two runs
+    // minting two sets of ids would write every imported Phrase twice.
+    const newIds: PhraseId[] = drafts.map(() => crypto.randomUUID())
+    const append = (deck: Deck): Deck =>
+      drafts.reduce(
+        (current, draft, index) =>
+          addPhrase(current, { id: newIds[index]!, french: draft.french, english: draft.english }),
+        deck,
+      )
+
+    let updated: Deck
+    if (target.kind === 'existing') {
+      updated = mutateDeck(base, append)
+    } else {
+      updated = append(base)
+      persistNewDeck(updated)
+    }
     for (const id of newIds) queuePhraseGeneration(updated, id)
     setImportOpen(false)
     setSelectedDeckId(updated.id)
@@ -654,13 +707,14 @@ function App({
     for (const [deckId, group] of byDeck) {
       const base = (decks ?? []).find((d) => d.id === deckId)
       if (!base) continue
-      const newIds: PhraseId[] = []
-      const updated = group.reduce((deck, c) => {
-        const id = crypto.randomUUID()
-        newIds.push(id)
-        return addPhrase(deck, { id, french: c.french, english: c.english })
-      }, base)
-      persist(updated)
+      // Minted once — see `handleImportSave` for why `append` must not do it.
+      const newIds: PhraseId[] = group.map(() => crypto.randomUUID())
+      const updated = mutateDeck(base, (deck) =>
+        group.reduce(
+          (current, c, index) => addPhrase(current, { id: newIds[index]!, french: c.french, english: c.english }),
+          deck,
+        ),
+      )
       for (const id of newIds) queuePhraseGeneration(updated, id)
     }
   }

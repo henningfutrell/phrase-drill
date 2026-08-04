@@ -375,7 +375,6 @@ function createTestSyncEngine(
 }
 
 declare global {
-  // eslint-disable-next-line no-var
   var IS_REACT_ACT_ENVIRONMENT: boolean
 }
 
@@ -1892,7 +1891,8 @@ describe('App when a local write fails (T069)', () => {
 
   it('says a Deck could not be saved, and takes the unsaved Phrase back off the screen', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    store.save = async () => {
+    // Adding a Phrase to a Deck that exists is `update`, not `save` (T075).
+    store.update = async () => {
       throw quotaError()
     }
     await renderApp(store)
