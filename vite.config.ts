@@ -3,6 +3,7 @@ import { defineConfig } from 'vite'
 import { configDefaults } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import { readBuildSha } from './build-sha.ts'
 
 /**
  * The build stamp Diagnostics (T039) shows so a remote bug report can be
@@ -10,17 +11,15 @@ import { VitePWA } from 'vite-plugin-pwa'
  * she has today's build. Computed once here (build or dev-server start) via
  * `define`, so it's a compile-time constant `src/vite-env.d.ts` declares as
  * `__BUILD_SHA__`/`__BUILD_TIME__` — available under `npm test` too, since
- * Vitest shares this config file. Falls back to `'unknown'` rather than
- * failing the build if `.git` is unavailable (e.g. a source archive).
+ * Vitest shares this config file.
+ *
+ * The resolution order, and why a Docker build needs a second source at all,
+ * is `build-sha.ts` — which is a separate module precisely so the decision is
+ * covered by tests. This config file is not.
  */
-function readBuildSha(): string {
-  try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim()
-  } catch {
-    return 'unknown'
-  }
-}
-const buildSha = readBuildSha()
+const buildSha = readBuildSha(process.env, () =>
+  execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }),
+)
 const buildTime = new Date().toISOString()
 
 // https://vite.dev/config/

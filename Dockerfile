@@ -9,6 +9,15 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+# The commit this image is built from, for the Diagnostics build stamp
+# (build-sha.ts). Render injects RENDER_GIT_COMMIT into every Docker build,
+# but only into an ARG the Dockerfile declares — undeclared, it is silently
+# dropped, which is why the stamp read `unknown` on every deploy this app has
+# ever had. Declared here rather than at the top of the stage on purpose: it
+# changes on every commit, so an earlier position would invalidate the layer
+# cache for `npm ci` on every deploy. Empty for a plain `docker build`, which
+# build-sha.ts then answers with git or `unknown`.
+ARG RENDER_GIT_COMMIT
 RUN npm run build
 
 FROM node:26-alpine
