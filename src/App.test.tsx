@@ -2,7 +2,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import type { Deck, DeckStore, DraftPhrase, Library, PhraseCandidate, ScanReader, Translator } from './domain'
+import type { Deck, DeckStore, DraftPhrase, Library, Mix, MixStore, PhraseCandidate, ScanReader, Translator } from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
 import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
@@ -85,6 +85,25 @@ function createFakeDeckStore(initial: readonly Deck[] = []): DeckStore & { decks
       return { format: LIBRARY_FORMAT, schemaVersion: 1, exportedAt: 0, decks: [] }
     },
     async importAll() {},
+  }
+}
+
+/** In-memory MixStore fake — the real IndexedDB store is exercised in
+ * src/adapters/storage; App's wiring to the port is what these tests care
+ * about. */
+function createFakeMixStore(initial: readonly Mix[] = []): MixStore & { mixes: Map<string, Mix> } {
+  const mixes = new Map(initial.map((m) => [m.id, m]))
+  return {
+    mixes,
+    async loadAll() {
+      return [...mixes.values()]
+    },
+    async save(mix) {
+      mixes.set(mix.id, mix)
+    },
+    async remove(id) {
+      mixes.delete(id)
+    },
   }
 }
 
@@ -209,10 +228,12 @@ async function renderApp(
   errorLog: ErrorLog = createFakeErrorLog(),
   librarySyncClient: LibrarySyncClient = createFakeLibrarySyncClient(),
   translator: Translator = createFakeTranslator(),
+  mixStore: MixStore = createFakeMixStore(),
 ) {
   await act(async () => {
     root.render(
       <App
+        mixStore={mixStore}
         deckStore={store}
         settingsStore={settingsStore}
         synthClient={synthClient}
@@ -957,5 +978,134 @@ describe('App wired to Diagnostics (T039)', () => {
     await act(async () => click(container.querySelector('[data-testid="diagnostics-back"]')!))
 
     expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
+  })
+})
+
+describe('App wired to saved Mixes (T059)', () => {
+  const HOME: Deck = { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] }
+  const WORK: Deck = { id: 'd2', name: 'Work', phrases: [{ id: 'p2', french: 'Réunion', english: 'Meeting' }] }
+
+  async function renderWithMixes(
+    decks: readonly Deck[],
+    mixes: readonly Mix[],
+    ready: ReadonlySet<string> = new Set(['p1', 'p2']),
+  ) {
+    const deckStore = createFakeDeckStore(decks)
+    const mixStore = createFakeMixStore(mixes)
+    const sync = createFakeLibrarySyncClient()
+    await renderApp(
+      deckStore,
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(ready),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      sync,
+      // Slot 9 is `translator` (T057), slot 10 is `mixStore` (T059). Both
+      // branches added a parameter to the tail of this positional helper and
+      // each was correct alone; the merge is where they collided. Passed
+      // explicitly rather than relying on the default so the order is visible
+      // at the call site.
+      createFakeTranslator(),
+      mixStore,
+    )
+    return { deckStore, mixStore, sync }
+  }
+
+  it('saves a Mix through MixStore.save and lists it on the Mix screen', async () => {
+    const { mixStore } = await renderWithMixes([HOME, WORK], [])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d2"]')!))
+    act(() => click(container.querySelector('[data-testid="save-mix"]')!))
+    const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+    act(() => typeInto(input, 'Mornings'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+
+    expect(mixStore.mixes.size).toBe(1)
+    const saved = [...mixStore.mixes.values()][0]
+    expect(saved.name).toBe('Mornings')
+    expect(saved.deckIds).toEqual(['d1', 'd2'])
+    expect(typeof saved.id).toBe('string')
+    expect(saved.id.length).toBeGreaterThan(0)
+    expect(container.querySelector(`[data-testid="mix-row-${saved.id}"]`)).not.toBeNull()
+  })
+
+  it('loads saved Mixes on mount and drills one in a single tap', async () => {
+    await renderWithMixes([HOME, WORK], [{ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] }])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    await act(async () => click(container.querySelector('[data-testid="mix-row-m1"]')!))
+
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('2 phrases')
+  })
+
+  it('renames a saved Mix through MixStore.save, keeping its Decks', async () => {
+    const { mixStore } = await renderWithMixes([HOME, WORK], [{ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] }])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="rename-mix-m1"]')!))
+    const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+    act(() => typeInto(input, 'Evenings'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+
+    expect(mixStore.mixes.get('m1')).toEqual({ id: 'm1', name: 'Evenings', deckIds: ['d1', 'd2'] })
+  })
+
+  it('edits a saved Mix Deck selection through MixStore.save', async () => {
+    const { mixStore } = await renderWithMixes([HOME, WORK], [{ id: 'm1', name: 'Mornings', deckIds: ['d1'] }])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="edit-mix-m1"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d2"]')!))
+    await act(async () => click(container.querySelector('[data-testid="save-mix"]')!))
+
+    expect(mixStore.mixes.get('m1')).toEqual({ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] })
+  })
+
+  it('deleting a Mix removes it and never touches its source Decks', async () => {
+    const { deckStore, mixStore } = await renderWithMixes(
+      [HOME, WORK],
+      [{ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] }],
+    )
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="delete-mix-m1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-mix-m1"]')!))
+
+    expect(mixStore.mixes.size).toBe(0)
+    expect([...deckStore.decks.keys()].sort()).toEqual(['d1', 'd2'])
+    expect(deckStore.decks.get('d1')!.phrases).toHaveLength(1)
+    expect(container.querySelector('[data-testid="mix-row-m1"]')).toBeNull()
+  })
+
+  it('survives a Deck deleted out from under a saved Mix: the Mix still lists and drills what is left', async () => {
+    await renderWithMixes([HOME, WORK], [{ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] }])
+
+    // Delete Work from the Decks screen, then go to the Mix screen.
+    act(() => click(container.querySelector('[data-testid="delete-deck-d2"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-deck-d2"]')!))
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+
+    expect(container.querySelector('[data-testid="mix-row-m1"]')?.textContent).toContain('1 deck · 1 phrase')
+
+    await act(async () => click(container.querySelector('[data-testid="mix-row-m1"]')!))
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrases')
+  })
+
+  it('pushes the library to the server after a Mix is saved, so a new phone gets it', async () => {
+    const { sync } = await renderWithMixes([HOME, WORK], [])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="save-mix"]')!))
+    const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+    act(() => typeInto(input, 'Mornings'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await flushMicrotasks()
+
+    expect(sync.pushed.length).toBeGreaterThan(0)
   })
 })

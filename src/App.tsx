@@ -6,13 +6,26 @@ import type {
   DraftPhrase,
   Library,
   Mix,
+  MixId,
+  MixStore,
   Phrase,
   PhraseId,
   ScanReader,
   SpeechPort,
   Translator,
 } from './domain'
-import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updatePhrase } from './domain'
+import {
+  addPhrase,
+  createDeck,
+  createMix,
+  removePhrase,
+  renameDeck,
+  renameMix,
+  reorderPhrase,
+  resolveMixPhrases,
+  setMixDecks,
+  updatePhrase,
+} from './domain'
 import type { ClipCache, Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, parseLibraryFile } from './adapters/storage'
 import type { ErrorLog } from './adapters/diagnostics'
@@ -95,6 +108,7 @@ function downloadFile(file: File): void {
  */
 function App({
   deckStore,
+  mixStore,
   settingsStore,
   synthClient,
   generationQueue,
@@ -105,6 +119,7 @@ function App({
   translator,
 }: {
   deckStore: DeckStore
+  mixStore: MixStore
   settingsStore: SettingsStore
   synthClient: SynthClient
   generationQueue: GenerationQueue
@@ -115,6 +130,7 @@ function App({
   translator: Translator
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
+  const [mixes, setMixes] = useState<Mix[]>([])
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -161,16 +177,25 @@ function App({
           const reloaded = await deckStore.loadAll()
           if (!cancelled) {
             setDecks(reloaded)
+            // After the import, not before: `importAll` replaces saved
+            // Mixes along with the Decks (they travel in one envelope), so
+            // reading them any earlier reads what is about to be thrown
+            // away.
+            setMixes(await mixStore.loadAll())
             return
           }
         }
       }
-      if (!cancelled) setDecks(loaded)
+      const savedMixes = await mixStore.loadAll()
+      if (!cancelled) {
+        setDecks(loaded)
+        setMixes(savedMixes)
+      }
     })
     return () => {
       cancelled = true
     }
-  }, [deckStore, librarySyncClient])
+  }, [deckStore, mixStore, librarySyncClient])
 
   useEffect(() => {
     let cancelled = false
@@ -223,6 +248,40 @@ function App({
     persist(renameDeck(deck, name))
   }
 
+  /** Whole-Mix upsert into local state and the store, same shape as `persist`. */
+  function persistMix(mix: Mix) {
+    setMixes((current) =>
+      current.some((m) => m.id === mix.id) ? current.map((m) => (m.id === mix.id ? mix : m)) : [...current, mix],
+    )
+    void mixStore.save(mix).then(() => syncToServer())
+  }
+
+  function handleSaveMix(name: string, deckIds: readonly DeckId[]) {
+    persistMix(createMix(crypto.randomUUID(), name, deckIds))
+  }
+
+  function handleRenameMix(id: MixId, name: string) {
+    const mix = mixes.find((m) => m.id === id)
+    if (!mix) return
+    persistMix(renameMix(mix, name))
+  }
+
+  function handleEditMixDecks(id: MixId, deckIds: readonly DeckId[]) {
+    const mix = mixes.find((m) => m.id === id)
+    if (!mix) return
+    persistMix(setMixDecks(mix, deckIds))
+  }
+
+  /**
+   * Deleting a Mix reaches the `mixes` store and nothing else — the Decks
+   * it named are untouched, here and in the adapter (they are separate
+   * stores, so it is structural, not a promise).
+   */
+  function handleDeleteMix(id: MixId) {
+    setMixes((current) => current.filter((m) => m.id !== id))
+    void mixStore.remove(id).then(() => syncToServer())
+  }
+
   function handleDeleteDeck(id: DeckId) {
     setDecks((current) => (current ?? []).filter((d) => d.id !== id))
     void deckStore.remove(id).then(() => syncToServer())
@@ -254,12 +313,19 @@ function App({
     const library = pendingRestore
     if (!library) return
     setPendingRestore(undefined)
-    void deckStore.importAll(library).then(() => deckStore.loadAll()).then((loaded) => {
-      setDecks(loaded)
-      setSelectedDeckId(undefined)
-      setSettingsOpen(false)
-      syncToServer()
-    })
+    void deckStore
+      .importAll(library)
+      .then(() => Promise.all([deckStore.loadAll(), mixStore.loadAll()]))
+      .then(([loadedDecks, loadedMixes]) => {
+        // A restore replaces the whole library, saved Mixes included — read
+        // both back so the screens show what is actually stored, not what
+        // was stored a moment ago.
+        setDecks(loadedDecks)
+        setMixes(loadedMixes)
+        setSelectedDeckId(undefined)
+        setSettingsOpen(false)
+        syncToServer()
+      })
   }
 
   function handleCancelRestore() {
@@ -459,11 +525,20 @@ function App({
     return (
       <MixSelectScreen
         decks={decks}
+        mixes={mixes}
         onBack={() => setMixOpen(false)}
         onStartMix={(mix: Mix) => {
           setMixOpen(false)
-          setDrillTarget({ title: 'Mix', phrases: mix.phrases })
+          setDrillTarget({ title: mix.name, phrases: resolveMixPhrases(mix, decks) })
         }}
+        onStartSelection={(selected) => {
+          setMixOpen(false)
+          setDrillTarget({ title: 'Mix', phrases: selected.flatMap((deck) => deck.phrases) })
+        }}
+        onSaveMix={handleSaveMix}
+        onRenameMix={handleRenameMix}
+        onEditMixDecks={handleEditMixDecks}
+        onDeleteMix={handleDeleteMix}
       />
     )
   }

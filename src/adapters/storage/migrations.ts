@@ -1,7 +1,7 @@
-import type { DeckRecord, PhraseRecord } from '../../domain'
+import type { DeckRecord, MixRecord, PhraseRecord } from '../../domain'
 
-/** The current on-disk shape for a deck record, re-exported for local use. */
-export type { DeckRecord }
+/** The current on-disk shapes, re-exported for local use. */
+export type { DeckRecord, MixRecord }
 
 /** Schema version 1's shape — identical to `DeckRecord` today, since v1 is current. */
 export type DeckRecordV1 = DeckRecord
@@ -20,8 +20,12 @@ export type PhraseRecordV1 = PhraseRecord
  *
  * v2 -> v3 (T039): the `errors` store was added for the diagnostics ring
  * buffer. Deck records are untouched — see `DECK_MIGRATIONS[2]` below.
+ *
+ * v3 -> v4 (T059): the `mixes` store was added, for saved Mixes. Deck
+ * records are untouched — a Mix names its Decks by id and stores nothing
+ * inside them — see `DECK_MIGRATIONS[3]` below.
  */
-export const CURRENT_SCHEMA_VERSION = 3
+export const CURRENT_SCHEMA_VERSION = 4
 
 /** One step of a migration chain: a pure transform from a version-n record to version-(n+1). */
 export type RecordMigration = (record: never) => unknown
@@ -78,12 +82,20 @@ const v1ToV2: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigr
 const v2ToV3: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
 
 /**
+ * v3 -> v4: the `mixes` store landed beside `decks`. A saved Mix holds the
+ * *ids* of its Decks, so nothing was added to or taken from a deck record
+ * and this step is identity too. The database version still advances,
+ * because it and `Library.schemaVersion` are one number by design.
+ */
+const v3ToV4: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
+
+/**
  * Exported so `DECK_MIGRATIONS.length` can be checked against
  * `CURRENT_SCHEMA_VERSION` directly (persisted-shape.test.ts) — the two
  * must move together, and that test is what turns a mismatch into a build
  * failure instead of a runtime throw on the user's device.
  */
-export const DECK_MIGRATIONS: readonly RecordMigration[] = [neverExisted, v1ToV2, v2ToV3]
+export const DECK_MIGRATIONS: readonly RecordMigration[] = [neverExisted, v1ToV2, v2ToV3, v3ToV4]
 
 /**
  * Bring a deck record from `fromVersion` up to the current schema. The same
