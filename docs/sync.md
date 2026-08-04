@@ -36,9 +36,11 @@ requests**. There is no heartbeat.
 
 `src/adapters/sync/sync-engine.ts`, in order:
 
-1. **Pull.** If the pull fails for any reason other than `not-found`, stop —
-   without the server copy this device cannot know what a push would
-   overwrite. Her change stays on the phone and goes up next time.
+1. **Pull.** If the pull fails for any reason other than `not-found` or
+   `server-copy-unreadable`, stop — without the server copy this device cannot
+   know what a push would overwrite. Her change stays on the phone and goes up
+   next time. Those two exceptions are the same fact in two forms: there is
+   nothing readable on the server to overwrite (T089, below).
 2. **Read the baseline.** Written by this engine and by nothing else, so it
    races with nobody.
 3. **Merge and write it back locally, as one indivisible step, before
@@ -473,10 +475,67 @@ permanently unreadable `libraries.data` row, and a build that declares itself
 stale cannot repair either one. The local library is untouched: a pull that
 fails means no push, per rule 1 above.
 
-The residual gap: a row that really is permanently corrupt leaves the line
-reading `Saved on this phone · will sync when back online` forever, which is
-true about her phrases and misleading about the cause. The Backup age
-indicator is what surfaces it, and repairing the row is a server-side job.
+## The way out of a poisoned server row (T089)
+
+That was the whole answer until T089, and it left the row permanent. T082
+closed the way a row like `{"schemaVersion":null}` gets *written*; nothing
+closed the way out of one. `GET /api/library` answers 500 `library-unreadable`
+over a row it cannot parse (`docs/server.md`), the pull fails, rule 1 skips the
+push — so the intact library on her phone can never go back up over it. The
+line read `Saved on this phone · will sync when back online` forever, which was
+true about her phrases and silent about the fact that the only off-device copy
+was now a dead row. One lost phone and handwriting that exists nowhere else is
+gone.
+
+**The distinction the fix turns on.** "The pull failed" and "the server read
+its own row and reports it is not a library" are different facts, and only the
+second licenses a push:
+
+| The pull returned | What it says | Push? |
+| ----------------- | ------------ | ----- |
+| `network` | this device could not reach, or could not read, what may be a perfectly good server copy | **no** — this is how stale data overwrites good data |
+| `not-found` | nobody has ever pushed under this key | yes |
+| `server-copy-unreadable` | the server parsed its own row and it is not a library envelope | yes |
+
+`server-copy-unreadable` is produced by `library-sync-client.ts` from **status
+500 AND** a JSON body of `{"error":"library-unreadable"}`. Both halves are
+needed and the narrowness is the point, because the cost of a false positive is
+her library: 500 is also the catch-all `{"error":"server-error"}` and also what
+a proxy or the platform edge answers with an HTML page, and 502/503 are not
+this server speaking at all. Every one of those is `network`, and `network`
+does not push.
+
+**Why the push is safe.** A row that is not an envelope holds no records to
+merge, so `remote` is undefined and the merge is skipped exactly as it is for
+`not-found`: what goes up is this device's library, which is the only readable
+copy there is. Nothing readable is discarded. The unreadable bytes are not
+dropped either — `libraryStore.put` archives every version it replaces
+(T071/T082), so the poisoned row lands in `library_versions` for whoever wants
+to look at it. And the server had already decided such a row is replaceable:
+`storedSchemaVersion` reads it as `0` precisely so it cannot lock a client out
+of syncing (T082). The device was the only part of the system not acting on
+that decision.
+
+**Nothing is asked of her.** It repairs itself on the next round-trip and says
+nothing new — the sync line goes `syncing` → `idle` like any other round-trip.
+A repair that needed a non-technical user to notice a subtle state and take an
+unusual action is a repair that would not happen.
+
+**Answering 404 for an unreadable row was refused, again.** It is the cheap
+version of this fix and it was declined in T082 — `404` means "no server copy",
+the device already has a meaning for it, and answering it here silently
+discards a loud signal about a row that needs looking at. T089 upholds that.
+The server keeps saying 500 with its own error code, the error-level log line
+stays, and the *client* learns to read the signal instead of flattening it into
+`network`. The alternative also fails on its own terms: a proxy 404 or a route
+that moved would then read as "the server holds nothing", and this device would
+push over whatever is really there.
+
+**The residual.** A future build could write an envelope this server's
+`isLibraryEnvelope` rejects, and an older phone would then push over it. To get
+there the envelope has to lose `format` or `decks` — a persisted-state change
+needing a migration and a server deployed with it — and even then the replaced
+bytes are archived.
 
 ## Known gaps
 
