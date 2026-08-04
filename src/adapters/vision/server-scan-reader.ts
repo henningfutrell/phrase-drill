@@ -2,7 +2,7 @@ import type { DraftPhrase, ScanError, ScanReader } from '../../domain'
 import { type PreparedImage, prepareImageForUpload } from './image-prep'
 
 export interface ServerScanReaderDeps {
-  /** Reads the current Keycloak access token from wherever it is stored (T043 — never a provider key). */
+  /** Reads the current session token from wherever it is stored (T050 — never a provider key). */
   getAccessToken(): Promise<string>
   /** Re-encodes and downscales the photo before upload. Defaults to the canvas-based encoder. */
   prepareImage?: (image: Blob) => Promise<PreparedImage>
@@ -12,7 +12,7 @@ export interface ServerScanReaderDeps {
 
 /**
  * The `ScanReader` implementation for T041: talks to this app's own
- * `/api/scan`, same-origin, authenticated with a Keycloak access token —
+ * `/api/scan`, same-origin, authenticated with a session token (T050) —
  * never an Anthropic key, which the device no longer holds. Replaces
  * `claude-scan-reader.ts`; the domain-level `ScanReader`/`ScanError`/
  * `DraftPhrase` types are untouched (they were always domain ports, not this

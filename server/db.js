@@ -3,23 +3,15 @@ import pg from 'pg'
 const { Pool } = pg
 
 /**
- * The whole server-side persistence layer: one table, storing the same JSON
- * envelope `deckStore.exportAll()` already produces device-side
- * (`format`/`schemaVersion`/`exportedAt`/`decks`), keyed by the Keycloak
- * subject (`sub`, T043) — previously the device-generated 64-hex library
- * key, now deleted along with every caller of it.
- *
- * Postgres via `pg` (T043), replacing `node:sqlite`: Keycloak needs a real
- * database of its own to keep accounts across a restart, so Postgres is in
- * the stack regardless, and running SQLite beside it for the app's own data
- * would be two persistence models and two backup stories for one process.
- * One Postgres *instance*, two logical *databases* (`phrase_drill` for this
- * table, `keycloak` for Keycloak's own — `scripts/postgres/init-multi-db.sh`
- * creates both on the container's first boot) — not two schemas in one
- * database, because Keycloak's own migration tooling assumes it owns the
- * whole `public` schema of whatever database it's pointed at; sharing one
- * schema risks a migration collision neither side would expect. This
- * module only ever talks to `phrase_drill`.
+ * The library half of the server-side persistence layer: one table, storing
+ * the same JSON envelope `deckStore.exportAll()` already produces
+ * device-side (`format`/`schemaVersion`/`exportedAt`/`decks`), keyed by the
+ * session's user id (`sub`, T050) — previously the Keycloak subject, and
+ * before that the device-generated 64-hex library key; both deleted along
+ * with every caller of them. `createAuthStore` below is the other half
+ * (`users`/`sessions`, T050) — same one Postgres instance, one database
+ * (`phrase_drill`), no second logical database for a vendor identity
+ * provider's own schema any more.
  *
  * `createLibraryStore` takes an already-constructed pool (or, in tests, a
  * fake with the same `query`/`end` shape) rather than a connection string,
@@ -53,6 +45,75 @@ export function createLibraryStore(pool) {
          ON CONFLICT (library_key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
         [key, data, updatedAt],
       )
+    },
+
+    async close() {
+      await pool.end()
+    },
+  }
+}
+
+/**
+ * Identity storage for T050 (replacing Keycloak + the JWT it issued): two
+ * tables, `users` (one row per account, created only by `scripts/useradd.mjs`
+ * — there is no signup endpoint) and `sessions` (one row per issued token,
+ * looked up by the token's SHA-256 hash — never the token itself, so a
+ * database leak yields nothing usable). `server/session-auth.js` is the only
+ * caller; it owns hashing and expiry logic, this module is SQL only, same
+ * split as `createLibraryStore` above.
+ */
+export function createAuthStore(pool) {
+  return {
+    /** Idempotent: safe on every boot, including against a database that already has both tables. */
+    async init() {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY,
+          username TEXT UNIQUE NOT NULL,
+          password_hash TEXT NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          token_hash TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          created_at BIGINT NOT NULL,
+          expires_at BIGINT NOT NULL
+        )
+      `)
+    },
+
+    async getUserByUsername(username) {
+      const { rows } = await pool.query('SELECT id, username, password_hash AS "passwordHash", created_at AS "createdAt" FROM users WHERE username = $1', [
+        username,
+      ])
+      if (rows.length === 0) return null
+      return { id: rows[0].id, username: rows[0].username, passwordHash: rows[0].passwordHash, createdAt: Number(rows[0].createdAt) }
+    },
+
+    /** Throws (Postgres's own unique-violation, code `23505`) on a duplicate username — an existing account is an error, never a silent overwrite. */
+    async createUser({ id, username, passwordHash, createdAt }) {
+      await pool.query('INSERT INTO users (id, username, password_hash, created_at) VALUES ($1, $2, $3, $4)', [id, username, passwordHash, createdAt])
+    },
+
+    async createSession(tokenHash, userId, createdAt, expiresAt) {
+      await pool.query('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)', [
+        tokenHash,
+        userId,
+        createdAt,
+        expiresAt,
+      ])
+    },
+
+    async getSession(tokenHash) {
+      const { rows } = await pool.query('SELECT user_id AS "userId", expires_at AS "expiresAt" FROM sessions WHERE token_hash = $1', [tokenHash])
+      if (rows.length === 0) return null
+      return { userId: rows[0].userId, expiresAt: Number(rows[0].expiresAt) }
+    },
+
+    async deleteSession(tokenHash) {
+      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash])
     },
 
     async close() {
