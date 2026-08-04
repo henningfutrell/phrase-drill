@@ -883,6 +883,42 @@ describe('server app (integration, fake upstreams)', () => {
       const versions = await libraryStore.versions(SUB)
       expect(versions[0].data).toBe('not json at all')
     })
+
+    /**
+     * The repair loop, end to end (T089). The 500 above is the whole reason a
+     * poisoned row used to be permanent: the pull failed, and a device that
+     * could not read the server copy will not push over it, so the intact
+     * library on her phone could never go back up.
+     *
+     * The server half of the way out is already open — `storedSchemaVersion`
+     * answers 0 for an unreadable row, so the PUT is accepted, and the store
+     * archives the bytes it replaces. What this pins is that the loop closes:
+     * the same row that answered 500 answers 200 with her library afterwards,
+     * with nothing run by hand against the database.
+     *
+     * `{"error":"library-unreadable"}` is the exact body the device keys on
+     * (`src/adapters/sync/library-sync-client.ts`, `server-copy-unreadable`).
+     * Change this string and sync stops repairing itself silently, so it is
+     * asserted here rather than assumed.
+     */
+    it('a poisoned row is repaired by the next push: 500 library-unreadable, then 204, then her library back', async () => {
+      await boot()
+      await libraryStore.put(SUB, '{"schemaVersion":null}', Date.now())
+
+      const before = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(before.status).toBe(500)
+      expect(await before.json()).toEqual({ error: 'library-unreadable' })
+
+      expect((await putLibrary(library(['d1']))).status).toBe(204)
+
+      const after = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(after.status).toBe(200)
+      expect((await after.json()).decks.map((d) => d.id)).toEqual(['d1'])
+
+      // The poisoned bytes are kept, not dropped — they are the only record
+      // of what went wrong.
+      expect((await libraryStore.versions(SUB))[0].data).toBe('{"schemaVersion":null}')
+    })
   })
 
   describe('secrets never leak', () => {
