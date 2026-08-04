@@ -24,11 +24,27 @@ export interface DrillReadinessResult {
   readonly skippedCount: number
   readonly canStart: boolean
   readonly reason?: 'no-voice' | 'none-ready'
+  /** Whether there was a network when readiness was checked — see `blockedCopy`. */
+  readonly online: boolean
 }
 
-const BLOCKED_COPY: Record<'no-voice' | 'none-ready', string> = {
-  'no-voice': 'No voice has been chosen yet — pick one in Settings before drilling.',
-  'none-ready': "This drill's audio isn't ready yet — it's still being made. Try again in a moment.",
+/**
+ * Why the Drill will not start, in her words. `none-ready` has two meanings
+ * and they need opposite responses, so it has two lines (T036): online, the
+ * audio is being made and waiting is right; offline, the audio was cleared to
+ * keep the cache under its ceiling and waiting achieves nothing — it comes
+ * back with the connection. Saying "still being made" with no network is a
+ * promise the app cannot keep, and the one thing it must never leave in doubt
+ * is that nothing of hers was lost.
+ */
+function blockedCopy(reason: 'no-voice' | 'none-ready', online: boolean): string {
+  if (reason === 'no-voice') {
+    return 'No voice has been chosen yet — pick one in Settings before drilling.'
+  }
+  return online
+    ? "This drill's audio isn't ready yet — it's still being made. Try again in a moment."
+    : "This drill's audio isn't on this phone right now, and there's no connection to fetch it. " +
+        'It comes back on its own when you’re online again — your phrases are safe.'
 }
 
 const BEATS = [0, 1, 2, 3] as const
@@ -119,8 +135,14 @@ export type UnlockOutcome =
 
 type Phase =
   | { kind: 'checking' }
-  | { kind: 'blocked'; reason: 'no-voice' | 'none-ready' }
-  | { kind: 'start'; ready: readonly Phrase[]; skippedCount: number; unlockFailure?: UnlockOutcome & { ok: false } }
+  | { kind: 'blocked'; reason: 'no-voice' | 'none-ready'; online: boolean }
+  | {
+      kind: 'start'
+      ready: readonly Phrase[]
+      skippedCount: number
+      online: boolean
+      unlockFailure?: UnlockOutcome & { ok: false }
+    }
   | { kind: 'running'; skippedCount: number }
 
 /**
@@ -163,12 +185,13 @@ export function DrillScreen({
     void checkReadiness().then((result) => {
       if (cancelled) return
       if (!result.canStart) {
-        setPhase({ kind: 'blocked', reason: result.reason ?? 'none-ready' })
+        setPhase({ kind: 'blocked', reason: result.reason ?? 'none-ready', online: result.online })
       } else {
         setPhase({
           kind: 'start',
           ready: result.ready,
           skippedCount: result.skippedCount,
+          online: result.online,
           unlockFailure: undefined,
         })
       }
@@ -196,11 +219,11 @@ export function DrillScreen({
     }
   }, [onExit, releaseWakeLock])
 
-  async function handleStart(readyPhrases: readonly Phrase[], skippedCount: number) {
+  async function handleStart(readyPhrases: readonly Phrase[], skippedCount: number, online: boolean) {
     // Unlock first, inside this tap — see the `unlock` prop doc comment.
     const outcome = await unlock()
     if (!outcome.ok) {
-      setPhase({ kind: 'start', ready: readyPhrases, skippedCount, unlockFailure: outcome })
+      setPhase({ kind: 'start', ready: readyPhrases, skippedCount, online, unlockFailure: outcome })
       return
     }
 
@@ -282,7 +305,7 @@ export function DrillScreen({
           Back
         </button>
         <p data-testid="drill-blocked" className="drill-blocked">
-          {BLOCKED_COPY[phase.reason]}
+          {blockedCopy(phase.reason, phase.online)}
         </p>
         {phase.reason === 'no-voice' && onOpenSettings && (
           <button
@@ -308,15 +331,17 @@ export function DrillScreen({
         <p data-testid="drill-phrase-count">{phase.ready.length} phrases</p>
         {phase.skippedCount > 0 && (
           <p data-testid="drill-skipped-count" className="drill-skipped">
-            {phase.skippedCount} phrase{phase.skippedCount === 1 ? '' : 's'} have no audio yet —
-            skipped
+            {phase.skippedCount} phrase{phase.skippedCount === 1 ? '' : 's'}{' '}
+            {phase.online
+              ? 'have no audio yet — skipped'
+              : 'have no audio on this phone — skipped until you’re online'}
           </p>
         )}
         <button
           type="button"
           data-testid="drill-start"
           className="btn-primary"
-          onClick={() => void handleStart(phase.ready, phase.skippedCount)}
+          onClick={() => void handleStart(phase.ready, phase.skippedCount, phase.online)}
         >
           Start Drill
         </button>

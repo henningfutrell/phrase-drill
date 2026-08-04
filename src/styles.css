@@ -501,6 +501,23 @@ button:disabled {
   border-color: var(--gilt);
 }
 
+/* How full the saved-audio cache is (T036). A gilt hairline holding a bar of
+   thread, not a filled progress widget — ornament frames, it does not fill
+   (styles/tokens.css). The rule below it is the same hairline that closes a
+   sheet, so the meter reads as part of the lace, not as a control. */
+.audio-meter {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--gilt-dim);
+  overflow: hidden;
+}
+
+.audio-meter-fill {
+  height: 100%;
+  background: var(--gilt);
+  transition: width 400ms var(--ease-out);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sheet {
     animation: none;

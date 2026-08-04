@@ -14,6 +14,14 @@ export interface DrillReadiness {
   /** `false` means the Drill cannot start at all; `reason` says why. */
   readonly canStart: boolean
   readonly reason?: DrillReadinessReason
+  /**
+   * Whether there was a network when this sweep ran. Carried because since
+   * T036 a Clip can be *evicted*, so "this Phrase has no audio" is no longer
+   * always "it is being made right now" — offline it means "it was thrown
+   * away and cannot come back until there is a connection", and a screen that
+   * says the first when the second is true leaves her waiting on nothing.
+   */
+  readonly online: boolean
 }
 
 export interface DrillReadinessDeps {
@@ -39,17 +47,24 @@ export async function computeDrillReadiness(
   phrases: readonly Phrase[],
   deps: DrillReadinessDeps,
 ): Promise<DrillReadiness> {
+  const isOnline = deps.isOnline ? deps.isOnline() : defaultIsOnline()
+
   if (!deps.voice) {
     // Nothing to ask the cache about, and nothing to queue: a Phrase can't
     // be content-addressed without a voice, and no default is invented.
-    return { ready: [], skippedCount: phrases.length, canStart: false, reason: 'no-voice' }
+    return {
+      ready: [],
+      skippedCount: phrases.length,
+      canStart: false,
+      reason: 'no-voice',
+      online: isOnline,
+    }
   }
 
   const readyIds = await deps.clipCache.readyPhraseIds(phrases, deps.voice)
   const ready = phrases.filter((phrase) => readyIds.has(phrase.id))
   const unready = phrases.filter((phrase) => !readyIds.has(phrase.id))
 
-  const isOnline = deps.isOnline ? deps.isOnline() : defaultIsOnline()
   if (isOnline) {
     for (const phrase of unready) deps.generationQueue.enqueue(phrase)
   }
@@ -59,6 +74,7 @@ export async function computeDrillReadiness(
     skippedCount: unready.length,
     canStart: ready.length > 0,
     reason: ready.length === 0 ? 'none-ready' : undefined,
+    online: isOnline,
   }
 }
 

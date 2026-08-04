@@ -169,14 +169,13 @@ export, by construction, regardless of library size.
   deps.generationQueue.enqueue(phrase)` — synchronous loop, no batching, no
   cap). For a cold 10,000-Phrase library this fires 20,000 concurrent
   ElevenLabs calls in one pass (§2).
-- **Does anything bound the clip cache size, or evict old Clips?** No.
-  Read `clip-cache.ts`, `generation-queue.ts`, `database.ts` end to end:
-  `put()` only ever overwrites a Clip stored under the *same* content
-  hash (an edited Phrase or re-pinned voice orphans the old one, per the
-  design intent in the code comments) — nothing ever deletes an orphaned
-  Clip, nothing enforces a size cap, nothing runs an LRU sweep. The cache
-  grows monotonically forever. State plainly: **there is no eviction path
-  in this codebase.**
+- **Does anything bound the clip cache size, or evict old Clips?** ~~No.~~
+  **It did not; T036 closed this.** As measured here, `put()` only ever
+  overwrote a Clip stored under the *same* content hash — nothing deleted
+  an orphaned Clip, nothing enforced a size cap, nothing ran an LRU sweep,
+  and the cache grew monotonically forever. `clip-cache.ts` now carries a
+  200 MB ceiling and evicts least-recently-*played* Clips down to 90% of it
+  on every `put` that crosses the line. See §6 below.
 - **Is `computeClipHash` called per Phrase per drill start?** Yes, twice
   per Phrase, every time `readyPhraseIds` runs, every drill start (§3).
 
@@ -192,23 +191,58 @@ Ranked by how small an n it takes to hit, and how automatic the trigger is:
    (`generation-queue.ts`), so this is a **permanent** failure for whatever
    Clips lose the race, on the very first sweep — self-inflicted, and
    present even at scales well short of "thousands."
-2. **Clip cache growth — no bound, no eviction, hundreds of MB by
-   thousands of Phrases.** Modelled at 424.7 MB (5,000 Phrases) to 847.8 MB
-   (10,000 Phrases; §1), with **nothing in the code that would ever shrink
-   it** (§5). This is the storage-pressure risk the task named: at this
-   size it is squarely in the range where iOS treats an origin's storage as
-   evictable.
-3. **`readyPhraseIds`' whole-cache `getAll()` — a self-compounding cost
-   with #2.** Every drill start loads the *entire* clip cache (not just the
-   Phrases in play) into memory and hashes the *entire* Phrase library
-   passed to it. As #2 grows the cache, this sweep gets slower and heavier
-   in lockstep, on every single drill start, for every Deck, however small.
-   Measured hashing cost alone: 94–134 ms at 10,000 Phrases in Node; the
-   full on-device cost including structured-clone of ~848 MB of Clips could
-   not be measured here (§3) and is likely materially higher.
+2. ~~**Clip cache growth — no bound, no eviction, hundreds of MB by
+   thousands of Phrases.**~~ **Fixed in T036.** Modelled at 424.7 MB (5,000
+   Phrases) to 847.8 MB (10,000 Phrases; §1), with nothing in the code that
+   would ever shrink it. This was the storage-pressure risk the task named:
+   at that size it is squarely in the range where iOS treats an origin's
+   storage as evictable — and an origin evicted whole loses the Phrases too.
+   Now bounded at 200 MB, §6.
+3. **`readyPhraseIds`' whole-cache `getAll()`** — ~~a self-compounding cost
+   with #2~~ **fixed alongside it in T036.** Every drill start loaded the
+   *entire* clip cache (not just the Phrases in play) into memory and hashed
+   the *entire* Phrase library passed to it. It now reads the `clipMeta`
+   index — hashes and sizes, no audio — so the structured-clone cost is gone
+   entirely. The hashing cost is untouched and remains: 94–134 ms at 10,000
+   Phrases in Node, on every drill start, for every Deck however small.
 4. **Export/import — not a breaking point.** Stays small (1.2 MB at
    10,000 Phrases) and fast at every size tested, because Clips are
    structurally excluded.
+
+## 6. The bound that closed #2 (T036, measured)
+
+`clip-cache.ts` holds a ceiling of **200 MB** (`DEFAULT_CLIP_CACHE_MAX_BYTES`)
+and evicts **least recently played** Clips down to 90% of it whenever a `put`
+crosses the line. `get()` is what counts as playing; `has()` — the readiness
+sweep's question, asked of every Phrase at every drill start — deliberately
+does not, because counting it would reset every Clip's age at once.
+
+Why least-recently-played rather than oldest-first: she drills one Deck
+repeatedly and then moves to another. LRU on playback keeps the Deck in hand
+resident and lets the Deck she left behind go first. Oldest-first would evict
+the Deck she has drilled daily since the day she made it.
+
+Why 200 MB is affordable at all: T063 added a shared server-side clip store,
+so a re-fetch after eviction is usually a Postgres read, not an ElevenLabs
+generation. Evicting is close to free; having no ceiling costs the library.
+
+**Measured** by `src/adapters/storage/clip-cache-eviction.test.ts`, which runs
+the real cache against the same in-memory `idb` fake and a modelled
+10,000-Phrase library (part of `npm test`, ~1 s):
+
+| | |
+|---|---:|
+| Clips put (cold fill, 2 per Phrase) | 20,000 |
+| Modelled bytes put | 921,473,520 (878.8 MB) |
+| Ceiling | 209,715,200 (200.0 MB) |
+| **Resident after the fill, read back out of the `clips` store** | **206,916,720 (197.3 MB)** |
+| Clips resident | 4,512 (~2,256 Phrases) |
+| Clips evicted | 15,488 |
+| IndexedDB stores any delete touched | `clips`, `clipMeta` — and no other |
+
+The modelled total is slightly above §1's 889,010,240 because this file uses
+its own phrase generator; the formula (`estimatePauseDuration` × 16 bytes/ms)
+is the same one.
 
 ## Assumptions and gaps, named plainly
 

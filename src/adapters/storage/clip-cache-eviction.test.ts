@@ -115,7 +115,13 @@ describe('clip cache eviction against a modelled 10,000-Phrase library (T036)', 
     }
     await mixStore.save({ id: 'm1', name: 'Mornings', deckIds: deckIds.slice(0, 3) })
 
-    const librarySnapshotBefore = JSON.stringify(await deckStore.exportAll())
+    // `exportedAt` is stamped fresh on every export, so the comparison is over
+    // what is stored — the Decks, their Phrases, and the Tombstones.
+    async function storedLibrary(): Promise<string> {
+      const { decks, tombstones } = await deckStore.exportAll()
+      return JSON.stringify({ decks, tombstones })
+    }
+    const librarySnapshotBefore = await storedLibrary()
     const mixesSnapshotBefore = JSON.stringify(await mixStore.loadAll())
 
     // The whole modelled library's audio, cached one Clip at a time — the
@@ -161,7 +167,7 @@ describe('clip cache eviction against a modelled 10,000-Phrase library (T036)', 
     expect((await db.getAll(CLIP_META_STORE)).length).toBe(resident.length)
 
     // The library is untouched — byte for byte.
-    expect(JSON.stringify(await deckStore.exportAll())).toBe(librarySnapshotBefore)
+    expect(await storedLibrary()).toBe(librarySnapshotBefore)
     expect(JSON.stringify(await mixStore.loadAll())).toBe(mixesSnapshotBefore)
   }, 300_000)
 

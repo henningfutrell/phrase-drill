@@ -27,6 +27,22 @@ const PREVIEW_ERROR_COPY: Record<Exclude<PreviewOutcome, { ok: true }>['reason']
   network: "That didn't play — check the connection and try again.",
 }
 
+/**
+ * What the clip cache is holding, as this screen needs it — mirrors
+ * `ClipCacheUsage` without importing the adapter type.
+ */
+export interface SavedAudioUsage {
+  readonly bytes: number
+  readonly clipCount: number
+  readonly maxBytes: number
+}
+
+/** MB, with a decimal only where one carries information. */
+function formatMb(bytes: number): string {
+  const mb = bytes / (1024 * 1024)
+  return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB`
+}
+
 /** What `onExportBackup` resolved to, for the one-line status shown after. */
 export type ExportOutcome = 'shared' | 'cancelled' | 'downloaded'
 
@@ -63,6 +79,7 @@ export function SettingsScreen({
   onConfirmRestore,
   onCancelRestore,
   onOpenDiagnostics,
+  savedAudio,
 }: {
   onBack: () => void
   voice: VoiceInfo | null
@@ -79,6 +96,8 @@ export function SettingsScreen({
   onConfirmRestore: () => void
   onCancelRestore: () => void
   onOpenDiagnostics: () => void
+  /** `undefined` while the cache has not answered yet — never shown as zero. */
+  savedAudio: SavedAudioUsage | undefined
 }) {
   const [exportStatus, setExportStatus] = useState<string | null>(null)
   const [restoreError, setRestoreError] = useState<string | null>(null)
@@ -236,6 +255,47 @@ export function SettingsScreen({
             {previewError}
           </p>
         )}
+      </section>
+
+      {/* T036 — the clip cache is bounded and evicts, so the app says what it
+          is holding, what goes first, and what she will actually notice when
+          it does. Ornament stays in the header rule and the meter's gilt
+          hairline; the numbers sit on plain ground (docs/design.md). */}
+      <section className="settings-section" data-testid="saved-audio-section">
+        <h2 className="settings-section-title">Saved audio</h2>
+        <p className="settings-status settings-status--calm" data-testid="saved-audio-usage">
+          {savedAudio
+            ? `${formatMb(savedAudio.bytes)} of ${formatMb(savedAudio.maxBytes)} · ${savedAudio.clipCount.toLocaleString('en-GB')} clips`
+            : 'Working out how much is saved…'}
+        </p>
+        {savedAudio && (
+          <div
+            className="audio-meter"
+            role="img"
+            aria-label={`${formatMb(savedAudio.bytes)} of ${formatMb(savedAudio.maxBytes)} used`}
+          >
+            <div
+              className="audio-meter-fill"
+              style={{
+                width: `${Math.min(100, Math.round((savedAudio.bytes / savedAudio.maxBytes) * 100))}%`,
+              }}
+            />
+          </div>
+        )}
+        <p className="settings-help">
+          This phone keeps the spoken audio for your phrases, so a drill works with no
+          signal at all.
+        </p>
+        <p className="settings-help">
+          There's a limit to how much it keeps. When it fills up, the clips you haven't
+          drilled in longest are cleared first. Your phrases, decks and mixes are never
+          cleared — only the audio, which is made again.
+        </p>
+        <p className="settings-help" data-testid="saved-audio-offline-note">
+          If you're offline and a phrase's audio has been cleared, that phrase sits out
+          the drill and the others carry on. It comes back on its own the next time
+          you're online.
+        </p>
       </section>
 
       <section className="settings-section settings-section--backup" data-testid="backup-section">

@@ -184,7 +184,20 @@ ahead of a Drill through a TTS API and cached as **Clips** (glossary), so "the
 Phrase exists but its audio doesn't yet" is a real state a live-synthesis
 readout never had to name. If some but not all Phrases are ready, the start
 card shows the count skipped (`N phrases have no audio yet — skipped`) rather
-than blocking the whole Drill. If the
+than blocking the whole Drill.
+
+**Both of those lines have an offline form, and it is not cosmetic (T036).**
+Since the clip cache became bounded, a Phrase can lose its audio to
+**Eviction** (glossary) as well as never have had any. Online the difference
+does not matter — the readiness sweep queues regeneration either way. Offline
+it is the whole answer: nothing is being made, waiting achieves nothing, and
+it returns with the connection. So with no network the blocked copy reads
+`This drill's audio isn't on this phone right now, and there's no connection
+to fetch it. It comes back on its own when you're online again — your phrases
+are safe.`, and the skipped line reads `N phrases have no audio on this phone
+— skipped until you're online`. The last clause of the blocked line is the
+one that must never be dropped: the failure mode this whole change exists to
+prevent is her concluding that her phrases are gone. If the
 one-tap unlock itself fails, the start card stays up with `Couldn't start audio
 on this phone. Tap Start Drill to try again.` rather than moving on.
 
@@ -453,7 +466,21 @@ account.
      sheet actually pins the new voice, because every cached Clip is
      content-addressed by voice (glossary) and a change orphans the whole
      cache.
-2. **Backup** — still present alongside server sync, in its own card
+2. **Saved audio (T036)** — the one card that reports rather than offers a
+   choice, because the clip cache is now bounded and evicts, and something
+   that quietly deletes has to say so. Three facts, in her words: how much is
+   held against the ceiling (`142 MB of 200 MB · 3,190 clips`, over a gilt
+   hairline meter — ornament frames, it does not fill); that when it fills up
+   the clips she hasn't drilled in longest go first, and that her phrases,
+   decks and mixes are never cleared; and the honest consequence — "If you're
+   offline and a phrase's audio has been cleared, that phrase sits out the
+   drill and the others carry on. It comes back on its own the next time
+   you're online." Read fresh each time Settings opens, never held from boot,
+   and shown as `Working out how much is saved…` rather than a fabricated
+   zero while the cache has not answered. The Drill screen carries the other
+   half of the same honesty: it stops saying audio is "still being made" when
+   there is no network to make it over (§3.1).
+3. **Backup** — still present alongside server sync, in its own card
    treatment, reframed as extra insurance rather than the only copy: "Your
    phrases sync to the server automatically, but you can also save a backup
    file you keep or send yourself, for extra peace of mind." Clips are not

@@ -11,6 +11,18 @@ export const SETTINGS_STORE = 'settings'
  */
 export const CLIPS_STORE = 'clips'
 /**
+ * The size index over `clips` (T036): one tiny `{ hash, bytes, lastUsedAt }`
+ * row per cached Clip, so the cache can answer "how much am I holding?" and
+ * "what has she not drilled in longest?" without loading a single byte of
+ * audio. `clip-cache.ts` owns the record shape and is the only writer.
+ *
+ * A separate store rather than fields on the Clip itself, because the whole
+ * point is that reading the index is cheap: `getAll` over `clips` pulls every
+ * `ArrayBuffer` off disk through structured clone (docs/scale.md §3), which
+ * at a full cache is hundreds of MB for a question about numbers.
+ */
+export const CLIP_META_STORE = 'clipMeta'
+/**
  * Bounded ring buffer of captured errors (T039 diagnostics — `error-log.ts`
  * owns the cap/trim logic; this store just holds whatever it decides to
  * keep). Keyed by an incrementing numeric `id` so entries can be listed
@@ -94,6 +106,27 @@ export function openDatabase(): Promise<IDBPDatabase> {
         // and every existing Deck, Phrase and Mix passes through untouched
         // (the branches above).
         db.createObjectStore(TOMBSTONES_STORE, { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains(CLIP_META_STORE)) {
+        // v5 -> v6, additive: the size index over an already-existing clip
+        // cache. Every Deck, Phrase, Mix and Tombstone passes through
+        // untouched (the branches above).
+        db.createObjectStore(CLIP_META_STORE, { keyPath: 'hash' })
+        // Backfill from whatever is already cached, so a phone upgrading into
+        // this build keeps its audio instead of re-fetching it. `lastUsedAt`
+        // seeds from `createdAt`: nothing recorded when a Clip was last
+        // played before this store existed, and generation order is the only
+        // honest answer available. This reads the whole clip store once, in
+        // the versionchange transaction — the one time that cost is paid.
+        const clips = (await transaction.objectStore(CLIPS_STORE).getAll()) as {
+          hash: string
+          bytes: ArrayBuffer
+          createdAt: number
+        }[]
+        const meta = transaction.objectStore(CLIP_META_STORE)
+        for (const clip of clips) {
+          await meta.put({ hash: clip.hash, bytes: clip.bytes.byteLength, lastUsedAt: clip.createdAt })
+        }
       }
     },
   })

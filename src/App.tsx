@@ -27,7 +27,7 @@ import {
   setMixDecks,
   updatePhrase,
 } from './domain'
-import type { ClipCache, Settings, SettingsStore } from './adapters/storage'
+import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore } from './adapters/storage'
 import { backupFilename, normalizeLibrary, parseLibraryFile } from './adapters/storage'
 import type { ErrorLog } from './adapters/diagnostics'
 import { collectDiagnostics, copyText, formatDiagnosticsReport, getBuildInfo, getStorageEstimate } from './adapters/diagnostics'
@@ -124,7 +124,7 @@ function App({
   settingsStore: SettingsStore
   synthClient: SynthClient
   generationQueue: GenerationQueue
-  clipCache: ClipCache
+  clipCache: BoundedClipCache
   scanReader: ScanReader
   errorLog: ErrorLog
   librarySyncClient: LibrarySyncClient
@@ -138,6 +138,10 @@ function App({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   const [diagnosticsReport, setDiagnosticsReport] = useState<string | undefined>(undefined)
   const [pendingRestore, setPendingRestore] = useState<Library | undefined>(undefined)
+  // What the clip cache is holding, read when Settings opens (T036). Not held
+  // from boot: it changes every time a Clip is generated or evicted, and a
+  // stale number here is a number she would act on.
+  const [savedAudio, setSavedAudio] = useState<ClipCacheUsage | undefined>(undefined)
   const [mixOpen, setMixOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [drillTarget, setDrillTarget] = useState<
@@ -210,6 +214,18 @@ function App({
       cancelled = true
     }
   }, [settingsStore])
+
+  /**
+   * Opens Settings and asks the clip cache what it is holding, fresh every
+   * time — the number changes with every Clip generated or evicted, and a
+   * stale one is a number she would act on. Same shape as
+   * `handleOpenDiagnostics` below, and for the same reason.
+   */
+  function handleOpenSettings(): void {
+    setSavedAudio(undefined)
+    setSettingsOpen(true)
+    void clipCache.usage().then(setSavedAudio)
+  }
 
   /** Whole-Deck upsert into local state and the store — an unknown id is a
    * newly-created Deck (Import's "New Deck…" path shares this with
@@ -506,6 +522,7 @@ function App({
         onConfirmRestore={handleConfirmRestore}
         onCancelRestore={handleCancelRestore}
         onOpenDiagnostics={handleOpenDiagnostics}
+        savedAudio={savedAudio}
       />
     )
   }
@@ -537,7 +554,7 @@ function App({
         acquireWakeLock={() => wakeLock.acquire()}
         releaseWakeLock={() => wakeLock.release()}
         onExit={() => setDrillTarget(undefined)}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={handleOpenSettings}
       />
     )
   }
@@ -623,7 +640,7 @@ function App({
       onRenameDeck={handleRenameDeck}
       onDeleteDeck={handleDeleteDeck}
       onOpenDeck={setSelectedDeckId}
-      onOpenSettings={() => setSettingsOpen(true)}
+      onOpenSettings={handleOpenSettings}
       onOpenMix={() => setMixOpen(true)}
       onOpenImport={() => setImportOpen(true)}
       showBackupNudge={!settings.backupNudgeDismissed}
