@@ -164,6 +164,15 @@ export interface ClipCacheOptions {
   readonly now?: () => number
 }
 
+/**
+ * The origin is full. Read off `name` rather than `instanceof DOMException`:
+ * the storage layer is faked in tests at the `idb` seam, and a check only a
+ * real browser can satisfy is a check the tests cannot run.
+ */
+function isQuotaExceeded(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'QuotaExceededError'
+}
+
 /** One row of the `clipMeta` store — the size index, never the audio. */
 interface ClipMeta {
   readonly hash: string
@@ -207,8 +216,21 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
   let indexPromise: Promise<Map<string, ClipMeta>> | undefined
   let totalBytes = 0
 
+  /**
+   * The open database handle, opened once — **and forgotten again if the open
+   * fails (T085).** A rejected promise is still a settled promise, so a plain
+   * `??=` memoizes the failure as firmly as it memoizes success: one
+   * transient refusal (iOS killing the connection under memory pressure)
+   * became silence for the rest of the session, because every later call
+   * replayed the same rejection without ever trying again. Clearing the slot
+   * on the way out costs one retry per failure and is the difference between
+   * a bad moment and a bad session.
+   */
   function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase()
+    dbPromise ??= openDatabase().catch((error: unknown) => {
+      dbPromise = undefined
+      throw error
+    })
     return dbPromise
   }
 
@@ -225,21 +247,29 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
    * that is already on the disk.
    */
   function getIndex(): Promise<Map<string, ClipMeta>> {
-    indexPromise ??= (async () => {
-      const db = await getDatabase()
-      const rows = await reconcileIndex(db, (await db.getAll(CLIP_META_STORE)) as ClipMeta[])
-      const index = new Map<string, ClipMeta>()
-      totalBytes = 0
-      for (const row of [...rows].sort((a, b) => a.lastUsedAt - b.lastUsedAt)) {
-        index.set(row.hash, row)
-        totalBytes += row.bytes
-      }
-      // The ceiling applies on every launch, not only when she generates
-      // something (T076). Nothing to protect here — no Clip was just cached.
-      await evictDownToTarget(index, undefined)
-      return index
-    })()
+    indexPromise ??= buildIndex().catch((error: unknown) => {
+      // Forgotten on failure, for the same reason `getDatabase` forgets a
+      // failed open (T085): a half-built index that rejected once must not be
+      // the answer every screen gets for the rest of the session.
+      indexPromise = undefined
+      throw error
+    })
     return indexPromise
+  }
+
+  async function buildIndex(): Promise<Map<string, ClipMeta>> {
+    const db = await getDatabase()
+    const rows = await reconcileIndex(db, (await db.getAll(CLIP_META_STORE)) as ClipMeta[])
+    const index = new Map<string, ClipMeta>()
+    totalBytes = 0
+    for (const row of [...rows].sort((a, b) => a.lastUsedAt - b.lastUsedAt)) {
+      index.set(row.hash, row)
+      totalBytes += row.bytes
+    }
+    // The ceiling applies on every launch, not only when she generates
+    // something (T076). Nothing to protect here — no Clip was just cached.
+    await evictDownToTarget(index, undefined)
+    return index
   }
 
   /**
@@ -309,6 +339,46 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
     return live
   }
 
+  /**
+   * The two rows of one cached Clip, written — and written again once, after
+   * making room, when the device says it is full (T085).
+   *
+   * A `QuotaExceededError` is the origin being full, not this cache being
+   * over its own ceiling, so `evictDownToTarget` does not fire: `totalBytes`
+   * can sit far under `maxBytes` while the phone has no room at all. Left
+   * there, the first refusal is also the last successful generation of the
+   * session — every later Clip is refused the same way and she drills in
+   * silence until the storage frees itself.
+   *
+   * Dropping a tenth of the cache is the right answer to that, and not only
+   * for the audio: the origin this cache shares is the one her Decks are
+   * written to, so clip bytes given back are bytes the next Phrase can be
+   * saved into. Clips are derived and regenerable — a re-fetch after eviction
+   * is usually one Postgres read (T063) — and a Phrase is not, so this trades
+   * the cheap thing for the irreplaceable one every time.
+   *
+   * One retry, not a loop. If room was made and the device still refuses, the
+   * refusal is not about our bytes, and evicting her whole cache to keep
+   * asking would be paying an unbounded price for a fixed answer. The throw
+   * reaches `put`'s caller with the index untouched.
+   */
+  async function writeClip(
+    db: IDBPDatabase,
+    index: Map<string, ClipMeta>,
+    clip: Clip,
+    meta: ClipMeta,
+  ): Promise<void> {
+    try {
+      await db.put(CLIPS_STORE, clip)
+      await db.put(CLIP_META_STORE, meta)
+    } catch (error) {
+      if (!isQuotaExceeded(error)) throw error
+      await evictTo(index, Math.floor(totalBytes * EVICT_TO_FRACTION), clip.hash)
+      await db.put(CLIPS_STORE, clip)
+      await db.put(CLIP_META_STORE, meta)
+    }
+  }
+
   /** Re-dates a Clip and moves it to the young end of the LRU order. */
   async function touch(hash: string, index: Map<string, ClipMeta>): Promise<void> {
     const existing = index.get(hash)
@@ -336,8 +406,17 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
    */
   async function evictDownToTarget(index: Map<string, ClipMeta>, protectedHash: string | undefined): Promise<void> {
     if (totalBytes <= maxBytes) return
+    await evictTo(index, Math.floor(maxBytes * EVICT_TO_FRACTION), protectedHash)
+  }
+
+  /** Least-recently-played first, until the cache holds no more than `target` bytes. */
+  async function evictTo(
+    index: Map<string, ClipMeta>,
+    target: number,
+    protectedHash: string | undefined,
+  ): Promise<void> {
+    if (totalBytes <= target) return
     const db = await getDatabase()
-    const target = Math.floor(maxBytes * EVICT_TO_FRACTION)
 
     for (const hash of [...index.keys()]) {
       if (totalBytes <= target) break
@@ -355,23 +434,35 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
     async get(hash: string): Promise<Clip | undefined> {
       const db = await getDatabase()
       const clip = (await db.get(CLIPS_STORE, hash)) as Clip | undefined
-      if (clip) await touch(hash, await getIndex())
+      if (clip) {
+        try {
+          await touch(hash, await getIndex())
+        } catch {
+          // The audio is in hand and she is waiting to hear it. A refused
+          // write of the play-time row changes which Clip is evicted next —
+          // it must not turn a Clip that was read into silence (T085).
+        }
+      }
       return clip
     },
 
     async put(clip: Clip): Promise<void> {
       const db = await getDatabase()
       const index = await getIndex()
-
       const meta: ClipMeta = { hash: clip.hash, bytes: clip.bytes.byteLength, lastUsedAt: now() }
+
+      // **Written first, counted second (T085).** The index is what `has()`
+      // and the readiness sweep answer from, so counting a Clip the device
+      // then refused reports a Phrase as drillable that plays nothing and is
+      // never queued for regeneration: silence with nothing trying to fix it.
+      // A throw here leaves the index describing exactly what is on the disk.
+      await writeClip(db, index, clip, meta)
+
       const previous = index.get(clip.hash)
       if (previous) totalBytes -= previous.bytes
       totalBytes += meta.bytes
       index.delete(clip.hash)
       index.set(clip.hash, meta)
-
-      await db.put(CLIPS_STORE, clip)
-      await db.put(CLIP_META_STORE, meta)
 
       await evictDownToTarget(index, clip.hash)
     },
