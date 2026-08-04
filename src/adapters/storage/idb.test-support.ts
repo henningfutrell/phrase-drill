@@ -130,6 +130,30 @@ export function throwOnNextWriteTo(store: string, name = 'DataCloneError'): void
   armedWriteThrow = { store, name }
 }
 
+let armedTermination: { op: 'put' | 'delete'; store: string } | undefined
+
+/**
+ * Be her phone dying the instant a write became durable (T078): the next
+ * transaction that carries `op` against `store` has its connection
+ * force-closed the moment that transaction COMMITS.
+ *
+ * This is the interruption a two-step eviction cannot survive and a one-step
+ * eviction does not notice, and it is stated without reference to either
+ * shape: the trigger is "the audio's removal is on the disk", the event is
+ * "the connection is gone before anything else can run". Whatever the code
+ * put in that same transaction is committed with it; whatever it left for a
+ * second transaction is never written, because `db.transaction()` on a
+ * closing connection throws.
+ *
+ * The close is `fake-indexeddb`'s own `forceCloseDatabase` — the same real
+ * event `terminateConnection` fires — issued from the transaction's real
+ * `complete` event. Nothing about the commit, the close, or the failure of
+ * the next transaction is simulated. Cleared by `resetFakeIdb`.
+ */
+export function terminateOnCommitOfNext(op: 'put' | 'delete', store: string): void {
+  armedTermination = { op, store }
+}
+
 type RequestPipeline = {
   _execRequestAsync(request: { operation: () => unknown; source: unknown }): unknown
 }
@@ -143,6 +167,13 @@ for (const op of LOGGED_OPERATIONS) {
       idbOperations.push({ op, store: this.name, transaction: identify(this.transaction) })
       if (op === 'delete' || op === 'clear') {
         idbDestructiveOperations.push({ op, store: this.name })
+      }
+      if (armedTermination?.op === op && armedTermination.store === this.name) {
+        armedTermination = undefined
+        const tx = this.transaction
+        tx.addEventListener('complete', () => {
+          forceCloseDatabase(tx.db as unknown as Parameters<typeof forceCloseDatabase>[0])
+        })
       }
       if (op === 'put' && armedWriteThrow?.store === this.name) {
         const { name } = armedWriteThrow
@@ -181,6 +212,7 @@ export function resetFakeIdb(): void {
   idbTransactions.clear()
   armedWriteFailure = undefined
   armedWriteThrow = undefined
+  armedTermination = undefined
 }
 
 /**

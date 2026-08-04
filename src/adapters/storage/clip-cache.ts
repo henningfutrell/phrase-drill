@@ -1,6 +1,6 @@
 import type { IDBPDatabase } from 'idb'
 import type { Language, PhraseRecord, Voice } from '../../domain'
-import { CLIPS_STORE, CLIP_META_STORE, createDatabaseConnection } from './database'
+import { CLIPS_STORE, CLIP_META_STORE, createDatabaseConnection, runTransaction } from './database'
 
 /**
  * A cached rendering of one side of one Phrase, in one voice — the on-disk
@@ -274,10 +274,12 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
    *   created empty, so a phone that upgraded into this build has audio nobody
    *   has measured. Left alone it reads as no audio at all and the whole
    *   library is re-fetched.
-   * - **A row with no Clip (T076).** Eviction deletes the audio and the row in
-   *   two steps; interrupted between them — the app backgrounded, the tab
-   *   killed — it leaves the row. That row is then charged against the ceiling
-   *   forever, and `has()` answers `true` for audio that is gone.
+   * - **A row with no Clip (T076).** That row is charged against the ceiling
+   *   forever, and `has()` answers `true` for audio that is gone. This code's
+   *   own eviction no longer makes them — it removes both in one transaction
+   *   (T078, `evictTo`) — but healing stays: a phone that has been running the
+   *   two-step version carries rows it orphaned, and the browser dropping
+   *   records out of this origin on its own is a source nothing here can close.
    *
    * The second also hides the first: this used to ask `count(CLIPS_STORE) <=
    * known.length` and stop there, so one orphan cancelled one unindexed Clip
@@ -399,7 +401,29 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
     await evictTo(index, Math.floor(maxBytes * EVICT_TO_FRACTION), protectedHash)
   }
 
-  /** Least-recently-played first, until the cache holds no more than `target` bytes. */
+  /**
+   * Least-recently-played first, until the cache holds no more than `target`
+   * bytes — **and each Clip leaves in ONE transaction (T078).**
+   *
+   * The audio and its index row used to go as two transactions, and that gap
+   * is where the orphaned rows T076 heals were made: interrupted between them
+   * — the app backgrounded, the tab killed — the row outlives the Clip it
+   * describes, `has()` answers `true` for audio that is gone, and she drills a
+   * Phrase that plays nothing until the next launch reconciles. One
+   * transaction over both stores removes the gap rather than surviving it.
+   *
+   * **T076's healing stays regardless.** A phone carrying rows orphaned by the
+   * old two-step eviction still needs them cleaned up on launch, and a Clip
+   * the browser evicts on its own (iOS reclaiming the origin's storage) is a
+   * source this code cannot close at all.
+   *
+   * One transaction per Clip, not one for the whole sweep. What must be
+   * indivisible is one Clip's removal; a sweep that holds both stores for
+   * ~450 evictions blocks every read she is waiting on, and an interruption
+   * mid-sweep would then roll back work that was correct and complete. Per
+   * Clip, an interrupted sweep leaves a consistent smaller cache and the next
+   * one carries on.
+   */
   async function evictTo(
     index: Map<string, ClipMeta>,
     target: number,
@@ -413,8 +437,11 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       if (hash === protectedHash) continue
       const meta = index.get(hash)
       if (!meta) continue
-      await db.delete(CLIPS_STORE, hash)
-      await db.delete(CLIP_META_STORE, hash)
+      const tx = db.transaction([CLIPS_STORE, CLIP_META_STORE], 'readwrite')
+      await runTransaction(tx, async () => {
+        await tx.objectStore(CLIPS_STORE).delete(hash)
+        await tx.objectStore(CLIP_META_STORE).delete(hash)
+      })
       index.delete(hash)
       totalBytes -= meta.bytes
     }
