@@ -184,7 +184,11 @@ export async function main() {
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], 'file:').href
 if (isMain) {
-  main().catch(() => {
+  main().catch((err) => {
+    // Not redundant with the `logger.error` inside main(): the config checks
+    // above it throw before a logger exists, and without this they exit 1
+    // having printed nothing — silence that reads like a clean run.
+    process.stderr.write(`backup: failed — ${err instanceof Error ? err.message : String(err)}\n`)
     process.exitCode = 1
   })
 }
