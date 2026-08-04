@@ -134,9 +134,46 @@ export function createAuthStore(pool) {
   }
 }
 
+/**
+ * Decides the `ssl` option `pg` needs, from `DATABASE_URL` alone — no new
+ * env var (T053, deploying to Render). Render's managed Postgres exposes
+ * two hostnames for the same database: an *internal* one (`dpg-xxxx-a`, no
+ * domain suffix — reachable only on Render's private network) and an
+ * *external* one (`dpg-xxxx-a.<region>-postgres.render.com` — reachable
+ * from anywhere, TLS required). `render.yaml` wires `DATABASE_URL` from the
+ * database's `connectionString` property, which resolves to the *internal*
+ * URL when the web service and the database share a region — exactly what
+ * this Blueprint sets up — so the common case needs no SSL at all, same as
+ * the local `docker-compose.yml` Postgres.
+ *
+ * The external hostname is the one case that needs an `ssl` option:
+ * Render's certificate chain is not present in Node's default CA trust
+ * store, so a plain `ssl: true` fails with `SELF_SIGNED_CERT_IN_CHAIN`
+ * (github.com/brianc/node-postgres#2375; community.render.com/t/…/37079).
+ * `rejectUnauthorized: false` is scoped to *this hostname pattern only* —
+ * never a blanket default for every connection — because it's the one
+ * documented, verified case where Render's own chain, not an attacker's, is
+ * what's being accepted. Anyone connecting from off-platform (a one-off
+ * `psql`/migration from a laptop against the External Database URL) hits
+ * this same hostname and gets the same treatment, which is correct there
+ * too: it's still Render's self-signed chain, not a new trust decision.
+ */
+export function sslConfigFor(connectionString) {
+  if (typeof connectionString !== 'string' || connectionString.length === 0) return undefined
+  let hostname
+  try {
+    ;({ hostname } = new URL(connectionString))
+  } catch {
+    return undefined
+  }
+  if (hostname.endsWith('.render.com')) return { rejectUnauthorized: false }
+  return undefined
+}
+
 /** Constructs the real `pg` pool used in production; tests inject their own fake instead. */
 export function createPool(connectionString) {
-  return new Pool({ connectionString })
+  const ssl = sslConfigFor(connectionString)
+  return ssl ? new Pool({ connectionString, ssl }) : new Pool({ connectionString })
 }
 
 /**

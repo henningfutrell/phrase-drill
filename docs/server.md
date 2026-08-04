@@ -253,22 +253,16 @@ There is no non-Docker path any more: Postgres is a real service, not
 embeddable the way `node:sqlite` was, so `docker compose up` is the only
 supported way to run this server locally.
 
-## Deploy to Coolify
+## Deploy to production
 
-Point Coolify at this repository; it builds `docker-compose.yml` unchanged.
-Steps:
-
-1. New resource → Docker Compose → this repo, this branch.
-2. Set `POSTGRES_PASSWORD`, `ELEVENLABS_API_KEY`, and `ANTHROPIC_API_KEY` in
-   Coolify's environment variables UI — never in `docker-compose.yml` or
-   committed anywhere.
-3. Attach a persistent volume for `postgres-data` (declared in
-   `docker-compose.yml`) so the library table and the `users`/`sessions`
-   tables survive a redeploy.
-4. Expose port `8080` publicly.
-5. `npm run useradd -- her-username` once, from inside the running container
-   (`docker compose exec phrase-drill npm run useradd -- her-username`, or
-   Coolify's own shell access), to create her account.
+Production runs on Render (T053), from `render.yaml` at the repo root — not
+`docker-compose.yml`, which Render doesn't read; that file is local-dev
+only (see its own header). An earlier version of this doc pointed at
+Coolify running `docker-compose.yml` unchanged; that was never actually
+deployed and is superseded outright, not kept as an alternate path. The
+whole deploy — connecting the repo, the two secrets, creating her account,
+what to check afterward, and the Postgres SSL reasoning specific to
+Render's managed database — is `docs/deploy.md`.
 
 ## Logs
 
