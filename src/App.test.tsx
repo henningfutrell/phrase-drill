@@ -20,6 +20,7 @@ import type { SynthClient, SynthResult } from './adapters/audio/server-synth-cli
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry } from './adapters/diagnostics'
 import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/library-sync-client'
+import { createSyncEngine, type PlatformPort, type Scheduler, type SyncEngine } from './adapters/sync/sync-engine'
 import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
 
 vi.mock('./adapters/share/web-share', () => ({
@@ -252,13 +253,75 @@ function click(el: Element): void {
   ;(el as HTMLElement).click()
 }
 
-/** Lets `syncToServer()`'s fire-and-forget `.then` chain settle before an
+/** Lets the sync engine's fire-and-forget round-trip settle before an
  * assertion — it's not awaited by the click handler itself (persisting the
- * Phrase text must never be gated on the sync round-trip). */
+ * Phrase text must never be gated on the sync round-trip). Deep enough for
+ * the whole chain: debounce → pull → read → merge → write → push → record. */
 async function flushMicrotasks(): Promise<void> {
   await act(async () => {
-    await Promise.resolve()
-    await Promise.resolve()
+    for (let i = 0; i < 40; i += 1) await Promise.resolve()
+  })
+}
+
+/** A baseline that lives only as long as the device it belongs to — a second
+ * mount is a second device, and it has never agreed anything with the server. */
+function createFakeBaseline() {
+  let held: Library | undefined
+  return {
+    async read() {
+      return held
+    },
+    async write(library: Library) {
+      held = library
+    },
+  }
+}
+
+/** Timers that fire as soon as the microtask queue is drained, so a test
+ * asserts on sync behaviour rather than on wall-clock debounce windows (those
+ * are pinned directly in src/adapters/sync/sync-engine.test.ts). */
+function immediateScheduler(): Scheduler {
+  return {
+    schedule(fn, ms) {
+      let cancelled = false
+      // Only the zero-delay debounce these tests configure runs. A retry
+      // backoff is a real delay and is left un-fired on purpose: firing it as
+      // a microtask would re-arm itself forever and never let the queue drain.
+      if (ms <= 0) {
+        void Promise.resolve().then(() => {
+          if (!cancelled) fn()
+        })
+      }
+      return () => {
+        cancelled = true
+      }
+    },
+  }
+}
+
+function alwaysOnline(): PlatformPort {
+  return { isOnline: () => true, onOnline: () => () => {}, onHidden: () => () => {} }
+}
+
+/** The real sync engine over test doubles — App's own tests drive the real
+ * merge and the real round-trip, because "nothing is lost" is a property of
+ * the two together, not of either alone. */
+function createTestSyncEngine(
+  deckStore: DeckStore,
+  settingsStore: SettingsStore,
+  client: LibrarySyncClient,
+  platform: PlatformPort = alwaysOnline(),
+): SyncEngine {
+  return createSyncEngine({
+    client,
+    readLocal: () => deckStore.exportAll(),
+    writeLocal: (library) => deckStore.importAll(library),
+    baseline: createFakeBaseline(),
+    readLastSyncAt: async () => (await settingsStore.load()).lastSyncAt,
+    recordSync: (timestamp) => settingsStore.recordSync(timestamp),
+    scheduler: immediateScheduler(),
+    platform,
+    debounceMs: 0,
   })
 }
 
@@ -287,6 +350,7 @@ async function renderApp(
   librarySyncClient: LibrarySyncClient = createFakeLibrarySyncClient(),
   translator: Translator = createFakeTranslator(),
   mixStore: MixStore = createFakeMixStore(),
+  syncEngine: SyncEngine = createTestSyncEngine(store, settingsStore, librarySyncClient),
 ) {
   await act(async () => {
     root.render(
@@ -299,11 +363,12 @@ async function renderApp(
         clipCache={clipCache}
         scanReader={scanReader}
         errorLog={errorLog}
-        librarySyncClient={librarySyncClient}
+        syncEngine={syncEngine}
         translator={translator}
       />,
     )
   })
+  await flushMicrotasks()
 }
 
 describe('App wired to DeckStore', () => {
@@ -1020,9 +1085,28 @@ describe('App wired to library sync (T041)', () => {
     expect(container.textContent).toContain('Home')
   })
 
-  it('never pushes on mount — merely opening the app can change nothing on the server (T060)', async () => {
+  /**
+   * T060 asserted the opposite — boot pulled but never pushed, so opening the
+   * app could not change the server copy. T034 pushes on launch on purpose: a
+   * change she made while offline yesterday reaches the server only if
+   * *something* pushes without her tapping anything, and launch is the one
+   * moment guaranteed to happen. What made a boot push unsafe was pushing this
+   * device's snapshot blind; what is pushed now is the merge of both sides, so
+   * the server can gain records and never lose them.
+   */
+  it('pushes on launch, and pushes the merge of both sides — the server never loses what only it had', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    const librarySyncClient = createFakeLibrarySyncClient()
+    const librarySyncClient = createFakeLibrarySyncClient({
+      pull: async () => ({
+        ok: true,
+        library: {
+          format: LIBRARY_FORMAT,
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          exportedAt: 1,
+          decks: [{ id: 'remote', name: 'From server', phrases: [], createdAt: 1, updatedAt: 1 }],
+        },
+      }),
+    })
 
     await renderApp(
       store,
@@ -1034,9 +1118,9 @@ describe('App wired to library sync (T041)', () => {
       createFakeErrorLog(),
       librarySyncClient,
     )
-    await flushMicrotasks()
 
-    expect(librarySyncClient.pushed).toEqual([])
+    expect(librarySyncClient.pushed).toHaveLength(1)
+    expect(librarySyncClient.pushed[0]!.decks.map((d) => d.name).sort()).toEqual(['From server', 'Home'])
   })
 
   it('pushes the whole library to the server after a Deck is created', async () => {
@@ -1487,5 +1571,203 @@ describe('App wired to saved Mixes (T059)', () => {
     await flushMicrotasks()
 
     expect(sync.pushed.length).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * Sync she never has to think about (T034). The failure mode these exist to
+ * make impossible: "everything is gone". "Nothing happened yet" is allowed
+ * and is what the sync line says out loud.
+ */
+function createManualPlatform(): PlatformPort & { goOnline(): void; hide(): void } {
+  const onlineListeners: (() => void)[] = []
+  const hiddenListeners: (() => void)[] = []
+  return {
+    isOnline: () => true,
+    onOnline(listener) {
+      onlineListeners.push(listener)
+      return () => onlineListeners.splice(onlineListeners.indexOf(listener), 1)
+    },
+    onHidden(listener) {
+      hiddenListeners.push(listener)
+      return () => hiddenListeners.splice(hiddenListeners.indexOf(listener), 1)
+    },
+    goOnline() {
+      for (const listener of [...onlineListeners]) listener()
+    },
+    hide() {
+      for (const listener of [...hiddenListeners]) listener()
+    },
+  }
+}
+
+async function addPhraseThroughUi(deckId: string, french: string, english: string): Promise<void> {
+  act(() => click(container.querySelector(`[data-testid="deck-row-${deckId}"]`)!))
+  act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+  const frenchInput = container.querySelector('[data-testid="phrase-french-input"]') as HTMLInputElement
+  const englishInput = container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement
+  act(() => typeInto(frenchInput, french))
+  act(() => typeInto(englishInput, english))
+  await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
+  await flushMicrotasks()
+  await act(async () => click(container.querySelector('[data-testid="back"]')!))
+}
+
+function syncLine(): string {
+  return container.querySelector('[data-testid="sync-status"]')?.textContent ?? ''
+}
+
+describe('App wired to sync without a tap (T034)', () => {
+  const P1 = { id: 'p1', french: 'Bonjour', english: 'Hello' }
+  const P3 = { id: 'p3', french: 'Bonsoir', english: 'Good evening' }
+
+  it('loses nothing from either side when one device edits a Deck offline and the other edits the same Deck', async () => {
+    const server = createFakeServer()
+
+    // The other device — its own store and its own engine, no screen. It
+    // starts from the shared one-Phrase Deck and syncs, so both sides have a
+    // baseline: the state they last agreed on.
+    const web = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [P1] }], () => 3000)
+    const webEngine = createTestSyncEngine(web, createFakeSettingsStore(), server.client())
+    webEngine.start()
+    await flushMicrotasks()
+    expect(server.library!.decks[0]!.phrases.map((p) => p.id)).toEqual(['p1'])
+
+    // This device: the phone, running the real app, from the same Deck.
+    const phone = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [P1] }], () => 4000)
+    const offline = { value: false }
+    const live = server.client()
+    const phoneClient: LibrarySyncClient = {
+      async pull() {
+        return offline.value ? { ok: false, reason: 'network' } : live.pull()
+      },
+      async push(library) {
+        return offline.value ? { ok: false, reason: 'network' } : live.push(library)
+      },
+    }
+    const platform = createManualPlatform()
+    const phoneSettings = createFakeSettingsStore()
+    await renderApp(
+      phone,
+      phoneSettings,
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      phoneClient,
+      createFakeTranslator(),
+      createFakeMixStore(),
+      createTestSyncEngine(phone, phoneSettings, phoneClient, platform),
+    )
+
+    // She goes offline and adds a Phrase on the phone.
+    offline.value = true
+    await addPhraseThroughUi('d1', 'Merci', 'Thanks')
+    expect(phone.decks.get('d1')!.phrases.map((p) => p.french)).toEqual(['Bonjour', 'Merci'])
+    expect(syncLine()).toContain('Saved on this phone')
+
+    // Meanwhile, on the other device, she adds a different Phrase to the same Deck.
+    await web.save({ id: 'd1', name: 'Home', phrases: [P1, P3] })
+    webEngine.syncNow()
+    await flushMicrotasks()
+
+    // The phone comes back.
+    offline.value = false
+    platform.goOnline()
+    await flushMicrotasks()
+
+    expect(phone.decks.get('d1')!.phrases.map((p) => p.french).sort()).toEqual(['Bonjour', 'Bonsoir', 'Merci'])
+    expect(server.library!.decks[0]!.phrases.map((p) => p.french).sort()).toEqual(['Bonjour', 'Bonsoir', 'Merci'])
+    expect(container.textContent).toContain('3 phrases')
+  })
+
+  it('keeps an offline change on the device and pushes it once the connection returns', async () => {
+    const server = createFakeServer()
+    const offline = { value: true }
+    const live = server.client()
+    const client: LibrarySyncClient = {
+      async pull() {
+        return offline.value ? { ok: false, reason: 'network' } : live.pull()
+      },
+      async push(library) {
+        return offline.value ? { ok: false, reason: 'network' } : live.push(library)
+      },
+    }
+    const platform = createManualPlatform()
+    const store = createFakeDeckStore([], () => 1000)
+    const settingsStore = createFakeSettingsStore()
+    await renderApp(
+      store,
+      settingsStore,
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      client,
+      createFakeTranslator(),
+      createFakeMixStore(),
+      createTestSyncEngine(store, settingsStore, client, platform),
+    )
+
+    await createDeckThroughUi('Made offline')
+    expect(server.library).toBeUndefined()
+
+    offline.value = false
+    platform.goOnline()
+    await flushMicrotasks()
+
+    expect(serverDeckNames(server)).toEqual(['Made offline'])
+  })
+
+  it('reports the time of the last successful sync', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store)
+
+    expect(syncLine()).toBe('Synced just now')
+  })
+
+  it('never reports success for a sync that failed — "nothing happened" is said, "everything is gone" is not', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const client = createFakeLibrarySyncClient({
+      async push(): Promise<PushResult> {
+        return { ok: false, reason: 'network' }
+      },
+    })
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      client,
+    )
+
+    expect(syncLine()).toBe('Saved on this phone · will sync when back online · not synced yet')
+    expect(store.decks.get('d1')).toBeDefined()
+  })
+
+  it('says nothing has synced yet before the first round-trip succeeds, rather than implying one did', async () => {
+    const store = createFakeDeckStore([])
+    const client = createFakeLibrarySyncClient({
+      async pull(): Promise<PullResult> {
+        return { ok: false, reason: 'network' }
+      },
+    })
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      client,
+    )
+
+    expect(syncLine()).toContain('not synced yet')
   })
 })

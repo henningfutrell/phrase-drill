@@ -278,3 +278,334 @@ describe('mergeLibraries — the envelope', () => {
     expect(JSON.stringify(remote)).toBe(remoteBefore)
   })
 })
+
+/**
+ * The three-way half (T034). T060 merged whole records: two devices editing
+ * different Phrases of the SAME Deck inside one round-trip still lost one
+ * side, because the later whole Deck replaced the earlier whole Deck. Given
+ * the last state both devices agreed on — the baseline — that loss is
+ * avoidable without giving a Phrase a timestamp of its own.
+ */
+describe('mergeLibraries — the three-way half (T034: two devices editing one Deck)', () => {
+  const P1 = { id: 'p1', french: 'Bonjour', english: 'Hello' }
+  const P2 = { id: 'p2', french: 'Merci', english: 'Thanks' }
+  const P3 = { id: 'p3', french: 'Bonsoir', english: 'Good evening' }
+
+  /** The state both devices last agreed on: one Deck, one Phrase. */
+  const base = library({ decks: [deck({ id: 'd1', updatedAt: 1, phrases: [P1] })] })
+
+  it('keeps a Phrase added on each device to the same Deck — neither side is discarded', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P3] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases.map((p) => p.id)).toEqual(['p1', 'p2', 'p3'])
+  })
+
+  it('keeps both additions whichever device wrote later', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 30, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P3] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases.map((p) => p.id).sort()).toEqual(['p1', 'p2', 'p3'])
+  })
+
+  it('keeps a Phrase edited on one device while the other added a different Phrase', () => {
+    const edited = { ...P1, french: 'Salut' }
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [edited] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P2] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([edited, P2])
+  })
+
+  it('applies a Phrase the other device deleted, when this one never touched it', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 1, phrases: [P1] })] }),
+    )
+
+    expect(merged.decks[0]!.phrases.map((p) => p.id)).toEqual(['p2'])
+  })
+
+  it('applies a deletion made on this device, when the other never touched that Phrase', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 1, phrases: [P1] })] }),
+    )
+
+    expect(merged.decks[0]!.phrases.map((p) => p.id)).toEqual(['p2'])
+  })
+
+  it('keeps a Phrase one device edited and the other deleted — an edit is never discarded by a delete', () => {
+    const edited = { ...P1, french: 'Salut' }
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [edited] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([edited])
+  })
+
+  it('keeps the edit whichever side of the merge deleted the Phrase', () => {
+    const edited = { ...P1, french: 'Salut' }
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [edited] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([edited])
+  })
+
+  it('takes the later Deck\'s text when both devices edited the same Phrase — the one real conflict', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [{ ...P1, french: 'Older' }] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [{ ...P1, french: 'Newer' }] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([{ ...P1, french: 'Newer' }])
+  })
+
+  it('breaks a same-Phrase conflict at an exact updatedAt tie in favour of the local copy', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [{ ...P1, french: 'Local' }] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [{ ...P1, french: 'Remote' }] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([{ ...P1, french: 'Local' }])
+  })
+
+  it('takes the whole record of the only side that changed, deletions included', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 1, phrases: [P1] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([])
+  })
+
+  it('leaves a Deck neither device changed exactly as the baseline had it', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 1, phrases: [P1] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 1, phrases: [P1] })] }),
+      base,
+    )
+
+    expect(merged.decks).toEqual([deck({ id: 'd1', updatedAt: 1, phrases: [P1] })])
+  })
+
+  it('keeps the later name when both devices renamed the same Deck', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Older', updatedAt: 10, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', name: 'Newer', updatedAt: 20, phrases: [P1, P3] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.name).toBe('Newer')
+  })
+
+  it('keeps the local name at an exact updatedAt tie, matching the whole-record rule', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Local', updatedAt: 10, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', name: 'Remote', updatedAt: 10, phrases: [P1, P3] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.name).toBe('Local')
+  })
+
+  it('dates a merged Deck by the later write and the earlier creation — it holds data from both', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', createdAt: 5, updatedAt: 10, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', createdAt: 2, updatedAt: 20, phrases: [P1, P3] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.updatedAt).toBe(20)
+    expect(merged.decks[0]!.createdAt).toBe(2)
+  })
+
+  it('falls back to whole-record last-write-wins with no baseline at all — T060 behaviour, unchanged', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P3] })] }),
+    )
+
+    expect(merged.decks[0]!.phrases.map((p) => p.id)).toEqual(['p1', 'p3'])
+  })
+
+  it('falls back to whole-record last-write-wins for a Deck the baseline never saw', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'other', updatedAt: 10, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'other', updatedAt: 20, phrases: [P1, P3] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases.map((p) => p.id)).toEqual(['p1', 'p3'])
+  })
+
+  it('still deletes a Deck by Tombstone, three-way merge or not', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [P1, P2] })] }),
+      library({
+        decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P3] })],
+        tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 30 }],
+      }),
+      base,
+    )
+
+    expect(merged.decks).toEqual([])
+  })
+
+  it('merges saved Mixes by last-write-wins even with a baseline — a Mix is a small list of ids, not phrases', () => {
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'm1', deckIds: ['a'], updatedAt: 10 })] }),
+      library({ mixes: [mix({ id: 'm1', deckIds: ['b'], updatedAt: 20 })] }),
+      library({ mixes: [mix({ id: 'm1', deckIds: [], updatedAt: 1 })] }),
+    )
+
+    expect(merged.mixes).toEqual([mix({ id: 'm1', deckIds: ['b'], updatedAt: 20 })])
+  })
+
+  it('mutates no input, the baseline included', () => {
+    const local = library({ decks: [deck({ id: 'd1', updatedAt: 10, phrases: [P1, P2] })] })
+    const remote = library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P3] })] })
+    const before = [local, remote, base].map((l) => JSON.stringify(l))
+
+    mergeLibraries(local, remote, base)
+
+    expect([local, remote, base].map((l) => JSON.stringify(l))).toEqual(before)
+  })
+
+  it('refuses a baseline at a different schema version rather than comparing records of different shapes', () => {
+    const older: Library = { ...base, schemaVersion: VERSION - 1 }
+
+    expect(() => mergeLibraries(library({}), library({}), older)).toThrow(/schema version/)
+  })
+})
+
+/**
+ * What counts as a change, and what a change does to the record around it.
+ * Every case here was located by a surviving mutant: the merge took the right
+ * answer for the wrong reason, and nothing in the suite could tell.
+ */
+describe('mergeLibraries — what the baseline says changed (T034)', () => {
+  const P1 = { id: 'p1', french: 'Bonjour', english: 'Hello' }
+  const P2 = { id: 'p2', french: 'Merci', english: 'Thanks' }
+  const P4 = { id: 'p4', french: 'Salut', english: 'Hi' }
+
+  const base = library({ decks: [deck({ id: 'd1', name: 'Home', updatedAt: 1, phrases: [P1] })] })
+
+  it('hands back the other device\'s record whole when this one only re-saved without changing anything', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Home', updatedAt: 30, phrases: [P1] })] }),
+      library({ decks: [deck({ id: 'd1', name: 'Renamed', updatedAt: 20, phrases: [P1] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.name).toBe('Renamed')
+    expect(merged.decks[0]!.updatedAt).toBe(20)
+  })
+
+  it('hands back this device\'s record whole when the other only re-saved without changing anything', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Renamed', updatedAt: 10, phrases: [P1] })] }),
+      library({ decks: [deck({ id: 'd1', name: 'Home', updatedAt: 40, phrases: [P1] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.name).toBe('Renamed')
+    expect(merged.decks[0]!.updatedAt).toBe(10)
+  })
+
+  it('counts a rename with no Phrase touched as a change, so the other device\'s new Phrase joins it', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Renamed', updatedAt: 30, phrases: [P1] })] }),
+      library({ decks: [deck({ id: 'd1', name: 'Home', updatedAt: 20, phrases: [P1, P2] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.name).toBe('Renamed')
+    expect(merged.decks[0]!.phrases.map((p) => p.id)).toEqual(['p1', 'p2'])
+  })
+
+  it('counts an edit inside an equally long list as a change', () => {
+    const twoPhrases = library({ decks: [deck({ id: 'd1', updatedAt: 1, phrases: [P1, P2] })] })
+    const edited = { ...P2, french: 'Merci beaucoup' }
+
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 30, phrases: [P1, edited] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P2, P4] })] }),
+      twoPhrases,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1, edited, P4])
+  })
+
+  it('counts a Phrase retyped under a new id as a change, not as the Phrase it replaced', () => {
+    const retyped = { id: 'pX', french: 'Bonjour', english: 'Hello' }
+
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 30, phrases: [retyped] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [P1, P2] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([retyped, P2])
+  })
+
+  it('counts a correction to the English side alone as a change, so a delete elsewhere cannot drop it', () => {
+    const corrected = { ...P1, english: 'Good morning' }
+
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 30, phrases: [corrected] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([corrected])
+  })
+
+  it('takes the other device\'s edit of a Phrase this one left alone, even when this device wrote later', () => {
+    const theirEdit = { ...P1, french: 'Salut' }
+
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 30, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 20, phrases: [theirEdit] })] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([theirEdit, P2])
+  })
+
+  it('keeps the later Mix whichever side of the merge holds it', () => {
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'm1', name: 'New', updatedAt: 20 })] }),
+      library({ mixes: [mix({ id: 'm1', name: 'Old', updatedAt: 10 })] }),
+    )
+
+    expect(merged.mixes).toEqual([mix({ id: 'm1', name: 'New', updatedAt: 20 })])
+  })
+
+  it('breaks an exact updatedAt tie between two Mixes in favour of the local copy', () => {
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'm1', name: 'Local', updatedAt: 10 })] }),
+      library({ mixes: [mix({ id: 'm1', name: 'Remote', updatedAt: 10 })] }),
+    )
+
+    expect(merged.mixes).toEqual([mix({ id: 'm1', name: 'Local', updatedAt: 10 })])
+  })
+})

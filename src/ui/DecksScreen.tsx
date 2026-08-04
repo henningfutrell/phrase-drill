@@ -26,6 +26,7 @@ export function DecksScreen({
   onRestoreFileChosen,
   onConfirmRestore,
   onCancelRestore,
+  syncStatus,
 }: {
   decks: readonly Deck[]
   onCreateDeck: (name: string) => void
@@ -61,6 +62,12 @@ export function DecksScreen({
   onConfirmRestore?: () => void
   /** Required whenever `onRestoreFileChosen` is passed. */
   onCancelRestore?: () => void
+  /**
+   * One line about sync (T034) — already worded by `sync-status-text.ts`;
+   * this screen only places it. Omitted in tests that do not exercise sync,
+   * and then nothing is shown rather than an empty line.
+   */
+  syncStatus?: string
 }) {
   const [sheet, setSheet] = useState<SheetState>(undefined)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<DeckId | undefined>(undefined)
@@ -111,6 +118,11 @@ export function DecksScreen({
         </div>
       </header>
 
+      {syncStatus && (
+        <p className="sync-status" data-testid="sync-status">
+          {syncStatus}
+        </p>
+      )}
       {/* Nothing saved yet is nothing to lose — the age is silent until there is. */}
       {decks.length > 0 && backupAge && onExportBackup && (
         <BackupStatus age={backupAge} onExportBackup={onExportBackup} onCopyText={onCopyText} />

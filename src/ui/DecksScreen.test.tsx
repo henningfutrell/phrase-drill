@@ -305,3 +305,38 @@ describe('DecksScreen', () => {
     expect(onDeleteDeck).toHaveBeenCalledWith('d1')
   })
 })
+
+describe('DecksScreen — the sync line (T034)', () => {
+  it('shows the sync line it is given, so sync state is visible without opening anything', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 1)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          syncStatus="Synced 3 minutes ago"
+        />,
+      )
+    })
+
+    expect(container.querySelector('[data-testid="sync-status"]')!.textContent).toBe('Synced 3 minutes ago')
+  })
+
+  it('shows no sync line at all when there is nothing to say', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 1)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+        />,
+      )
+    })
+
+    expect(container.querySelector('[data-testid="sync-status"]')).toBeNull()
+  })
+})

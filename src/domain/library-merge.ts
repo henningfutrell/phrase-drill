@@ -1,4 +1,4 @@
-import type { DeckRecord, Library, MixRecord, Tombstone } from './ports'
+import type { DeckRecord, Library, MixRecord, PhraseRecord, Tombstone } from './ports'
 
 /**
  * Reconcile two whole-library snapshots — this device's and the server's —
@@ -27,28 +27,59 @@ import type { DeckRecord, Library, MixRecord, Tombstone } from './ports'
  * - **Writing the id again beats the Tombstone**, and drops it — otherwise a
  *   Deck she recreated would be deleted again on the next merge, forever.
  *
- * Deliberately NOT done here: merging *inside* a Deck. Two devices editing
- * different Phrases of one Deck within one sync round-trip is the residual
- * loss, and per-Phrase merge is a much bigger design (Phrases have no
- * `updatedAt`, and no tombstones of their own) for a single-user app where
- * both devices are in the same pair of hands.
+ * ## Inside a Deck, when a baseline is known (T034)
  *
- * Deliberately NOT done here either: pruning a Mix's `deckIds` of Decks this
+ * T060 stopped at whole records, so two devices editing different Phrases of
+ * ONE Deck inside a single round-trip still lost a side: the later whole Deck
+ * replaced the earlier whole Deck, silently. `base` closes that. It is the
+ * last snapshot both sides are known to have agreed on — what this device
+ * pushed and the server accepted — and it turns "these two records differ"
+ * into the three answers that actually matter: only local changed, only
+ * remote changed, or both did.
+ *
+ * - **Only one side changed** → that side wins whole, deletions included. No
+ *   phrase-level reasoning is needed or wanted: the unchanged side has
+ *   nothing to contribute.
+ * - **Both sides changed** → merge per Phrase, by id. Added on either side is
+ *   kept. Deleted on one side and untouched on the other is deleted. Deleted
+ *   on one side and *edited* on the other is **kept**: an edit is somebody
+ *   typing, and losing it is the failure this whole file exists to prevent,
+ *   while keeping a Phrase she deleted costs her one tap.
+ * - **The same Phrase edited on both sides** is the one true conflict, and
+ *   the only place a keystroke can still be dropped. The later Deck's text
+ *   wins (a tie keeps local, matching the whole-record rule). There is
+ *   nowhere to put the loser: `Phrase` has one French and one English field,
+ *   and inventing a second copy of a phrase would corrupt the drill.
+ *
+ * With **no baseline** — the first sync ever, or a device whose baseline was
+ * evicted — every deck falls back to whole-record last-write-wins, exactly as
+ * T060 behaved. A missing baseline degrades the merge; it never breaks it.
+ *
+ * Mixes stay whole-record even with a baseline: a Mix is a name and a list of
+ * Deck ids, so the loser of a Mix conflict is a selection she can re-make in
+ * seconds, not text she wrote.
+ *
+ * Deliberately NOT done here: pruning a Mix's `deckIds` of Decks this
  * merge deleted. A dead id is already tolerated at read time and kept on
  * purpose (`resolveMixDecks`), and a dead id resurrects nothing — a Mix
  * holds ids, never Phrases.
  *
  * Pure: no I/O, no clock, and neither input is mutated.
  */
-export function mergeLibraries(local: Library, remote: Library): Library {
+export function mergeLibraries(local: Library, remote: Library, base?: Library): Library {
   if (local.schemaVersion !== remote.schemaVersion) {
     throw new Error(
       `cannot merge libraries at different schema version: ${local.schemaVersion} and ${remote.schemaVersion}`,
     )
   }
+  if (base && base.schemaVersion !== local.schemaVersion) {
+    throw new Error(
+      `cannot merge libraries at different schema version: ${local.schemaVersion} and ${base.schemaVersion}`,
+    )
+  }
 
   const tombstones = mergeTombstones(local.tombstones ?? [], remote.tombstones ?? [])
-  const decks = latestById(local.decks, remote.decks)
+  const decks = mergeDecks(local.decks, remote.decks, base?.decks)
   const mixes = latestById(local.mixes ?? [], remote.mixes ?? [])
 
   const survivingDecks = decks.filter((deck) => !isDeleted(deck, tombstones.get(key('deck', deck.id))))
@@ -92,6 +123,122 @@ function latestById<T extends { readonly id: string; readonly updatedAt: number 
     if (!held || record.updatedAt > held.updatedAt) latest.set(record.id, record)
   }
   return [...latest.values()]
+}
+
+/**
+ * Every Deck from both sides. An id only one side holds is kept as it is; an
+ * id both hold is reconciled against the baseline (T034). Local order first,
+ * then whatever only the remote had — a Deck she is looking at does not move
+ * under her because another device wrote one.
+ */
+function mergeDecks(
+  local: readonly DeckRecord[],
+  remote: readonly DeckRecord[],
+  base: readonly DeckRecord[] | undefined,
+): DeckRecord[] {
+  const baseById = base && new Map(base.map((deck) => [deck.id, deck]))
+  const remoteById = new Map(remote.map((deck) => [deck.id, deck]))
+  const localIds = new Set(local.map((deck) => deck.id))
+
+  const merged = local.map((deck) => {
+    const other = remoteById.get(deck.id)
+    return other ? reconcileDeck(deck, other, baseById?.get(deck.id)) : deck
+  })
+  return [...merged, ...remote.filter((deck) => !localIds.has(deck.id))]
+}
+
+/**
+ * One Deck id, held by both devices. Without a baseline there is nothing to
+ * reason from and the later whole record wins (T060). With one, the three
+ * cases separate — see this module's doc comment for why each answers as it
+ * does.
+ */
+function reconcileDeck(local: DeckRecord, remote: DeckRecord, base: DeckRecord | undefined): DeckRecord {
+  const localIsLater = local.updatedAt >= remote.updatedAt
+  if (!base) return localIsLater ? local : remote
+
+  const localChanged = !sameDeckContent(local, base)
+  const remoteChanged = !sameDeckContent(remote, base)
+  if (!localChanged) return remoteChanged ? remote : local
+  if (!remoteChanged) return local
+
+  return {
+    id: local.id,
+    name: localIsLater ? local.name : remote.name,
+    phrases: mergePhrases(base.phrases, local.phrases, remote.phrases, localIsLater),
+    // It holds data written on both devices, so it was created no later than
+    // the earlier of them and written no earlier than the later of them.
+    createdAt: Math.min(local.createdAt, remote.createdAt),
+    updatedAt: Math.max(local.updatedAt, remote.updatedAt),
+  }
+}
+
+/**
+ * Is this Deck the same Deck the baseline holds? Only what she can change is
+ * compared: `updatedAt` moves when a Deck is saved with no net change, and
+ * treating that as a change would send two devices down the three-way path
+ * over nothing.
+ */
+function sameDeckContent(deck: DeckRecord, base: DeckRecord): boolean {
+  return deck.name === base.name && samePhraseList(deck.phrases, base.phrases)
+}
+
+function samePhraseList(a: readonly PhraseRecord[], b: readonly PhraseRecord[]): boolean {
+  return a.length === b.length && a.every((phrase, index) => samePhrase(phrase, b[index]!))
+}
+
+/**
+ * Two Phrases are the same Phrase when every field she can see agrees. An
+ * `undefined` first argument is "the baseline never held this one", which is
+ * never the same as a Phrase that exists — the id, the French and the English
+ * are all compared, so retyping a phrase under a new id is a change, and so
+ * is correcting only its English.
+ */
+function samePhrase(a: PhraseRecord | undefined, b: PhraseRecord): boolean {
+  return a !== undefined && a.id === b.id && a.french === b.french && a.english === b.english
+}
+
+/**
+ * The Phrases of one Deck both devices changed, merged by id against the
+ * baseline. Local order first, then Phrases only the other device has — so
+ * the list she is drilling keeps the order she put it in, and what arrives
+ * from elsewhere lands at the end where she will see it.
+ */
+function mergePhrases(
+  base: readonly PhraseRecord[],
+  local: readonly PhraseRecord[],
+  remote: readonly PhraseRecord[],
+  localIsLater: boolean,
+): PhraseRecord[] {
+  const baseById = new Map(base.map((phrase) => [phrase.id, phrase]))
+  const localById = new Map(local.map((phrase) => [phrase.id, phrase]))
+  const remoteById = new Map(remote.map((phrase) => [phrase.id, phrase]))
+  const ids = [...new Set([...local.map((p) => p.id), ...remote.map((p) => p.id)])]
+
+  const merged: PhraseRecord[] = []
+  for (const id of ids) {
+    const mine = localById.get(id)
+    const theirs = remoteById.get(id)
+    const before = baseById.get(id)
+
+    if (mine && theirs) {
+      // Held by both: whichever side actually moved it away from the
+      // baseline is the edit. Both moved it — the one real conflict — and
+      // the later Deck's text wins. Two sides that agree need no case of
+      // their own: they take the first branch and push identical content.
+      if (samePhrase(before, mine)) merged.push(theirs)
+      else if (samePhrase(before, theirs)) merged.push(mine)
+      else merged.push(localIsLater ? mine : theirs)
+      continue
+    }
+
+    // Held by one side only: the other side either never had it (an
+    // addition) or deleted it. A deletion only applies to a Phrase this side
+    // left exactly as the baseline had it — an edit outranks a delete.
+    const kept = mine ?? theirs
+    if (kept && !samePhrase(before, kept)) merged.push(kept)
+  }
+  return merged
 }
 
 /** Every Tombstone from both sides, keeping the later deletion of any id. */

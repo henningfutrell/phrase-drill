@@ -18,7 +18,6 @@ import {
   addPhrase,
   createDeck,
   createMix,
-  mergeLibraries,
   removePhrase,
   renameDeck,
   renameMix,
@@ -28,7 +27,7 @@ import {
   updatePhrase,
 } from './domain'
 import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore } from './adapters/storage'
-import { backupFilename, normalizeLibrary, parseLibraryFile } from './adapters/storage'
+import { backupFilename, parseLibraryFile } from './adapters/storage'
 import { backupAge, lastBackupAt } from './domain'
 import { readInstallStateFromBrowser } from './adapters/device/install-state'
 import type { ErrorLog } from './adapters/diagnostics'
@@ -36,7 +35,8 @@ import { collectDiagnostics, copyText, formatDiagnosticsReport, getBuildInfo, ge
 import { shareBackupFile } from './adapters/share/web-share'
 import type { SynthClient } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
-import type { LibrarySyncClient } from './adapters/sync/library-sync-client'
+import type { SyncEngine, SyncSnapshot } from './adapters/sync/sync-engine'
+import { syncStatusText } from './ui/sync-status-text'
 import { FALLBACK_PREVIEW_PHRASE, VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
 import { createClipPlayer } from './adapters/audio/clip-player'
 import { computeDrillReadiness } from './adapters/audio/drill-readiness'
@@ -128,7 +128,7 @@ function App({
   clipCache,
   scanReader,
   errorLog,
-  librarySyncClient,
+  syncEngine,
   translator,
 }: {
   deckStore: DeckStore
@@ -139,7 +139,7 @@ function App({
   clipCache: BoundedClipCache
   scanReader: ScanReader
   errorLog: ErrorLog
-  librarySyncClient: LibrarySyncClient
+  syncEngine: SyncEngine
   translator: Translator
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
@@ -179,44 +179,50 @@ function App({
     [settings.voice, clipCache],
   )
 
+  const [sync, setSync] = useState<SyncSnapshot>(() => syncEngine.snapshot())
+
   useEffect(() => {
     let cancelled = false
-    void (async () => {
-      // Local first, always: what is on this device is shown without
-      // waiting for a network round-trip that may never answer.
-      const [loadedDecks, loadedMixes] = await Promise.all([deckStore.loadAll(), mixStore.loadAll()])
+    // Local first, always: what is on this device is shown without waiting
+    // for a network round-trip that may never answer.
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(([loadedDecks, loadedMixes]) => {
       if (cancelled) return
       setDecks(loadedDecks)
       setMixes(loadedMixes)
-
-      // Then pull, on every boot — not only when local storage is empty
-      // (T060). The old gate meant a device holding even one Deck never
-      // asked the server anything again, so a Deck made on the web was
-      // never seen by the phone. `not-found`/`unauthorized`/`network` all
-      // leave her exactly where she is: pulling is a bonus on top of local
-      // storage, never a blocker in front of it.
-      const pulled = await librarySyncClient.pull()
-      if (cancelled || !pulled.ok) return
-
-      // Merge, never replace. The server copy is another device's snapshot,
-      // not an authority: replacing local with it would delete anything
-      // saved here while offline. Boot deliberately does NOT push the
-      // result — opening the app must not be able to change the server
-      // copy; only a save or a delete pushes.
-      const merged = mergeLibraries(
-        normalizeLibrary(await deckStore.exportAll()),
-        normalizeLibrary(pulled.library),
-      )
-      await deckStore.importAll(merged)
-      const [mergedDecks, mergedMixes] = await Promise.all([deckStore.loadAll(), mixStore.loadAll()])
-      if (cancelled) return
-      setDecks(mergedDecks)
-      setMixes(mergedMixes)
-    })()
+    })
     return () => {
       cancelled = true
     }
-  }, [deckStore, mixStore, librarySyncClient])
+  }, [deckStore, mixStore])
+
+  // Sync runs itself (T034): the engine syncs at launch, after every change
+  // (debounced), on reconnect, and when the app is backgrounded. Nothing here
+  // decides when — this only starts it and listens.
+  useEffect(() => {
+    const unsubscribe = syncEngine.subscribe(setSync)
+    syncEngine.start()
+    return () => {
+      unsubscribe()
+      syncEngine.stop()
+    }
+  }, [syncEngine])
+
+  // A merge replaced the local library with one holding another device's
+  // work, so what is on screen is now stale. Re-read both stores; `revision`
+  // changes only when that actually happened, never on an ordinary sync.
+  const revision = sync.libraryRevision
+  useEffect(() => {
+    if (revision === 0) return
+    let cancelled = false
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(([loadedDecks, loadedMixes]) => {
+      if (cancelled) return
+      setDecks(loadedDecks)
+      setMixes(loadedMixes)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [revision, deckStore, mixStore])
 
   useEffect(() => {
     let cancelled = false
@@ -282,40 +288,13 @@ function App({
   }
 
   /**
-   * Pushes the whole Library to the server after a local change (T041:
-   * "her library is stored server-side"). Fire-and-forget from the caller's
-   * point of view — a failed push never blocks the local save, which has
-   * already happened by the time this runs; it only updates `lastSyncAt` on
-   * success, so Diagnostics can show how stale the server copy might be.
-   *
-   * Read-merge-write, not write (T060). The push carries the whole library,
-   * so pushing this device's copy blind overwrites whatever only the other
-   * device had — which is how a Deck she made on the web was deleted by the
-   * next save on her phone. So: pull first, merge, push the union.
-   *
-   * A pull that fails means this device cannot know what it would be
-   * overwriting, and it does not push at all. Her change is already saved
-   * locally and goes up on the next successful sync; the alternative —
-   * pushing anyway — is exactly the destructive write this exists to
-   * prevent. `not-found` is not a failure: it means the server holds
-   * nothing yet, so there is nothing to merge with and nothing to lose.
+   * Tell the engine something changed. Debounced and coalesced there, so a
+   * burst of edits is one round-trip; never awaited here, because a local
+   * save must never be gated on the network. Every rule about what a sync is
+   * allowed to do lives in `adapters/sync/sync-engine.ts`, not here.
    */
   function syncToServer(): void {
-    void (async () => {
-      const pulled = await librarySyncClient.pull()
-      if (!pulled.ok && pulled.reason !== 'not-found') return
-
-      const local = await deckStore.exportAll()
-      const outgoing = pulled.ok
-        ? mergeLibraries(normalizeLibrary(local), normalizeLibrary(pulled.library))
-        : local
-
-      const result = await librarySyncClient.push(outgoing)
-      if (!result.ok) return
-      const timestamp = Date.now()
-      setSettings((current) => ({ ...current, lastSyncAt: timestamp }))
-      void settingsStore.recordSync(timestamp)
-    })()
+    syncEngine.requestSync()
   }
 
   function handleCreateDeck(name: string) {
@@ -721,6 +700,10 @@ function App({
       onRestoreFileChosen={handleRestoreFileChosen}
       onConfirmRestore={handleConfirmRestore}
       onCancelRestore={handleCancelRestore}
+      // Computed at render, not on a timer: the engine re-renders this screen
+      // on every state change, and a "3 minutes ago" that is occasionally a
+      // minute stale is not worth a ticking interval on a phone.
+      syncStatus={syncStatusText(sync, Date.now())}
     />
   )
 }
