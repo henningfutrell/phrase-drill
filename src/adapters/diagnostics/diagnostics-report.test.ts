@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { Deck, DeckStore, Library } from '../../domain'
 import { LIBRARY_FORMAT } from '../../domain'
-import type { ClipCache, Settings, SettingsStore, Voice } from '../storage'
+import type { ClipCache, Settings, SettingsStore } from '../storage'
+import type { Voice } from '../../domain'
 import { collectDiagnostics, formatDiagnosticsReport } from './diagnostics-report'
 import type { ErrorLog, LogEntry } from './error-log'
 

@@ -3,7 +3,7 @@ import { createGenerationQueue, type GenerationStatus } from './generation-queue
 import type { SynthClient, SynthError } from './server-synth-client'
 import type { Clip, ClipCache } from '../storage/clip-cache'
 import { computeClipHash } from '../storage/clip-cache'
-import type { Voice } from '../storage/settings-store'
+import type { Voice } from '../../domain'
 
 const VOICE: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 const PHRASE = { id: 'p1', french: 'Bonjour', english: 'Hello' }
