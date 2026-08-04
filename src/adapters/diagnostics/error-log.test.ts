@@ -1,12 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetFakeIdb } from '../storage/idb.test-support'
 
-vi.mock('idb', async () => {
-  const fake = await import('../storage/idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-const { createIndexedDbErrorLog, ERROR_LOG_CAP } = await import('./error-log')
+import { createIndexedDbErrorLog, ERROR_LOG_CAP } from './error-log'
 
 describe('createIndexedDbErrorLog', () => {
   beforeEach(() => {

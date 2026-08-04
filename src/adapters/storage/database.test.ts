@@ -1,14 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { idbOperations, resetFakeIdb, triggerBlocked, triggerTerminated } from './idb.test-support'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { idbOperations, resetFakeIdb, terminateConnection } from './idb.test-support'
 
-vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract.
-const idbModule = await import('idb')
-const {
+import * as idbModule from 'idb'
+import {
   openDatabase,
   databaseTrouble,
   DB_NAME,
@@ -19,7 +13,8 @@ const {
   ERRORS_STORE,
   MIXES_STORE,
   TOMBSTONES_STORE,
-} = await import('./database')
+} from './database'
+import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 /**
  * Fixture: a v1 database, as it would sit on a real device today — no
@@ -44,6 +39,9 @@ async function seedV1Database(): Promise<void> {
     updatedAt: 2,
   })
   await v1db.put(SETTINGS_STORE, 'sk-ant-abc123', 'anthropicApiKey')
+  // Real IndexedDB blocks an upgrade while an older connection is open, so
+  // the fixture has to end the way a previous page load does: closed.
+  v1db.close()
 }
 
 describe('openDatabase v1 -> v2 migration', () => {
@@ -111,6 +109,7 @@ describe('openDatabase v2 -> v3 migration', () => {
       createdAt: 1,
       updatedAt: 2,
     })
+    v2db.close()
   }
 
   it('adds the errors store on top of a real v2 database, without touching existing decks', async () => {
@@ -172,6 +171,7 @@ describe('openDatabase v3 -> v4 migration (T059: saved Mixes)', () => {
     })
     await v3db.put(SETTINGS_STORE, { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }, 'voice')
     await v3db.put(CLIPS_STORE, { hash: 'abc', bytes: new ArrayBuffer(2), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+    v3db.close()
   }
 
   it('adds the mixes store on top of a real v3 database, with every Deck and Phrase intact', async () => {
@@ -266,6 +266,7 @@ describe('openDatabase v5 -> v6 migration (T072: the upgrade may not load the cl
     await v5db.put(TOMBSTONES_STORE, { id: 'gone', kind: 'deck', deletedAt: 4 })
     await v5db.put(CLIPS_STORE, { hash: 'a', bytes: new ArrayBuffer(8), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
     await v5db.put(CLIPS_STORE, { hash: 'b', bytes: new ArrayBuffer(4), mime: 'audio/mpeg', durationMs: 1, createdAt: 20 })
+    v5db.close()
   }
 
   it('never reads the clip store while upgrading — not whole, and not clip by clip', async () => {
@@ -301,24 +302,40 @@ describe('openDatabase says so when the database cannot be opened (T072)', () =>
     resetFakeIdb()
   })
 
+  /**
+   * The real condition, not a callback a double was asked to fire: another
+   * connection — a second tab, a stale service-worker client — is holding the
+   * previous version open, so IndexedDB refuses to start the upgrade and the
+   * open request never settles. `openDatabase()`'s promise stays pending for
+   * the whole of this test, which is precisely the failure being reported.
+   */
   it('reports a blocked upgrade instead of waiting forever in silence', async () => {
+    const holder = await idbModule.openDB(DB_NAME, CURRENT_SCHEMA_VERSION - 1, {
+      upgrade(db) {
+        db.createObjectStore(DECKS_STORE, { keyPath: 'id' })
+      },
+    })
     const seen: string[] = []
     const unsubscribe = databaseTrouble.subscribe((trouble) => seen.push(trouble))
 
-    void openDatabase()
-    await Promise.resolve()
-    triggerBlocked(DB_NAME)
+    let settled = false
+    void openDatabase().then(() => {
+      settled = true
+    })
+    await waitFor(() => seen.length > 0)
 
     expect(seen).toEqual(['blocked'])
+    expect(settled).toBe(false)
     unsubscribe()
+    holder.close()
   })
 
   it('reports a connection the browser closed underneath it', async () => {
     const seen: string[] = []
     const unsubscribe = databaseTrouble.subscribe((trouble) => seen.push(trouble))
 
-    await openDatabase()
-    triggerTerminated(DB_NAME)
+    const db = await openDatabase()
+    terminateConnection(db)
 
     expect(seen).toEqual(['terminated'])
     unsubscribe()
@@ -327,11 +344,18 @@ describe('openDatabase says so when the database cannot be opened (T072)', () =>
   it('stops reporting to a listener that unsubscribed', async () => {
     const seen: string[] = []
     const unsubscribe = databaseTrouble.subscribe((trouble) => seen.push(trouble))
-    await openDatabase()
+    const db = await openDatabase()
     unsubscribe()
 
-    triggerTerminated(DB_NAME)
+    terminateConnection(db)
 
     expect(seen).toEqual([])
   })
 })
+
+/** Let the real event loop turn until `condition` holds, or give up. */
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100 && !condition(); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+}

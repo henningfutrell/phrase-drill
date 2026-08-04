@@ -1,13 +1,13 @@
 /**
  * T032 — measures what "thousands of Phrases" actually costs, against the
  * *real* clip-cache, deck-store, and library code paths, run through the
- * same in-memory `idb` fake the rest of this repo's adapter tests use
- * (`idb.test-support.ts`, `vi.mock('idb', ...)`). Not part of the default
+ * same in-memory IndexedDB the rest of this repo's adapter tests use
+ * (`fake-indexeddb`, via `idb.test-support.ts`). Not part of the default
  * `npm test` run — see docs/scale.md for how to invoke it and what the last
  * run found.
  *
- * Everything measured here runs against the in-memory fake, not real Safari
- * disk-backed IndexedDB — that fake is a `Map`, so these numbers are a
+ * Everything measured here runs in memory, not against real Safari
+ * disk-backed IndexedDB — so these numbers are a
  * floor for on-device IDB latency, not a ceiling. Network calls to
  * ElevenLabs are never made; this file must not import or exercise the real
  * `eleven-labs-synth-client.ts` fetch path. Every number this file prints is
@@ -26,16 +26,9 @@ import { resetFakeIdb } from './idb.test-support'
 // project-wide for one gate flag.
 declare const process: { env: Record<string, string | undefined> }
 
-vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract —
-// same pattern as clip-cache.test.ts / indexed-db-deck-store.test.ts.
-const { createIndexedDbClipCache, computeClipHash } = await import('./clip-cache')
-const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
-const { knownVoices } = await import('../audio/voice-catalogue')
+import { createIndexedDbClipCache, computeClipHash } from './clip-cache'
+import { createIndexedDbDeckStore } from './indexed-db-deck-store'
+import { knownVoices } from '../audio/voice-catalogue'
 
 const RUN = process.env.RUN_SCALE_BENCH === '1'
 
@@ -226,7 +219,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
 
       // 2b. Concurrency: how many requests does the queue hold open at
       // once? Measuring "max simultaneous in-flight" against an
-      // instant-resolving fake is unreliable — it's dominated by how Node's
+      // in-memory database is unreliable — it's dominated by how Node's
       // real WebCrypto scheduler batches digest completions, not by the
       // queue's own logic. A decisive proof instead: give every call a synth
       // client that NEVER resolves, enqueue the whole library, flush, and
@@ -265,7 +258,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
 
       // 3a. IDB write throughput — save the whole library deck-by-deck
       // (the normal edit path) through the real deck store, against the
-      // fake idb.
+      // in-memory IndexedDB.
       const deckStore = createIndexedDbDeckStore()
       const saveStart = performance.now()
       for (const deck of decks) await deckStore.save(deck)
@@ -309,7 +302,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
 
       // Warm the cache: put a Clip (modelled bytes) for every phrase/lang,
       // so readyPhraseIds' db.getAll(CLIPS_STORE) has to load 2N real
-      // ArrayBuffers of realistic (modelled) size out of the fake store —
+      // ArrayBuffers of realistic (modelled) size out of the store —
       // this is what happens on every drill start once the library is
       // fully generated.
       for (const phrase of phrases) {

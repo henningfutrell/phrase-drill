@@ -3,14 +3,9 @@ import type { Mix } from '../../domain'
 import { resetFakeIdb } from './idb.test-support'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
-vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbMixStore } = await import('./indexed-db-mix-store')
-const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
+import { openDB } from 'idb'
+import { createIndexedDbMixStore } from './indexed-db-mix-store'
+import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 
 function makeMix(overrides: Partial<Mix> = {}): Mix {
   return { id: 'mix-1', name: 'Mornings', deckIds: ['home', 'work'], ...overrides }
@@ -89,8 +84,7 @@ describe('createIndexedDbMixStore', () => {
     const store = createIndexedDbMixStore()
     await store.save(makeMix())
 
-    const idbModule = await import('idb')
-    const db = await idbModule.openDB('phrase-drill', CURRENT_SCHEMA_VERSION)
+    const db = await openDB('phrase-drill', CURRENT_SCHEMA_VERSION)
 
     expect(db.objectStoreNames.contains('mixes')).toBe(true)
   })

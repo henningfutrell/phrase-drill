@@ -1,15 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetFakeIdb } from './idb.test-support'
 
-vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbSettingsStore } = await import('./settings-store')
-const { createIndexedDbClipCache, computeClipHash } = await import('./clip-cache')
-const { knownVoices } = await import('../audio/voice-catalogue')
+import { createIndexedDbSettingsStore } from './settings-store'
+import { createIndexedDbClipCache, computeClipHash } from './clip-cache'
+import { knownVoices } from '../audio/voice-catalogue'
 
 /**
  * T026 wrote this test to prove the opposite of what it proves now, and the

@@ -56,7 +56,7 @@ crosses the line. Two things make that safe rather than merely intended:
 - **Eviction can name exactly two stores.** `delete` is only ever called with
   `CLIPS_STORE` and `CLIP_META_STORE`. It is not a rule someone has to
   remember: `clip-cache-eviction.test.ts` runs a 20,000-Clip cold fill and
-  asserts, against a log of every destructive IndexedDB operation the fake
+  asserts, against a log of every destructive IndexedDB operation the database
   received, that no other store was touched — and that the Decks, Phrases and
   Mixes are byte-identical afterwards.
 
@@ -99,3 +99,49 @@ deleted this" from "this device has never seen it" unless the deletion is
 itself recorded. Removing a Deck or a Mix writes its Tombstone in the *same*
 transaction as the delete: a delete without one is a delete every other
 device undoes at the next sync.
+
+## How these tests run: a real IndexedDB, not a double
+
+Every test under `adapters/storage` (and the sync, audio and diagnostics tests
+that reach storage) runs the real adapters against **`fake-indexeddb`** — a
+complete in-memory implementation of the IndexedDB specification — installed as
+the global `indexedDB` by `idb.test-support.ts`. The real `idb` package sits on
+top of it, unmodified. There is no `vi.mock('idb', ...)` anywhere.
+
+That file used to hold a hand-rolled double instead, and T084 replaced it
+because of what the double could not express:
+
+```ts
+done: Promise.resolve(),
+abort: () => {},
+```
+
+Every operation applied to a backing `Map` the instant it was called, `abort()`
+did nothing, `done` was already settled, and `transaction()` ignored its scope
+and took no locks. `update` and `updateAll` exist for exactly one property —
+read/merge/write is indivisible — and **the double could not tell the fixed code
+from the code before the fix on that property.** The atomicity tests are in
+`transaction-atomicity.test.ts`; run them against the two-transaction shape
+these verbs replaced and they go red.
+
+Consequences worth knowing before writing a test here:
+
+- **A connection left open blocks the next upgrade**, exactly as on a phone. A
+  fixture that seeds an old schema version must `close()` its connection, the
+  way a previous page load's connection is gone.
+- **A transaction commits when it yields to the event loop.** You cannot hold
+  one open across `setTimeout`; the adapters do not, and that is why their
+  guarantee holds.
+- **Values are structured-cloned**, so what is read back is a copy, never the
+  object that was written.
+
+Two hooks exist beside the database, and both are narrow on purpose:
+
+- `idbOperations` / `idbTransactions` — a log of every operation and the
+  transaction that carried it. "The read and the write are one transaction" and
+  "it spans all three stores" are facts about a transaction, not about the
+  values left in the stores, so pinning them needs a way to name it.
+- `failNextWriteTo(store)` — a refused write. A working database will not fail
+  on request, and the restore path's "nothing was replaced" promise is about
+  precisely that failure. The error is raised through the implementation's own
+  request pipeline, so the abort and the rollback under test are real.
