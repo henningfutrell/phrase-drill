@@ -37,8 +37,17 @@ const SYNC_BASELINE = 'syncBaseline'
 export function createIndexedDbSyncBaselineStore(): SyncBaselineStore {
   let dbPromise: Promise<IDBPDatabase> | undefined
 
+  // A failed open is forgotten again, so one refusal is not replayed for the
+  // rest of the session (T087; see `indexed-db-deck-store.ts` for why). The
+  // baseline is derived and regenerable, but a store that has given up writes
+  // no baseline at all, so every merge for the rest of the session falls back
+  // to whole-record rules — the precise case that loses a Phrase when two
+  // devices edit one Deck between round-trips.
   function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase()
+    dbPromise ??= openDatabase().catch((error: unknown) => {
+      dbPromise = undefined
+      throw error
+    })
     return dbPromise
   }
 
