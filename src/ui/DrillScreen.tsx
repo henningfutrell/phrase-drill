@@ -172,6 +172,12 @@ export function DrillScreen({
   const [repCount, setRepCount] = useState(0)
   const [live, setLive] = useState<LiveStep>({ beatIndex: 0 })
   const [interrupted, setInterrupted] = useState(false)
+  // True only for the span of this tap's own unlock() call (T001) — guards
+  // the Start Drill button against a second tap re-entering handleStart
+  // while the first is still awaiting unlock, and is always cleared
+  // afterwards (success or failure) so a genuine failure leaves the button
+  // tappable again, per the error copy's own "Tap Start Drill to try again."
+  const [starting, setStarting] = useState(false)
   // The last spoken line, held across pause Steps (which carry no
   // utterance) rather than reset by every Step — a normal render value,
   // not a ref, since it feeds directly into JSX below.
@@ -220,36 +226,46 @@ export function DrillScreen({
   }, [onExit, releaseWakeLock])
 
   async function handleStart(readyPhrases: readonly Phrase[], skippedCount: number, online: boolean) {
-    // Unlock first, inside this tap — see the `unlock` prop doc comment.
-    const outcome = await unlock()
-    if (!outcome.ok) {
-      setPhase({ kind: 'start', ready: readyPhrases, skippedCount, online, unlockFailure: outcome })
-      return
+    // Guards against a second tap re-entering this method while the first
+    // is still awaiting unlock() (T001) — belt-and-braces alongside the
+    // button's own `disabled` below, since `starting` only takes effect
+    // after the next render.
+    if (starting) return
+    setStarting(true)
+    try {
+      // Unlock first, inside this tap — see the `unlock` prop doc comment.
+      const outcome = await unlock()
+      if (!outcome.ok) {
+        setPhase({ kind: 'start', ready: readyPhrases, skippedCount, online, unlockFailure: outcome })
+        return
+      }
+
+      void acquireWakeLock?.()
+      setCurrentUtterance(undefined)
+      setLive({ beatIndex: 0 })
+      setInterrupted(false)
+
+      const ports = instrumentPorts(
+        speech,
+        clock,
+        () => playerRef.current?.position ?? 0,
+        (info) => {
+          if (info.utterance) setCurrentUtterance(info.utterance)
+          setLive(info)
+        },
+      )
+      const player = createDrillPlayer(readyPhrases, ports, { random })
+      playerRef.current = player
+      setStatus('playing')
+      setRepIndex(0)
+      setRepCount(player.repCount)
+      setPhase({ kind: 'running', skippedCount })
+
+      await player.start()
+      syncFromPlayer()
+    } finally {
+      setStarting(false)
     }
-
-    void acquireWakeLock?.()
-    setCurrentUtterance(undefined)
-    setLive({ beatIndex: 0 })
-    setInterrupted(false)
-
-    const ports = instrumentPorts(
-      speech,
-      clock,
-      () => playerRef.current?.position ?? 0,
-      (info) => {
-        if (info.utterance) setCurrentUtterance(info.utterance)
-        setLive(info)
-      },
-    )
-    const player = createDrillPlayer(readyPhrases, ports, { random })
-    playerRef.current = player
-    setStatus('playing')
-    setRepIndex(0)
-    setRepCount(player.repCount)
-    setPhase({ kind: 'running', skippedCount })
-
-    await player.start()
-    syncFromPlayer()
   }
 
   function handlePause(): void {
@@ -341,6 +357,7 @@ export function DrillScreen({
           type="button"
           data-testid="drill-start"
           className="btn-primary"
+          disabled={starting}
           onClick={() => void handleStart(phase.ready, phase.skippedCount, phase.online)}
         >
           Start Drill
