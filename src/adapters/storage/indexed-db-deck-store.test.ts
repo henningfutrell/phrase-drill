@@ -59,6 +59,86 @@ describe('createIndexedDbDeckStore', () => {
     expect(await store.get('missing')).toBeUndefined()
   })
 
+  /**
+   * `update` is the composition root's write (T075). `save` puts a whole Deck
+   * built somewhere else and some time ago — from React state, which is a view
+   * and is stale by the time a tap reaches storage. That gap is where a Phrase
+   * a merge had just written was overwritten away. `update` closes it the same
+   * way `updateAll` closes the sync path's: the read and the write are ONE
+   * transaction, and the function is handed the Deck as it is stored at that
+   * instant.
+   */
+  describe('update', () => {
+    it('applies the change to what is stored NOW, not to what the caller last read', async () => {
+      const store = createIndexedDbDeckStore()
+      await store.save(makeDeck({ id: 'home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] }))
+      const readEarlier = (await store.get('home'))!
+      // A merge writes a Phrase from her other phone while the caller is still
+      // holding `readEarlier`.
+      await store.save({
+        ...readEarlier,
+        phrases: [...readEarlier.phrases, { id: 'p2', french: 'Bonne nuit', english: 'Good night' }],
+      })
+
+      const written = await store.update('home', (stored) => ({
+        ...stored!,
+        phrases: [...stored!.phrases, { id: 'p3', french: 'Merci', english: 'Thank you' }],
+      }))
+
+      expect(written.phrases.map((p) => p.id)).toEqual(['p1', 'p2', 'p3'])
+      expect((await store.get('home'))!.phrases.map((p) => p.id)).toEqual(['p1', 'p2', 'p3'])
+    })
+
+    it('hands the change nothing when this device no longer holds that Deck, and writes what it returns', async () => {
+      const store = createIndexedDbDeckStore()
+      let seen: unknown = 'never called'
+
+      const written = await store.update('home', (stored) => {
+        seen = stored
+        return makeDeck({ id: 'home', name: 'Home' })
+      })
+
+      expect(seen).toBeUndefined()
+      expect(written).toEqual(makeDeck({ id: 'home', name: 'Home' }))
+      expect(await store.get('home')).toEqual(makeDeck({ id: 'home', name: 'Home' }))
+    })
+
+    it('keeps the Deck’s createdAt and moves its updatedAt, like a save', async () => {
+      const store = createIndexedDbDeckStore()
+      await store.save(makeDeck({ id: 'home' }))
+      const created = (await store.exportAll()).decks[0]!.createdAt
+
+      await store.update('home', (stored) => ({ ...stored!, name: 'À la maison' }))
+
+      const record = (await store.exportAll()).decks[0]!
+      expect(record.createdAt).toBe(created)
+      expect(record.updatedAt).toBeGreaterThanOrEqual(created)
+    })
+
+    it('leaves the stored Deck untouched when the change refuses', async () => {
+      const store = createIndexedDbDeckStore()
+      await store.save(makeDeck({ id: 'home', name: 'Home' }))
+
+      await expect(
+        store.update('home', () => {
+          throw new Error('nothing to apply this to')
+        }),
+      ).rejects.toThrow('nothing to apply this to')
+
+      expect((await store.get('home'))!.name).toBe('Home')
+    })
+
+    it('reaches the decks store and nothing else', async () => {
+      const store = createIndexedDbDeckStore()
+      await store.save(makeDeck({ id: 'home' }))
+      idbDestructiveOperations.length = 0
+
+      await store.update('home', (stored) => ({ ...stored!, name: 'Renamed' }))
+
+      expect(idbDestructiveOperations).toEqual([])
+    })
+  })
+
   it('removes a deck', async () => {
     const store = createIndexedDbDeckStore()
     const deck = makeDeck()
