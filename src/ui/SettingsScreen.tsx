@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import type { BackupAge } from '../domain'
+import { BackupStatus, type ExportOutcome } from './BackupStatus'
+import { RestoreControl, type RestoreFileResult } from './RestoreControl'
 
 /** Plain presentation shape for the pinned voice — no adapter types cross into UI. */
 export interface VoiceInfo {
@@ -47,19 +50,11 @@ function formatMb(bytes: number): string {
   return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB`
 }
 
-/** What `onExportBackup` resolved to, for the one-line status shown after. */
-export type ExportOutcome = 'shared' | 'cancelled' | 'downloaded'
-
-/** Why a chosen restore file was refused — mirrors `ParseLibraryResult`'s
- * `reason` without this presentational component importing the adapter type. */
-export type RestoreRefusal = { ok: false; reason: 'not-json' | 'wrong-format' | 'invalid' }
-export type RestoreFileResult = { ok: true } | RestoreRefusal
-
-const RESTORE_ERROR_COPY: Record<RestoreRefusal['reason'], string> = {
-  'not-json': "That file wasn't able to be read as a backup — it may be damaged. Try exporting a fresh one.",
-  'wrong-format': "That doesn't look like a phrase-drill backup. Choose the file that was saved from Export backup.",
-  invalid: "That doesn't look like a phrase-drill backup. Choose the file that was saved from Export backup.",
-}
+// `ExportOutcome` and `RestoreFileResult` moved to the components that own
+// them (T031) — `BackupStatus` and `RestoreControl` — along with the restore
+// error copy. Re-exported here because callers still reach them through this
+// screen's module.
+export type { ExportOutcome, RestoreFileResult }
 
 /**
  * Settings — the voice picker and backup/restore (docs/design.md §3.6). Her
@@ -78,7 +73,9 @@ export function SettingsScreen({
   previewText,
   onPreviewVoice,
   onChooseVoice,
+  backupAge,
   onExportBackup,
+  onCopyText,
   onRestoreFileChosen,
   onConfirmRestore,
   onCancelRestore,
@@ -95,7 +92,9 @@ export function SettingsScreen({
     signal: AbortSignal,
   ) => Promise<PreviewOutcome>
   onChooseVoice: (voice: { provider: string; modelId: string; voiceId: string }) => void
+  backupAge: BackupAge
   onExportBackup: () => Promise<ExportOutcome>
+  onCopyText?: (text: string) => Promise<boolean>
   onRestoreFileChosen: (file: File) => Promise<RestoreFileResult>
   onConfirmRestore: () => void
   onCancelRestore: () => void
@@ -103,10 +102,6 @@ export function SettingsScreen({
   /** `undefined` while the cache has not answered yet — never shown as zero. */
   savedAudio: SavedAudioUsage | undefined
 }) {
-  const [exportStatus, setExportStatus] = useState<string | null>(null)
-  const [restoreError, setRestoreError] = useState<string | null>(null)
-  const [confirmingRestore, setConfirmingRestore] = useState(false)
-  const restoreFileInput = useRef<HTMLInputElement>(null)
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const previewController = useRef<AbortController | null>(null)
@@ -157,43 +152,6 @@ export function SettingsScreen({
     setConfirmingVoice(null)
   }
 
-  async function handleExportBackup() {
-    const outcome = await onExportBackup()
-    if (outcome === 'shared') {
-      setExportStatus('Backup shared.')
-    } else if (outcome === 'downloaded') {
-      setExportStatus('Sharing wasn’t available, so the backup downloaded instead — check Files, or wherever this browser saves downloads.')
-    } else {
-      setExportStatus(null)
-    }
-  }
-
-  async function handleRestoreFileChange(files: FileList | null) {
-    const file = files?.[0]
-    if (restoreFileInput.current) restoreFileInput.current.value = ''
-    if (!file) return
-
-    setExportStatus(null)
-    const result = await onRestoreFileChosen(file)
-    if (result.ok) {
-      setRestoreError(null)
-      setConfirmingRestore(true)
-    } else {
-      setRestoreError(RESTORE_ERROR_COPY[result.reason])
-      setConfirmingRestore(false)
-    }
-  }
-
-  function handleConfirmRestore() {
-    setConfirmingRestore(false)
-    onConfirmRestore()
-  }
-
-  function handleCancelRestore() {
-    setConfirmingRestore(false)
-    onCancelRestore()
-  }
-
   return (
     <main className="screen">
       <header className="screen-header">
@@ -203,6 +161,25 @@ export function SettingsScreen({
         <h1>Settings</h1>
         <span />
       </header>
+
+      <section className="settings-section settings-section--backup" data-testid="backup-section">
+        <h2 className="settings-section-title">Backup</h2>
+        <BackupStatus age={backupAge} onExportBackup={onExportBackup} onCopyText={onCopyText} />
+        <p className="settings-help">
+          Your phrases sync to the server automatically, but you can also save a backup
+          file you keep or send yourself, for extra peace of mind.
+        </p>
+        <p className="settings-help">
+          Saved audio isn't part of the backup — it's regenerated automatically the
+          next time you're online, using the same voice, so it's normal for a restored
+          phrase to be briefly silent while that catches up.
+        </p>
+        <RestoreControl
+          onRestoreFileChosen={onRestoreFileChosen}
+          onConfirmRestore={onConfirmRestore}
+          onCancelRestore={onCancelRestore}
+        />
+      </section>
 
       <section className="settings-section">
         <h2 className="settings-section-title">Voice</h2>
@@ -302,58 +279,6 @@ export function SettingsScreen({
         </p>
       </section>
 
-      <section className="settings-section settings-section--backup" data-testid="backup-section">
-        <h2 className="settings-section-title">Backup</h2>
-        <p className="settings-help">
-          Your phrases sync to the server automatically, but you can also save a backup
-          file you keep or send yourself, for extra peace of mind.
-        </p>
-        <p className="settings-help">
-          Saved audio isn't part of the backup — it's regenerated automatically the
-          next time you're online, using the same voice, so it's normal for a restored
-          phrase to be briefly silent while that catches up.
-        </p>
-        <button
-          type="button"
-          data-testid="export-backup"
-          className="btn-primary"
-          onClick={() => {
-            void handleExportBackup()
-          }}
-        >
-          Export backup
-        </button>
-        {exportStatus && (
-          <p className="settings-status settings-status--calm" data-testid="export-status">
-            {exportStatus}
-          </p>
-        )}
-
-        <button
-          type="button"
-          data-testid="restore-backup"
-          className="btn-icon"
-          onClick={() => restoreFileInput.current?.click()}
-        >
-          Restore from backup
-        </button>
-        <input
-          ref={restoreFileInput}
-          type="file"
-          accept="application/json,.json"
-          data-testid="restore-file-input"
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            void handleRestoreFileChange(e.target.files)
-          }}
-        />
-        {restoreError && (
-          <p className="settings-status" data-testid="restore-error">
-            {restoreError}
-          </p>
-        )}
-      </section>
-
       <section className="settings-section" data-testid="diagnostics-section">
         <h2 className="settings-section-title">Diagnostics</h2>
         <p className="settings-help">
@@ -388,28 +313,6 @@ export function SettingsScreen({
         </div>
       )}
 
-      {confirmingRestore && (
-        <div className="sheet" data-testid="restore-confirm-sheet">
-          <p className="sheet-title">This replaces everything currently saved.</p>
-          <p className="sheet-label">
-            Every Deck and Phrase on this phone will be replaced by what's in this
-            backup file. This can't be undone. Are you sure?
-          </p>
-          <div className="sheet-actions">
-            <button type="button" data-testid="restore-cancel" className="btn-secondary" onClick={handleCancelRestore}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              data-testid="restore-confirm"
-              className="btn-primary btn-danger"
-              onClick={handleConfirmRestore}
-            >
-              Replace my phrases
-            </button>
-          </div>
-        </div>
-      )}
     </main>
   )
 }

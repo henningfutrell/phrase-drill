@@ -27,13 +27,18 @@ vi.mock('./adapters/share/web-share', () => ({
 }))
 const { shareBackupFile } = await import('./adapters/share/web-share')
 
+vi.mock('./adapters/device/install-state', () => ({
+  readInstallStateFromBrowser: vi.fn(() => ({ platform: 'ios', installed: true })),
+}))
+const { readInstallStateFromBrowser } = await import('./adapters/device/install-state')
+
 /** In-memory SettingsStore fake — the real one is exercised in
  * src/adapters/storage; App's wiring is what these tests care about. */
 function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore {
   let settings: Settings = {
     voice: null,
-    backupNudgeDismissed: false,
     lastSyncAt: null,
+    lastExportAt: null,
     ...initial,
   }
   return {
@@ -43,11 +48,11 @@ function createFakeSettingsStore(initial: Partial<Settings> = {}): SettingsStore
     async setVoice(voice) {
       settings = { ...settings, voice }
     },
-    async dismissBackupNudge() {
-      settings = { ...settings, backupNudgeDismissed: true }
-    },
     async recordSync(timestamp) {
       settings = { ...settings, lastSyncAt: timestamp }
+    },
+    async recordExport(timestamp) {
+      settings = { ...settings, lastExportAt: timestamp }
     },
   }
 }
@@ -418,6 +423,7 @@ describe('App wired to backup and restore', () => {
   beforeEach(() => {
     vi.mocked(shareBackupFile).mockClear()
     vi.mocked(shareBackupFile).mockResolvedValue('shared')
+    vi.mocked(readInstallStateFromBrowser).mockReturnValue({ platform: 'ios', installed: true })
   })
 
   it('exports the whole library through DeckStore.exportAll and hands it to the share adapter', async () => {
@@ -425,7 +431,7 @@ describe('App wired to backup and restore', () => {
     await renderApp(store)
     await openSettings()
 
-    await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+    await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
 
     expect(shareBackupFile).toHaveBeenCalledTimes(1)
     const [file] = vi.mocked(shareBackupFile).mock.calls[0]!
@@ -435,19 +441,53 @@ describe('App wired to backup and restore', () => {
     expect(JSON.parse(text)).toMatchObject({ format: LIBRARY_FORMAT })
   })
 
-  it('falls back to a plain download when the share adapter reports the platform cannot share files', async () => {
+  it('has the backup File already built before the tap, so the share call never loses its user activation', async () => {
+    // WebKit expires transient activation across an await (webkit.org/blog/13862).
+    // An `await deckStore.exportAll()` between her tap and `navigator.share()`
+    // is exactly the shape that makes Export a button that does nothing.
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store)
+    await openSettings()
+
+    const exportAllSpy = vi.spyOn(store, 'exportAll')
+    click(container.querySelector('[data-testid="backup-status-export"]')!)
+
+    expect(shareBackupFile).toHaveBeenCalledTimes(1)
+    expect(exportAllSpy).not.toHaveBeenCalled()
+    await act(async () => {})
+  })
+
+  it('never falls back to a download in an installed web app — it offers the text to copy instead', async () => {
+    // WebKit 290847: a download inside a standalone iOS web app opens an
+    // "Open in…" splash with no navigation out of it, and she has to force-quit.
     vi.mocked(shareBackupFile).mockResolvedValue('unsupported')
+    vi.mocked(readInstallStateFromBrowser).mockReturnValue({ platform: 'ios', installed: true })
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
     const createObjectURL = vi.fn().mockReturnValue('blob:fake')
-    const revokeObjectURL = vi.fn()
-    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
 
     await renderApp(store)
     await openSettings()
-    await act(async () => click(container.querySelector('[data-testid="export-backup"]')!))
+    await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
+
+    expect(createObjectURL).not.toHaveBeenCalled()
+    expect(container.querySelector('[data-testid="backup-copy-sheet"]')).not.toBeNull()
+    vi.unstubAllGlobals()
+  })
+
+  it('does fall back to a plain download in an ordinary browser tab, where a download is safe', async () => {
+    vi.mocked(shareBackupFile).mockResolvedValue('unsupported')
+    vi.mocked(readInstallStateFromBrowser).mockReturnValue({ platform: 'other', installed: false })
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const createObjectURL = vi.fn().mockReturnValue('blob:fake')
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
+
+    await renderApp(store)
+    await openSettings()
+    await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
 
     expect(createObjectURL).toHaveBeenCalled()
-    expect(container.querySelector('[data-testid="export-status"]')?.textContent).toMatch(/download|files/i)
+    expect(container.querySelector('[data-testid="backup-status-result"]')?.textContent).toMatch(/download|files/i)
     vi.unstubAllGlobals()
   })
 
@@ -815,54 +855,111 @@ describe('App wired to translate-and-add candidates (T057 scope addition)', () =
   })
 })
 
-describe('App wired to the backup nudge (T027)', () => {
-  it('shows the backup nudge on the Decks empty state when not yet dismissed', async () => {
-    const store = createFakeDeckStore([])
-    await renderApp(store, createFakeSettingsStore({ backupNudgeDismissed: false }))
-    expect(container.querySelector('[data-testid="backup-nudge"]')).not.toBeNull()
+describe('App wired to the backup age (T031)', () => {
+  const DAY = 86_400_000
+
+  beforeEach(() => {
+    vi.mocked(shareBackupFile).mockClear()
+    vi.mocked(shareBackupFile).mockResolvedValue('shared')
   })
 
-  it('omits the backup nudge on the Decks empty state once dismissed', async () => {
-    const store = createFakeDeckStore([])
-    await renderApp(store, createFakeSettingsStore({ backupNudgeDismissed: true }))
-    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
+  it('states the age on the home screen from the last successful sync', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 11 * DAY }))
+    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain('11 days ago')
   })
 
-  it('persists dismissal through SettingsStore and hides the nudge immediately, without a reload', async () => {
-    const store = createFakeDeckStore([])
-    const settingsStore = createFakeSettingsStore({ backupNudgeDismissed: false })
-    const dismissSpy = vi.spyOn(settingsStore, 'dismissBackupNudge')
-    await renderApp(store, settingsStore)
-
-    await act(async () => click(container.querySelector('[data-testid="dismiss-backup-nudge"]')!))
-
-    expect(dismissSpy).toHaveBeenCalledTimes(1)
-    expect(container.querySelector('[data-testid="backup-nudge"]')).toBeNull()
-    expect((await settingsStore.load()).backupNudgeDismissed).toBe(true)
-  })
-
-  it('carries the nudge to Scan review too, dismissible from either place', async () => {
-    const store = createFakeDeckStore([])
-    const scanReader = createFakeScanReader()
-    scanReader.read.mockResolvedValue([{ french: 'Bonjour', english: 'Hello' }])
+  it('counts a manual export as a backup too, and takes whichever of the two is more recent', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
     await renderApp(
       store,
-      createFakeSettingsStore({ backupNudgeDismissed: false }),
-      createFakeSynthClient(),
-      createFakeGenerationQueue(),
-      createFakeClipCache(),
-      scanReader,
+      createFakeSettingsStore({ lastSyncAt: Date.now() - 40 * DAY, lastExportAt: Date.now() - 2 * DAY }),
     )
+    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain('2 days ago')
+  })
 
-    await act(async () => click(container.querySelector('[data-testid="open-import"]')!))
-    const input = container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement
+  it('escalates to overdue once neither has happened for a month', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY }))
+    const indicator = container.querySelector('[data-testid="backup-status"]') as HTMLElement
+    expect(indicator.dataset.level).toBe('overdue')
+  })
+
+  it('says nothing has ever been backed up when neither has ever happened', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: null, lastExportAt: null }))
+    expect(container.querySelector('[data-testid="backup-status"]')!.textContent).toContain('Not backed up yet')
+  })
+
+  it('offers nothing to dismiss, anywhere — the indicator is a fact, not a nudge', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY }))
+    expect(container.querySelector('[data-testid="dismiss-backup-nudge"]')).toBeNull()
+  })
+
+  it('records the export time and goes quiet immediately, with no reload', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const settingsStore = createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY })
+    await renderApp(store, settingsStore)
+
+    await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
+
+    expect((await settingsStore.load()).lastExportAt).toBeGreaterThan(Date.now() - 5_000)
+    const indicator = container.querySelector('[data-testid="backup-status"]') as HTMLElement
+    expect(indicator.dataset.level).toBe('fresh')
+  })
+
+  it('records nothing when she backs out of the share sheet — a cancelled export is not a backup', async () => {
+    vi.mocked(shareBackupFile).mockResolvedValue('cancelled')
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const settingsStore = createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY })
+    await renderApp(store, settingsStore)
+
+    await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
+
+    expect((await settingsStore.load()).lastExportAt).toBeNull()
+  })
+
+  it('carries the indicator onto a Deck screen once it is urgent', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 45 * DAY }))
+    await act(async () => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    expect(container.querySelector('[data-testid="backup-status"]')).not.toBeNull()
+  })
+
+  it('leaves a Deck screen alone while the backup is fresh', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store, createFakeSettingsStore({ lastSyncAt: Date.now() - 1 * DAY }))
+    await act(async () => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    expect(container.querySelector('[data-testid="backup-status"]')).toBeNull()
+  })
+})
+
+describe('App — restore is reachable from the screen a wiped phone opens on (T031)', () => {
+  it('restores the library from the Decks empty state without ever opening Settings', async () => {
+    const store = createFakeDeckStore([])
+    const replacement: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'fresh', name: 'Rescued', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+    store.importAll = async (library) => {
+      store.decks = new Map(library.decks.map((d) => [d.id, { id: d.id, name: d.name, phrases: d.phrases }]))
+    }
+    store.loadAll = async () => [...store.decks.values()]
+    await renderApp(store)
+
+    const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
+    const file = new File([JSON.stringify(replacement)], 'backup.json', { type: 'application/json' })
     Object.defineProperty(input, 'files', {
-      value: { 0: new File(['x'], 'p.jpg', { type: 'image/jpeg' }), length: 1, item: () => null } as unknown as FileList,
+      value: { 0: file, length: 1, item: () => file } as unknown as FileList,
       configurable: true,
     })
     await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+    await act(async () => click(container.querySelector('[data-testid="restore-confirm"]')!))
 
-    expect(container.querySelector('[data-testid="backup-nudge"]')).not.toBeNull()
+    expect(container.textContent).toContain('Rescued')
   })
 })
 

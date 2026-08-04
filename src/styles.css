@@ -177,12 +177,131 @@ button:disabled {
   opacity: 0.9;
 }
 
-.backup-nudge {
-  color: var(--ink-dim);
+.empty-state-recovery {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* ---- Backup age (T031) -------------------------------------------------
+   How long since the library was last safe somewhere else, stated wherever
+   she will see it. The escalation is carried entirely by weight — hairline,
+   then gilt, then rose — and never by repetition: it appears once per screen
+   at every level and there is nothing to dismiss.
+
+   Fresh is deliberately almost invisible: one dim line and a link, sitting on
+   the ground with no border at all, because a status she reads every day has
+   to cost her nothing to skip. Aging earns the gilt hairline the rest of the
+   app uses for a bounded thing. Overdue earns the rose, which everywhere else
+   in this app marks the one action she came to take — here it marks the one
+   she did not know she needed. */
+
+.backup-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  border-radius: 14px;
+}
+
+.backup-status-age {
+  margin: 0;
   font-size: var(--text-sm);
-  text-align: center;
-  margin-top: 12px;
+  color: var(--ink-dim);
+}
+
+.backup-status-detail {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-soft);
+  max-width: 46ch;
+}
+
+ /* Fresh is one line, not two: age and link share a baseline so the whole
+    thing reads as a single sentence she can skip, rather than as a status
+    with a control under it. A stacked control is a small standing demand. */
+.backup-status--fresh {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 2px;
+  padding: 0 2px;
+}
+
+.backup-status--fresh .backup-status-age {
   font-style: italic;
+}
+
+.backup-status--fresh .link-action {
+  min-height: 0;
+  padding: 0 6px;
+}
+
+.backup-status--aging {
+  background: var(--surface);
+  border: 1px solid var(--gilt);
+  padding: 13px 15px;
+}
+
+.backup-status--aging .backup-status-age {
+  color: var(--ink);
+}
+
+/* The one place a lace band is used to mark urgency rather than to decorate:
+   the scalloped selvedge across the head of the card, the same edge a sheet
+   wears when it rises. It reads as an edge — the end of the cloth — which is
+   exactly what an unbacked-up library is sitting on. */
+.backup-status--overdue,
+.backup-status--never {
+  position: relative;
+  background: var(--surface-lift);
+  border: 1px solid var(--danger);
+  padding: 22px 15px 15px;
+  box-shadow: var(--shadow-lift);
+  align-self: stretch;
+}
+
+.backup-status--overdue::before,
+.backup-status--never::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  height: 14px;
+  background-image: var(--lace-band);
+  background-repeat: repeat-x;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.backup-status--overdue .backup-status-age,
+.backup-status--never .backup-status-age {
+  color: var(--danger);
+  font-size: var(--text-base);
+}
+
+.backup-status--overdue .backup-status-detail,
+.backup-status--never .backup-status-detail {
+  color: var(--ink);
+}
+
+.backup-status--overdue .btn-primary,
+.backup-status--never .btn-primary {
+  align-self: stretch;
+  margin-top: 4px;
+}
+
+/* The copy-out fallback: a real block of text she can select, not a preview. */
+.backup-copy-text {
+  width: 100%;
+  min-height: 132px;
+  padding: 10px 13px;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  font-variant-numeric: normal;
+  resize: none;
 }
 
 /* ---- Lists -------------------------------------------------------------- */
