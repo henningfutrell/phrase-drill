@@ -80,6 +80,16 @@ the result in **one transaction**, so a Deck she saved while a round-trip was
 in flight cannot be computed away by a snapshot taken before she typed it. See
 `docs/sync.md`.
 
+`update` is the same rule for a single Deck, and it is the composition root's
+write (T075). `save` puts a whole Deck computed somewhere else — from React
+state, which is a view and is stale by the time a tap reaches storage — so it
+is now reserved for a Deck that does not exist yet, where there is nothing
+under that id to overwrite. Changing one that does exist reads it and puts the
+result in one transaction, with the change applied to what is stored at that
+instant. The defect it closes did not stop at this device: the Phrase it
+overwrote was still in the Sync Baseline, which the merge reads as a deletion
+and takes to the server (`docs/sync.md`).
+
 `tombstones` is the exception to that separation, and deliberately so: both
 the deck store and the mix store write to it, each only its own `kind`, and
 neither ever reads the other's rows. It exists because sync **merges** two

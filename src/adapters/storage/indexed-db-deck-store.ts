@@ -8,8 +8,10 @@ import type { DeckRecord, MixRecord, Tombstone } from './migrations'
 import { requestPersistence } from './persistence'
 
 /**
- * The IndexedDB implementation of `DeckStore`, via `idb`. Every Deck write
- * is a whole-aggregate put to the `decks` store.
+ * The IndexedDB implementation of `DeckStore`, via `idb`. Every Deck write is
+ * a whole-aggregate put to the `decks` store: `save` for a Deck that does not
+ * exist yet, `update` — read and put in one transaction — for one that does
+ * (T075).
  *
  * `exportAll`/`importAll` are the exception, and deliberately so: the
  * `Library` envelope is the whole of her data, which since T059 means
@@ -72,6 +74,43 @@ export function createIndexedDbDeckStore(): DeckStore {
         updatedAt: now,
       })
       await db.put(DECKS_STORE, record)
+    },
+
+    /**
+     * The read and the write in one transaction (T075) — see the port. Same
+     * shape as `updateAll` below and for the same reason, one Deck rather than
+     * the whole library: every step between the `get` and the `put` is
+     * synchronous, so nothing can land in between. A merge writing this Deck
+     * either commits before this transaction reads it (and `apply` sees the
+     * Phrase it brought) or after this one writes (and re-reads what she
+     * saved). There is no third outcome.
+     *
+     * `apply` refusing aborts the transaction rather than writing a guess.
+     */
+    async update(id: DeckId, apply: (stored: Deck | undefined) => Deck): Promise<Deck> {
+      await ensurePersistenceRequested()
+      const db = await getDatabase()
+      const tx = db.transaction(DECKS_STORE, 'readwrite')
+      const store = tx.objectStore(DECKS_STORE)
+      const existing = (await store.get(id)) as DeckRecord | undefined
+
+      let next: Deck
+      let record: DeckRecord
+      try {
+        next = apply(existing ? fromRecord(existing) : undefined)
+        const now = Date.now()
+        record = toRecord(next, { createdAt: existing?.createdAt ?? now, updatedAt: now })
+      } catch (error) {
+        // `done` rejects on an abort; nothing awaits it on this path, so it is
+        // read here rather than left to surface as an unhandled rejection.
+        void tx.done.catch(() => {})
+        tx.abort()
+        throw error
+      }
+
+      await store.put(record)
+      await tx.done
+      return next
     },
 
     /**

@@ -152,6 +152,15 @@ function createFakeDeckStore(
     async importAll(library) {
       replace(library)
     },
+    // One Deck, read and written in one step (T075) — the composition root's
+    // write. Modelled on the real adapter: the change is applied to what is
+    // stored here, never to what the caller was holding.
+    async update(id, apply) {
+      const next = apply(decks.get(id))
+      decks.set(next.id, next)
+      updatedAt.set(next.id, now())
+      return next
+    },
     // Its own path to the same records, as in the real adapter: `importAll`
     // replaces, `updateAll` reads and writes in one step, and a test that
     // stubs one is not stubbing the other.
@@ -364,6 +373,18 @@ function createTestSyncEngine(
     debounceMs: 0,
   })
 }
+
+declare global {
+  var IS_REACT_ACT_ENVIRONMENT: boolean
+}
+
+/**
+ * React only treats this file as a test environment when it is told so, and
+ * only then does `act` mean anything to it — without this every `act` call
+ * here is a no-op React complains about the moment a state update lands
+ * inside one.
+ */
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 let container: HTMLDivElement
 let root: Root
@@ -1870,7 +1891,8 @@ describe('App when a local write fails (T069)', () => {
 
   it('says a Deck could not be saved, and takes the unsaved Phrase back off the screen', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    store.save = async () => {
+    // Adding a Phrase to a Deck that exists is `update`, not `save` (T075).
+    store.update = async () => {
       throw quotaError()
     }
     await renderApp(store)
@@ -2191,5 +2213,207 @@ describe('App — a database that will not open says so (T072)', () => {
     await act(async () => trouble.report('blocked'))
 
     expect(notice()?.textContent).not.toContain('out of space')
+  })
+})
+
+/**
+ * A save she makes while a merge is landing (T075).
+ *
+ * T074 closed this race INSIDE the sync round-trip. One level up it is still
+ * open, and it is worse there: `persist` writes a whole Deck built from React
+ * state, and React state is a view — by the time a tap reaches storage it may
+ * predate a Phrase the merge has already written. The Deck she was looking at
+ * is then written back over the merged one, and the Phrase from her other
+ * phone is gone from this device.
+ *
+ * It does not stop there, which is the part that makes it a data-loss defect
+ * rather than a refresh bug. The Sync Baseline now holds that Phrase and the
+ * local Deck does not, and since T070 `mergePhrases` reads exactly that as
+ * "this device deleted it" — so the next round-trip removes it from the
+ * server too. One dropped render becomes a permanent deletion on both phones.
+ *
+ * These tests drive the real App, the real merge and the real round-trip;
+ * only the network and the device are doubles.
+ */
+describe('App — a save made while a merge is landing (T075)', () => {
+  const HER = { id: 'p1', french: 'Bonjour', english: 'Hello' }
+  const FROM_HER_OTHER_PHONE = { id: 'p2', french: 'Bonne nuit', english: 'Good night' }
+
+  /**
+   * A DeckStore whose writes can be held in flight. That is the window this
+   * pins: her tap has computed a whole Deck from what was on screen and handed
+   * it to storage, and storage has not finished with it yet. On a phone an
+   * IndexedDB write is not instant, and a merge can land inside it.
+   */
+  function withHeldWrites(store: DeckStore & { decks: Map<string, Deck> }): {
+    store: DeckStore & { decks: Map<string, Deck> }
+    hold(): void
+    release(): void
+  } {
+    const save = store.save.bind(store)
+    const update = store.update.bind(store)
+    let waiting: (() => void)[] | undefined
+    const gate = async () => {
+      if (waiting) await new Promise<void>((resolve) => waiting!.push(resolve))
+    }
+    store.save = async (deck) => {
+      await gate()
+      return save(deck)
+    }
+    store.update = async (id, apply) => {
+      await gate()
+      return update(id, apply)
+    }
+    return {
+      store,
+      hold() {
+        waiting = []
+      },
+      release() {
+        const held = waiting ?? []
+        waiting = undefined
+        for (const resume of held) resume()
+      },
+    }
+  }
+
+  /** One phone, one server, and a Deck both of them already agree on. */
+  async function aPhoneShowingOneDeck(): Promise<{
+    server: ReturnType<typeof createFakeServer>
+    store: DeckStore & { decks: Map<string, Deck> }
+    hold(): void
+    release(): void
+    engine: SyncEngine
+  }> {
+    const server = createFakeServer()
+    server.library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'd1', name: 'Home', phrases: [HER], createdAt: 1, updatedAt: 1 }],
+      mixes: [],
+      tombstones: [],
+    }
+    const held = withHeldWrites(createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [HER] }], () => 3000))
+    const settingsStore = createFakeSettingsStore()
+    const client = server.client()
+    const engine = createTestSyncEngine(held.store, settingsStore, client)
+    await renderApp(
+      held.store,
+      settingsStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      client,
+      undefined,
+      undefined,
+      engine,
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    return { server, ...held, engine }
+  }
+
+  /** Her other phone adds a Phrase to the same Deck and pushes it. */
+  function theOtherPhoneAddsAPhrase(server: ReturnType<typeof createFakeServer>): void {
+    server.library = {
+      ...server.library!,
+      decks: [
+        { id: 'd1', name: 'Home', phrases: [HER, FROM_HER_OTHER_PHONE], createdAt: 1, updatedAt: 2000 },
+      ],
+    }
+  }
+
+  function storedPhrases(store: { decks: Map<string, Deck> }): string[] {
+    return (store.decks.get('d1')?.phrases ?? []).map((p) => p.french).sort()
+  }
+
+  function serverPhrases(server: { library: Library | undefined }): string[] {
+    return (server.library?.decks[0]?.phrases ?? []).map((p) => p.french).sort()
+  }
+
+  /** She types a Phrase and taps Save; the write is not finished yet. */
+  async function sheAddsAPhrase(): Promise<void> {
+    act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+    act(() => typeInto(container.querySelector('[data-testid="phrase-french-input"]') as HTMLInputElement, 'Merci'))
+    act(() =>
+      typeInto(container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement, 'Thank you'),
+    )
+    await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
+  }
+
+  /** The merge lands, and the screens catch up with it. */
+  async function theMergeLands(phone: { engine: SyncEngine; store: { decks: Map<string, Deck> } }): Promise<void> {
+    act(() => phone.engine.syncNow())
+    await flushMicrotasks()
+    expect(storedPhrases(phone.store)).toContain('Bonne nuit')
+  }
+
+  it('keeps the Phrase the merge brought down when her save was still in flight', async () => {
+    const phone = await aPhoneShowingOneDeck()
+    theOtherPhoneAddsAPhrase(phone.server)
+
+    phone.hold()
+    await sheAddsAPhrase()
+    await theMergeLands(phone)
+    phone.release()
+    await flushMicrotasks()
+
+    expect(storedPhrases(phone.store)).toEqual(['Bonjour', 'Bonne nuit', 'Merci'])
+  })
+
+  it('does not then delete it from the server, which is what makes a dropped render permanent', async () => {
+    const phone = await aPhoneShowingOneDeck()
+    theOtherPhoneAddsAPhrase(phone.server)
+
+    phone.hold()
+    await sheAddsAPhrase()
+    await theMergeLands(phone)
+    phone.release()
+    await flushMicrotasks()
+
+    expect(serverPhrases(phone.server)).toEqual(['Bonjour', 'Bonne nuit', 'Merci'])
+  })
+
+  /**
+   * The other half of the same rule: protecting the merged Phrase must not be
+   * done by dropping hers. An edit typed against the old screen is still an
+   * edit, and it has to land.
+   */
+  it('keeps her own edit as well, applied to the Deck as it is now stored', async () => {
+    const phone = await aPhoneShowingOneDeck()
+    theOtherPhoneAddsAPhrase(phone.server)
+
+    phone.hold()
+    act(() => click(container.querySelector('[data-testid="edit-phrase-p1"]')!))
+    act(() =>
+      typeInto(container.querySelector('[data-testid="phrase-french-input"]') as HTMLInputElement, 'Bonjour !'),
+    )
+    await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
+    await theMergeLands(phone)
+    phone.release()
+    await flushMicrotasks()
+
+    expect(storedPhrases(phone.store)).toEqual(['Bonjour !', 'Bonne nuit'])
+    expect(container.textContent).toContain('Bonjour !')
+    expect(container.textContent).toContain('Bonne nuit')
+  })
+
+  /** Renaming the Deck is the same write, and must not cost a Phrase either. */
+  it('keeps the merged Phrase when what she saved was the Deck name', async () => {
+    const phone = await aPhoneShowingOneDeck()
+    theOtherPhoneAddsAPhrase(phone.server)
+
+    phone.hold()
+    act(() => click(container.querySelector('[data-testid="rename-deck"]')!))
+    act(() => typeInto(container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement, 'À la maison'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await theMergeLands(phone)
+    phone.release()
+    await flushMicrotasks()
+
+    expect(phone.store.decks.get('d1')?.name).toBe('À la maison')
+    expect(storedPhrases(phone.store)).toEqual(['Bonjour', 'Bonne nuit'])
   })
 })
