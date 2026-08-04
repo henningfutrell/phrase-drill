@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Deck } from '../../domain'
-import { resetFakeIdb } from './idb.test-support'
+import { idbDestructiveOperations, resetFakeIdb } from './idb.test-support'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 vi.mock('idb', async () => {
@@ -223,6 +223,89 @@ describe('createIndexedDbDeckStore', () => {
 
     expect((await store.loadAll()).map((d) => d.id)).toEqual(['home'])
     expect(await mixStore.loadAll()).toEqual([])
+  })
+
+  /**
+   * `updateAll` is the sync path's write (T074). `importAll` replaces what is
+   * stored with a library computed somewhere else and some time ago; that gap
+   * is where a Deck she saved mid-sync was lost. `updateAll` closes it by
+   * doing the read and the write in ONE transaction: the update function is
+   * handed what is stored at that instant, and nothing can land between.
+   */
+  it('hands the update what is stored NOW, not what was read before it was called', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.save(makeDeck({ id: 'home', name: 'Home' }))
+    const readEarlier = await store.exportAll()
+    // She saves while the caller is still holding `readEarlier`.
+    await store.save(makeDeck({ id: 'clinic', name: 'Chez le médecin' }))
+
+    let seen: string[] = []
+    await store.updateAll((stored) => {
+      seen = stored.decks.map((deck) => deck.id).sort()
+      return { ...stored, decks: [...stored.decks, ...readEarlier.decks.filter((d) => d.id === 'nothing')] }
+    })
+
+    expect(seen).toEqual(['clinic', 'home'])
+  })
+
+  it('writes what the update returned, and says it changed something', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.save(makeDeck({ id: 'home', name: 'Home' }))
+
+    const result = await store.updateAll((stored) => ({
+      ...stored,
+      decks: [...stored.decks, { id: 'arrived', name: 'From the web', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }))
+
+    expect(result.changed).toBe(true)
+    expect(result.library.decks.map((d) => d.id).sort()).toEqual(['arrived', 'home'])
+    expect((await store.loadAll()).map((d) => d.id).sort()).toEqual(['arrived', 'home'])
+  })
+
+  it('sees the saved Mixes and Tombstones too, and carries them back', async () => {
+    const store = createIndexedDbDeckStore()
+    const mixStore = createIndexedDbMixStore()
+    await store.save(makeDeck({ id: 'home', name: 'Home' }))
+    await mixStore.save({ id: 'm1', name: 'Mornings', deckIds: ['home'] })
+    await store.save(makeDeck({ id: 'gone', name: 'Gone' }))
+    await store.remove('gone')
+
+    const result = await store.updateAll((stored) => stored)
+
+    expect(result.library.mixes!.map((m) => m.id)).toEqual(['m1'])
+    expect(result.library.tombstones!.map((t) => t.id)).toEqual(['gone'])
+    expect((await mixStore.loadAll()).map((m) => m.id)).toEqual(['m1'])
+  })
+
+  /**
+   * The one destructive operation in the adapter is `clear`, and an update
+   * that changed nothing must not reach for it. Not an optimization: a
+   * wholesale clear-and-rewrite on every idle sync is a wipe waiting for the
+   * one interrupted transaction that does not finish.
+   */
+  it('writes nothing at all when the update changed nothing', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.save(makeDeck({ id: 'home', name: 'Home' }))
+    idbDestructiveOperations.length = 0
+
+    const result = await store.updateAll((stored) => ({ ...stored, exportedAt: stored.exportedAt + 1_000 }))
+
+    expect(result.changed).toBe(false)
+    expect(idbDestructiveOperations).toEqual([])
+    expect((await store.loadAll()).map((d) => d.id)).toEqual(['home'])
+  })
+
+  it('leaves the stored library untouched when the update refuses', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.save(makeDeck({ id: 'home', name: 'Home' }))
+
+    await expect(
+      store.updateAll(() => {
+        throw new Error('this build cannot read that envelope')
+      }),
+    ).rejects.toThrow('this build cannot read that envelope')
+
+    expect((await store.loadAll()).map((d) => d.id)).toEqual(['home'])
   })
 
   it('requests persistent storage once, at first save, and reports the real result', async () => {

@@ -154,6 +154,22 @@ export interface DeckStore {
   exportAll(): Promise<Library>
   /** Replaces the whole library. Never merges. */
   importAll(library: Library): Promise<void>
+  /**
+   * Read the whole library, apply `update` to it, and write the result back —
+   * as ONE indivisible step (T074).
+   *
+   * `exportAll` then `importAll` is not the same thing and cost her a Deck:
+   * between the two, a save she made was computed away by a library that was
+   * read before she typed it. `update` is instead handed what is stored at the
+   * instant of the write, so there is no window for anything to land in. It
+   * must be pure and synchronous for exactly that reason — the store is held
+   * open across it, and anything awaited in there would reopen the window it
+   * exists to close.
+   *
+   * `changed` says whether anything was actually written, so a caller can tell
+   * a merge that brought something down from one that brought nothing.
+   */
+  updateAll(update: (stored: Library) => Library): Promise<{ library: Library; changed: boolean }>
 }
 
 /**

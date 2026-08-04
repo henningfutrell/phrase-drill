@@ -57,10 +57,13 @@ export interface SyncBaseline {
 
 export interface SyncEngineDeps {
   client: LibrarySyncClient
-  /** The whole local library, as it is on this device right now. */
-  readLocal(): Promise<Library>
-  /** Replace the whole local library with a merge. */
-  writeLocal(library: Library): Promise<void>
+  /**
+   * Merge into the local library, reading and writing as one indivisible step
+   * (T074) — `update` is applied to what is stored at the instant of the
+   * write, never to a snapshot read earlier. `changed` says whether anything
+   * was actually written.
+   */
+  updateLocal(update: (stored: Library) => Library): Promise<{ library: Library; changed: boolean }>
   baseline: SyncBaseline
   readLastSyncAt(): Promise<number | null>
   recordSync(timestamp: number): Promise<void>
@@ -121,6 +124,10 @@ const DEFAULT_RETRY_MS = [5_000, 15_000, 60_000, 300_000] as const
  *   so it does not push at all. Her change stays local and goes up later.
  * - The merge is written back locally BEFORE the push. If the push then
  *   fails, what came down from the other device is already saved here.
+ * - The local read and the local write are ONE step (T074). She is holding
+ *   the phone and a round-trip is not instant, so anything else would compute
+ *   a merge from a snapshot that predates her last keystroke and then write it
+ *   over her.
  * - The baseline moves only after the server accepts a push. An unacknowledged
  *   push must never be treated as agreed state.
  * - A failure never reports a sync time. "Nothing happened" is a thing the
@@ -182,43 +189,58 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     }
     if (!pulled.ok && pulled.reason !== 'not-found') return { ok: false, reason: pulled.reason }
 
-    // The two device reads. They fail for storage reasons — a quota, an
-    // aborted transaction, a connection iOS killed — none of which an app
-    // update fixes, so they are retryable and must not be confused with an
-    // envelope this build cannot read.
-    let stored: Library
+    let remote: Library | undefined
+    try {
+      remote = pulled.ok ? normalizeLibrary(pulled.library) : undefined
+    } catch {
+      // The only way normalization refuses is an envelope this build cannot
+      // read — one written by a newer build. Her library is untouched; the
+      // device needs the newer app.
+      return { ok: false, reason: 'unreadable' }
+    }
+
+    // Read for storage reasons only — a quota, an aborted transaction, a
+    // connection iOS killed — none of which an app update fixes, so they are
+    // retryable and must not be confused with an unreadable envelope. The
+    // baseline is written by this engine and by nothing else, so reading it
+    // outside the merge below races with nobody.
     let baseline: Library | undefined
     try {
-      stored = await deps.readLocal()
       baseline = await deps.baseline.read()
     } catch {
       return { ok: false, reason: 'device-storage' }
     }
 
+    // Local first, and as ONE step: whatever the other device had is saved
+    // here before anything is asked of the network again, and the merge is
+    // computed from what is stored at the instant it is written rather than
+    // from a snapshot read earlier (T074). Anything she saved while this
+    // round-trip was in flight is therefore merged in — it was never read
+    // early enough to be computed away.
+    //
+    // A merge that could not be saved here is also not pushed: the push is
+    // what moves the baseline, and a baseline for state this device does not
+    // hold is a lie the next merge would act on.
     let outgoing: Library
-    let local: Library
+    let refused = false
     try {
-      local = normalizeLibrary(stored)
-      outgoing = pulled.ok ? mergeLibraries(local, normalizeLibrary(pulled.library), baseline) : local
+      const written = await deps.updateLocal((stored) => {
+        try {
+          const local = normalizeLibrary(stored)
+          return remote ? mergeLibraries(local, remote, baseline) : local
+        } catch (error) {
+          // Normalization or the merge refusing is an envelope this build
+          // cannot read, which is not the same failure as a device that could
+          // not write. Both arrive here as a rejection, so which one it was is
+          // carried out by hand.
+          refused = true
+          throw error
+        }
+      })
+      outgoing = written.library
+      if (written.changed) emit({ libraryRevision: snapshot.libraryRevision + 1 })
     } catch {
-      // The only way normalization or the merge refuses is an envelope this
-      // build cannot read — one written by a newer build. Her library is
-      // untouched; the device needs the newer app.
-      return { ok: false, reason: 'unreadable' }
-    }
-
-    // Local first: whatever the other device had is saved here before
-    // anything is asked of the network again. A merge that could not be saved
-    // here is also not pushed — the push is what moves the baseline, and a
-    // baseline for state this device does not hold is a lie the next merge
-    // would act on.
-    if (!sameLibrary(local, outgoing)) {
-      try {
-        await deps.writeLocal(outgoing)
-      } catch {
-        return { ok: false, reason: 'device-storage' }
-      }
-      emit({ libraryRevision: snapshot.libraryRevision + 1 })
+      return { ok: false, reason: refused ? 'unreadable' : 'device-storage' }
     }
 
     let pushed: Awaited<ReturnType<LibrarySyncClient['push']>>
@@ -366,30 +388,6 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       return () => listeners.delete(listener)
     },
   }
-}
-
-/**
- * Are these two libraries the same library? Only used to avoid rewriting
- * IndexedDB and re-rendering when a pull brought nothing new — a false
- * negative costs one redundant write, never data.
- */
-function sameLibrary(a: Library, b: Library): boolean {
-  return fingerprint(a) === fingerprint(b)
-}
-
-function fingerprint(library: Library): string {
-  const byId = (x: { id: string }, y: { id: string }) => (x.id < y.id ? -1 : 1)
-  return JSON.stringify({
-    // Phrase order inside a Deck is hers and is compared as written; the
-    // order of the Decks themselves is not, so it is normalized away.
-    decks: [...library.decks].sort(byId),
-    mixes: [...(library.mixes ?? [])].sort(byId),
-    tombstones: [...(library.tombstones ?? [])].sort((x, y) => (`${x.kind}:${x.id}` < `${y.kind}:${y.id}` ? -1 : 1)),
-    // The pinned voice too (T067): a merge whose only news is the voice the
-    // other device pinned is still news, and leaving it out of this
-    // comparison would drop it instead of writing it locally.
-    voice: library.voice ?? null,
-  })
 }
 
 function browserScheduler(): Scheduler {

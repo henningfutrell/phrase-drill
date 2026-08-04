@@ -2,6 +2,7 @@ import type { IDBPDatabase } from 'idb'
 import type { Deck, DeckId, DeckStore, Library } from '../../domain'
 import { DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE, openDatabase } from './database'
 import { buildLibrary, migrateLibraryDecks, migrateLibraryMixes, migrateLibraryTombstones } from './library'
+import { sameLibraryContent } from './library-identity'
 import { fromRecord, toRecord } from './mapping'
 import type { DeckRecord, MixRecord, Tombstone } from './migrations'
 import { requestPersistence } from './persistence'
@@ -96,6 +97,71 @@ export function createIndexedDbDeckStore(): DeckStore {
       const mixes = (await db.getAll(MIXES_STORE)) as MixRecord[]
       const tombstones = (await db.getAll(TOMBSTONES_STORE)) as Tombstone[]
       return buildLibrary(decks, mixes, tombstones, Date.now())
+    },
+
+    /**
+     * The read and the write in one transaction (T074) — see the port. Every
+     * step between them is synchronous or an IndexedDB operation on this same
+     * transaction, which is what makes it indivisible: her `save` is its own
+     * transaction, so it either commits before this one reads (and the update
+     * sees it) or after this one writes (and it stands). There is no third
+     * outcome, and no snapshot old enough to compute her work away.
+     *
+     * A refusal from `update` — an envelope this build cannot read — aborts
+     * the transaction rather than writing a guess.
+     */
+    async updateAll(
+      update: (stored: Library) => Library,
+    ): Promise<{ library: Library; changed: boolean }> {
+      const db = await getDatabase()
+      const tx = db.transaction([DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
+      const deckStore = tx.objectStore(DECKS_STORE)
+      const mixStore = tx.objectStore(MIXES_STORE)
+      const tombstoneStore = tx.objectStore(TOMBSTONES_STORE)
+
+      const stored = buildLibrary(
+        (await deckStore.getAll()) as DeckRecord[],
+        (await mixStore.getAll()) as MixRecord[],
+        (await tombstoneStore.getAll()) as Tombstone[],
+        Date.now(),
+      )
+
+      let next: Library
+      let migratedDecks: DeckRecord[]
+      let migratedMixes: MixRecord[]
+      let migratedTombstones: Tombstone[]
+      try {
+        next = update(stored)
+        migratedDecks = migrateLibraryDecks(next)
+        migratedMixes = migrateLibraryMixes(next)
+        migratedTombstones = migrateLibraryTombstones(next)
+      } catch (error) {
+        // `done` rejects on an abort; nothing awaits it on this path, so it is
+        // read here rather than left to surface as an unhandled rejection.
+        void tx.done.catch(() => {})
+        tx.abort()
+        throw error
+      }
+
+      if (sameLibraryContent(stored, next)) {
+        await tx.done
+        return { library: next, changed: false }
+      }
+
+      await deckStore.clear()
+      await mixStore.clear()
+      await tombstoneStore.clear()
+      for (const record of migratedDecks) {
+        await deckStore.put(record)
+      }
+      for (const record of migratedMixes) {
+        await mixStore.put(record)
+      }
+      for (const record of migratedTombstones) {
+        await tombstoneStore.put(record)
+      }
+      await tx.done
+      return { library: next, changed: true }
     },
 
     async importAll(library: Library): Promise<void> {

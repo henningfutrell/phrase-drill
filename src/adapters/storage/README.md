@@ -70,9 +70,15 @@ drill start.
 `decks` and `mixes` are separate stores on purpose: it makes "deleting a Mix
 never touches its source Decks" — and its converse — structural rather than a
 rule someone has to remember. The one place they meet is the `Library`
-envelope (`exportAll`/`importAll`, `/api/library`), which carries both,
-because a backup or a new phone that restored only half of her data would be
-worse than one that restored none.
+envelope (`exportAll`/`importAll`/`updateAll`, `/api/library`), which carries
+both, because a backup or a new phone that restored only half of her data
+would be worse than one that restored none.
+
+`updateAll` is the sync path's write and the reason the envelope has three
+verbs rather than two (T074): it reads the stores, applies a merge, and writes
+the result in **one transaction**, so a Deck she saved while a round-trip was
+in flight cannot be computed away by a snapshot taken before she typed it. See
+`docs/sync.md`.
 
 `tombstones` is the exception to that separation, and deliberately so: both
 the deck store and the mix store write to it, each only its own `kind`, and
