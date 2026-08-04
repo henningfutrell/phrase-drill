@@ -79,4 +79,37 @@ describe('createLibrarySyncClient', () => {
 
     await expect(client.pull()).resolves.toEqual({ ok: false, reason: 'network' })
   })
+
+  it('reports network when the server sends a body that is not the library — a corrupt row must not throw', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
+    } as Response)
+    const { client } = makeClient(fetchImpl)
+
+    await expect(client.pull()).resolves.toEqual({ ok: false, reason: 'network' })
+  })
+
+  it('reports unauthorized when there is no session to pull with, rather than rejecting', async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+    const client = createLibrarySyncClient({
+      getAccessToken: () => Promise.reject(new Error('authentication required')),
+      fetchImpl,
+    })
+
+    await expect(client.pull()).resolves.toEqual({ ok: false, reason: 'unauthorized' })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('reports unauthorized when there is no session to push with, rather than rejecting', async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+    const client = createLibrarySyncClient({
+      getAccessToken: () => Promise.reject(new Error('authentication required')),
+      fetchImpl,
+    })
+
+    await expect(client.push(LIBRARY)).resolves.toEqual({ ok: false, reason: 'unauthorized' })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
 })

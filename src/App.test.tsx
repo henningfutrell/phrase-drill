@@ -1771,3 +1771,219 @@ describe('App wired to sync without a tap (T034)', () => {
     expect(syncLine()).toContain('not synced yet')
   })
 })
+
+/**
+ * The screen must never show her a Phrase that is not on disk (T069). Every
+ * local write in this app is optimistic — the screen changes first, the store
+ * is written after — so a rejected write leaves the app telling her something
+ * false unless it is both rolled back and said out loud.
+ */
+describe('App when a local write fails (T069)', () => {
+  /** iOS refusing a write because the origin is full. */
+  function quotaError(): Error {
+    return Object.assign(new Error('the quota has been exceeded'), { name: 'QuotaExceededError' })
+  }
+
+  function notice(): HTMLElement | null {
+    return container.querySelector('[data-testid="write-failure"]')
+  }
+
+  it('says a Deck could not be saved, and takes the unsaved Phrase back off the screen', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    store.save = async () => {
+      throw quotaError()
+    }
+    await renderApp(store)
+
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+    act(() => typeInto(container.querySelector('[data-testid="phrase-french-input"]') as HTMLInputElement, 'Bonjour'))
+    act(() => typeInto(container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement, 'Hello'))
+    await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
+    await flushMicrotasks()
+
+    expect(notice()?.textContent).toContain('Home')
+    expect(notice()?.textContent).toContain('could not be saved')
+    expect(container.textContent).not.toContain('Bonjour')
+  })
+
+  it('says a Deck could not be deleted, and puts it back on the screen', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    store.remove = async () => {
+      throw quotaError()
+    }
+    await renderApp(store)
+
+    act(() => click(container.querySelector('[data-testid="delete-deck-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-deck-d1"]')!))
+    await flushMicrotasks()
+
+    expect(notice()?.textContent).toContain('could not be deleted')
+    expect(container.querySelector('[data-testid="deck-row-d1"]')).not.toBeNull()
+  })
+
+  it('says a Mix could not be saved, and takes it back off the screen', async () => {
+    const deckStore = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const mixStore = createFakeMixStore([])
+    mixStore.save = async () => {
+      throw quotaError()
+    }
+    await renderApp(
+      deckStore,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      createFakeLibrarySyncClient(),
+      createFakeTranslator(),
+      mixStore,
+    )
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="save-mix"]')!))
+    act(() => typeInto(container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement, 'Mornings'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await flushMicrotasks()
+
+    expect(notice()?.textContent).toContain('Mornings')
+    expect(notice()?.textContent).toContain('could not be saved')
+    expect(container.querySelector('[data-testid^="mix-row-"]')).toBeNull()
+  })
+
+  it('says a Mix could not be deleted, and puts it back on the screen', async () => {
+    const deckStore = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const mixStore = createFakeMixStore([{ id: 'm1', name: 'Mornings', deckIds: ['d1'] }])
+    mixStore.remove = async () => {
+      throw quotaError()
+    }
+    await renderApp(
+      deckStore,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      createFakeLibrarySyncClient(),
+      createFakeTranslator(),
+      mixStore,
+    )
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="delete-mix-m1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-mix-m1"]')!))
+    await flushMicrotasks()
+
+    expect(notice()?.textContent).toContain('could not be deleted')
+    expect(container.querySelector('[data-testid="mix-row-m1"]')).not.toBeNull()
+  })
+
+  it('says a restore could not be applied, and keeps the Decks that are still there', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    store.importAll = async () => {
+      throw quotaError()
+    }
+    await renderApp(store)
+    await openSettings()
+
+    const replacement: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'd9', name: 'From the file', phrases: [], createdAt: 1, updatedAt: 1 }],
+      mixes: [],
+      tombstones: [],
+    }
+    const file = new File([JSON.stringify(replacement)], 'phrase-drill-backup-2026-08-02.json', {
+      type: 'application/json',
+    })
+    const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
+    Object.defineProperty(input, 'files', {
+      value: { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList,
+      configurable: true,
+    })
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+    await act(async () => click(container.querySelector('[data-testid="restore-confirm"]')!))
+    await flushMicrotasks()
+
+    expect(notice()?.textContent).toContain('backup')
+    expect(container.querySelector('[data-testid="deck-row-d1"]')).not.toBeNull()
+    expect(container.textContent).not.toContain('From the file')
+  })
+
+  it('says the chosen voice could not be saved, and does not keep showing it as chosen', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const settingsStore = createFakeSettingsStore()
+    settingsStore.setVoice = async () => {
+      throw quotaError()
+    }
+    await renderApp(store, settingsStore)
+    await openSettings()
+
+    act(() => click(container.querySelector('[data-testid^="voice-choose-"]')!))
+    await act(async () => click(container.querySelector('[data-testid="voice-confirm"]')!))
+    await flushMicrotasks()
+
+    expect(notice()?.textContent).toContain('voice')
+    expect(notice()?.textContent).toContain('could not be saved')
+  })
+
+  it('does not ask for a sync for a change that was never saved', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    store.save = async () => {
+      throw quotaError()
+    }
+    const sync = createFakeLibrarySyncClient()
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      sync,
+    )
+    const pushesAtLaunch = sync.pushed.length
+
+    act(() => click(container.querySelector('[data-testid="new-deck"]')!))
+    act(() => typeInto(container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement, 'Work'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await flushMicrotasks()
+
+    expect(sync.pushed.length).toBe(pushesAtLaunch)
+  })
+
+  it('says nothing at all when the write succeeds', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    await renderApp(store)
+
+    act(() => click(container.querySelector('[data-testid="new-deck"]')!))
+    act(() => typeInto(container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement, 'Work'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await flushMicrotasks()
+
+    expect(notice()).toBeNull()
+  })
+
+  it('lets her put the message away once she has read it', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    store.save = async () => {
+      throw quotaError()
+    }
+    await renderApp(store)
+
+    act(() => click(container.querySelector('[data-testid="new-deck"]')!))
+    act(() => typeInto(container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement, 'Work'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await flushMicrotasks()
+    expect(notice()).not.toBeNull()
+
+    await act(async () => click(container.querySelector('[data-testid="write-failure-dismiss"]')!))
+
+    expect(notice()).toBeNull()
+  })
+})
