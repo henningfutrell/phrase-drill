@@ -15,7 +15,7 @@ import type {
   Translator,
 } from './domain'
 import { LIBRARY_FORMAT } from './domain'
-import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
+import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore, Voice } from './adapters/storage'
 import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry } from './adapters/diagnostics'
@@ -185,7 +185,10 @@ function createFakeGenerationQueue(): GenerationQueue & { enqueued: Array<{ id: 
  * src/adapters/storage; App's wiring of the readiness gate is what these
  * tests care about. `readyIds`/`readyPhraseIds` default to "nothing ready",
  * which is the honest default for a fresh app. */
-function createFakeClipCache(readyIds: ReadonlySet<string> = new Set()): ClipCache {
+function createFakeClipCache(
+  readyIds: ReadonlySet<string> = new Set(),
+  usage: ClipCacheUsage = { bytes: 149_100_000, clipCount: 3190, maxBytes: 209_715_200 },
+): BoundedClipCache {
   return {
     async get() {
       return undefined
@@ -196,6 +199,9 @@ function createFakeClipCache(readyIds: ReadonlySet<string> = new Set()): ClipCac
     },
     async readyPhraseIds(phrases) {
       return new Set(phrases.map((p) => p.id).filter((id) => readyIds.has(id)))
+    },
+    async usage() {
+      return usage
     },
   }
 }
@@ -270,7 +276,7 @@ async function renderApp(
   settingsStore: SettingsStore = createFakeSettingsStore(),
   synthClient: SynthClient = createFakeSynthClient(),
   generationQueue: GenerationQueue = createFakeGenerationQueue(),
-  clipCache: ClipCache = createFakeClipCache(),
+  clipCache: BoundedClipCache = createFakeClipCache(),
   scanReader: ScanReader = createFakeScanReader(),
   errorLog: ErrorLog = createFakeErrorLog(),
   librarySyncClient: LibrarySyncClient = createFakeLibrarySyncClient(),
@@ -1236,6 +1242,25 @@ describe('App wired to Diagnostics (T039)', () => {
     await act(async () => click(container.querySelector('[data-testid="diagnostics-back"]')!))
 
     expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
+  })
+
+  /** T036 — the ceiling is only honest if what it is holding right now is
+   * read off the live cache when Settings opens, not baked in at boot. */
+  it('reads what the clip cache is holding when Settings opens, and states it', async () => {
+    const store = createFakeDeckStore([])
+    const clipCache = createFakeClipCache(new Set(), { bytes: 149_100_000, clipCount: 3190, maxBytes: 209_715_200 })
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      clipCache,
+    )
+    await openSettings()
+
+    const usage = container.querySelector('[data-testid="saved-audio-usage"]')
+    expect(usage?.textContent).toMatch(/142 MB/)
+    expect(usage?.textContent).toMatch(/200 MB/)
   })
 })
 
