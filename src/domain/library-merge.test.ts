@@ -1092,3 +1092,142 @@ describe('mergeLibraries — the pinned voice (T067)', () => {
     expect(mergeLibraries(library({}), library({})).voice).toBeUndefined()
   })
 })
+
+/**
+ * T086, from the T080 audit. The Phrase-level defect T070 fixed was never only
+ * a Phrase-level defect: `mergeDecks` and `mergeMixes` indexed the OTHER side
+ * by id with a `Map` too, so two Decks sharing an id collapsed to the last one
+ * — and because the same id was then filtered out of the remote-only tail, the
+ * other one was not merely folded but dropped whole, with every Phrase in it.
+ *
+ * Nothing on the write path mints a duplicate id; a hand-edited backup file
+ * does, and `parseLibraryFile` accepts what it validates. The answer is the one
+ * T070 already settled for Phrases: there is no sound way to pair up two
+ * records sharing an id, so both sides are kept whole and only exact repeats
+ * are folded. A duplicate id is a defect she can fix in the app with one tap;
+ * a Deck deleted to tidy it up is handwriting that exists nowhere else.
+ */
+describe('mergeLibraries — duplicate Deck and Mix ids are kept, never collapsed (T086)', () => {
+  const A = { id: 'pa', french: 'la pomme', english: 'the apple' }
+  const B = { id: 'pb', french: 'la poire', english: 'the pear' }
+  const C = { id: 'pc', french: 'la prune', english: 'the plum' }
+
+  const twinA = deck({ id: 'd1', name: 'Twin A', updatedAt: 2000, phrases: [A] })
+  const twinB = deck({ id: 'd1', name: 'Twin B', updatedAt: 2000, phrases: [B] })
+
+  it('keeps both Decks the other side holds under one id when this device holds that id too', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Mine', updatedAt: 3000, phrases: [C] })] }),
+      library({ decks: [twinA, twinB] }),
+    )
+
+    expect(merged.decks.map((d) => d.name)).toEqual(['Mine', 'Twin A', 'Twin B'])
+    expect(merged.decks.flatMap((d) => d.phrases)).toEqual([C, A, B])
+  })
+
+  it('keeps both Decks the other side holds under one id when this device holds no such Deck', () => {
+    const merged = mergeLibraries(library({}), library({ decks: [twinA, twinB] }))
+
+    expect(merged.decks).toEqual([twinA, twinB])
+  })
+
+  it('keeps both Decks this device holds under one id when the other side holds that id too', () => {
+    const merged = mergeLibraries(
+      library({ decks: [twinA, twinB] }),
+      library({ decks: [deck({ id: 'd1', name: 'Theirs', updatedAt: 3000, phrases: [C] })] }),
+    )
+
+    expect(merged.decks.map((d) => d.name)).toEqual(['Twin A', 'Twin B', 'Theirs'])
+    expect(merged.decks.flatMap((d) => d.phrases)).toEqual([A, B, C])
+  })
+
+  it('folds an exact repeat rather than growing the library on every sync', () => {
+    const merged = mergeLibraries(library({ decks: [twinA, twinB] }), library({ decks: [twinA, twinB] }))
+
+    expect(merged.decks).toEqual([twinA, twinB])
+  })
+
+  it('folds a repeat that differs only in its clock — content is what makes two Decks the same Deck', () => {
+    const merged = mergeLibraries(
+      library({ decks: [twinA, twinB] }),
+      library({ decks: [{ ...twinA, updatedAt: 9000 }, { ...twinB, updatedAt: 9000 }] }),
+    )
+
+    expect(merged.decks).toEqual([twinA, twinB])
+  })
+
+  it('keeps both Mixes the other side holds under one id when this device holds that id too', () => {
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'm1', name: 'Mine', updatedAt: 3000 })] }),
+      library({
+        mixes: [
+          mix({ id: 'm1', name: 'Twin A', deckIds: ['d1'], updatedAt: 2000 }),
+          mix({ id: 'm1', name: 'Twin B', deckIds: ['d2'], updatedAt: 2000 }),
+        ],
+      }),
+    )
+
+    expect(merged.mixes!.map((m) => m.name)).toEqual(['Mine', 'Twin A', 'Twin B'])
+  })
+
+  it('folds an exact repeat of a Mix rather than growing the library on every sync', () => {
+    const twins = [
+      mix({ id: 'm1', name: 'Twin A', deckIds: ['d1'], updatedAt: 2000 }),
+      mix({ id: 'm1', name: 'Twin B', deckIds: ['d2'], updatedAt: 2000 }),
+    ]
+
+    expect(mergeLibraries(library({ mixes: twins }), library({ mixes: twins })).mixes).toEqual(twins)
+  })
+
+  it('deletes a duplicated id only where every copy of it is gone: a Tombstone still applies to both', () => {
+    const merged = mergeLibraries(
+      library({ decks: [twinA, twinB] }),
+      library({ tombstones: [{ kind: 'deck', id: 'd1', deletedAt: 4000 }] }),
+    )
+
+    expect(merged.decks).toEqual([])
+  })
+
+  /**
+   * A baseline that holds one id twice cannot say which of the two any later
+   * record came from, so it says nothing about that id at all — the same
+   * reading `agreed` gives a baseline at an unreadable schema version (T081).
+   * Absent, not authoritative-by-accident: the alternative is that whichever
+   * copy the index happened to keep decides whether a Tombstone deletes a
+   * Deck, and a coin toss must not be allowed to remove handwriting.
+   */
+  it('treats a baseline that holds an id twice as having nothing to say about that id', () => {
+    const merged = mergeLibraries(
+      library({ decks: [twinB] }),
+      library({ tombstones: [{ kind: 'deck', id: 'd1', deletedAt: 4000 }] }),
+      library({ decks: [twinA, twinB] }),
+    )
+
+    expect(merged.decks).toEqual([twinB])
+  })
+
+  it('merges a singly-held id against an ambiguous baseline as if there were none — the union, losing nothing', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Mine', updatedAt: 3000, phrases: [A, C] })] }),
+      library({ decks: [deck({ id: 'd1', name: 'Theirs', updatedAt: 2000, phrases: [B] })] }),
+      library({ decks: [twinA, twinB] }),
+    )
+
+    expect(merged.decks.map((d) => d.name)).toEqual(['Mine'])
+    expect(merged.decks[0]!.phrases).toEqual([A, C, B])
+  })
+
+  it('treats a baseline that holds a Mix id twice as having nothing to say about that id', () => {
+    const twins = [
+      mix({ id: 'm1', name: 'Twin A', deckIds: ['d1'], updatedAt: 1000 }),
+      mix({ id: 'm1', name: 'Twin B', deckIds: ['d2'], updatedAt: 1000 }),
+    ]
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'm1', name: 'Mine', deckIds: ['d3'], updatedAt: 3000 })] }),
+      library({ mixes: [mix({ id: 'm1', name: 'Theirs', deckIds: ['d4'], updatedAt: 2000 })] }),
+      library({ mixes: twins }),
+    )
+
+    expect(merged.mixes!.map((m) => m.name)).toEqual(['Mine'])
+  })
+})
