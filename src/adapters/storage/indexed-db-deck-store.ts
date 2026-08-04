@@ -37,11 +37,31 @@ export function createIndexedDbDeckStore(): DeckStore {
   let persistenceRequested = false
   let dbPromise: Promise<IDBPDatabase> | undefined
 
-  // One connection per store instance, opened lazily and reused — not one
-  // per call. Each `createIndexedDbDeckStore()` call (the composition root
-  // makes exactly one) owns its own connection for its lifetime.
+  /**
+   * One connection per store instance, opened lazily and reused — not one per
+   * call. Each `createIndexedDbDeckStore()` call (the composition root makes
+   * exactly one) owns its own connection for its lifetime. **A failed open is
+   * forgotten again (T087, the clip cache's T085 rule applied here.)**
+   *
+   * A rejected promise is still a settled promise, so a plain `??=` remembers
+   * a refusal as firmly as it remembers a handle: one transient failure — iOS
+   * closing the connection under memory pressure, a `versionchange` from
+   * another surface — was replayed by every later call, and nothing ever tried
+   * again. This is the store her Phrases are written to and every write here
+   * is optimistic (`App.tsx` `persistLocally`), so that was a session in which
+   * nothing she typed could be saved while the screen kept showing it saved.
+   *
+   * Forgetting the slot is a retry, not a loop: nothing here opens on its own.
+   * The next call the app makes opens again, and a database that is
+   * persistently refusing rejects once per call, exactly as it does now —
+   * still reaching `persistLocally` and the T069 notice, or the T083 launch
+   * screen. One refusal costs one re-open; it does not buy silence.
+   */
   function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase()
+    dbPromise ??= openDatabase().catch((error: unknown) => {
+      dbPromise = undefined
+      throw error
+    })
     return dbPromise
   }
 
