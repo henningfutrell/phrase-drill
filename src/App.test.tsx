@@ -2,13 +2,25 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import type { Deck, DeckStore, DraftPhrase, Library, ScanReader } from './domain'
+import type {
+  Deck,
+  DeckStore,
+  DraftPhrase,
+  Library,
+  Mix,
+  MixStore,
+  PhraseCandidate,
+  ScanReader,
+  Tombstone,
+  Translator,
+} from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
 import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry } from './adapters/diagnostics'
 import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/library-sync-client'
+import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
@@ -64,9 +76,17 @@ function createFakeLibrarySyncClient(
 
 /** In-memory DeckStore fake — the real DeckStore is exercised in
  * src/adapters/storage; this fake only lets App's wiring to the port be
- * asserted without a browser IndexedDB. */
-function createFakeDeckStore(initial: readonly Deck[] = []): DeckStore & { decks: Map<string, Deck> } {
+ * asserted without a browser IndexedDB. It keeps `updatedAt` per Deck and a
+ * Tombstone per removal, because those are what App's sync path merges on
+ * (T060); `now` is injectable so a two-device test can date one device's
+ * writes before the other's. */
+function createFakeDeckStore(
+  initial: readonly Deck[] = [],
+  now: () => number = () => Date.now(),
+): DeckStore & { decks: Map<string, Deck> } {
   const decks = new Map(initial.map((d) => [d.id, d]))
+  const updatedAt = new Map(initial.map((d) => [d.id, 0]))
+  const tombstones = new Map<string, Tombstone>()
   return {
     decks,
     async loadAll() {
@@ -77,14 +97,59 @@ function createFakeDeckStore(initial: readonly Deck[] = []): DeckStore & { decks
     },
     async save(deck) {
       decks.set(deck.id, deck)
+      updatedAt.set(deck.id, now())
     },
     async remove(id) {
       decks.delete(id)
+      updatedAt.delete(id)
+      tombstones.set(id, { id, kind: 'deck', deletedAt: now() })
     },
     async exportAll(): Promise<Library> {
-      return { format: LIBRARY_FORMAT, schemaVersion: 1, exportedAt: 0, decks: [] }
+      return {
+        format: LIBRARY_FORMAT,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        exportedAt: now(),
+        decks: [...decks.values()].map((d) => ({
+          id: d.id,
+          name: d.name,
+          phrases: d.phrases,
+          createdAt: 0,
+          updatedAt: updatedAt.get(d.id) ?? 0,
+        })),
+        tombstones: [...tombstones.values()],
+      }
     },
-    async importAll() {},
+    async importAll(library) {
+      decks.clear()
+      updatedAt.clear()
+      tombstones.clear()
+      for (const record of library.decks) {
+        decks.set(record.id, { id: record.id, name: record.name, phrases: record.phrases })
+        updatedAt.set(record.id, record.updatedAt)
+      }
+      for (const tombstone of library.tombstones ?? []) {
+        tombstones.set(tombstone.id, tombstone)
+      }
+    },
+  }
+}
+
+/** In-memory MixStore fake — the real IndexedDB store is exercised in
+ * src/adapters/storage; App's wiring to the port is what these tests care
+ * about. */
+function createFakeMixStore(initial: readonly Mix[] = []): MixStore & { mixes: Map<string, Mix> } {
+  const mixes = new Map(initial.map((m) => [m.id, m]))
+  return {
+    mixes,
+    async loadAll() {
+      return [...mixes.values()]
+    },
+    async save(mix) {
+      mixes.set(mix.id, mix)
+    },
+    async remove(id) {
+      mixes.delete(id)
+    },
   }
 }
 
@@ -140,6 +205,15 @@ function createFakeClipCache(readyIds: ReadonlySet<string> = new Set()): ClipCac
 function createFakeScanReader(): ScanReader & { read: ReturnType<typeof vi.fn> } {
   const read = vi.fn<ScanReader['read']>()
   return { read }
+}
+
+/** In-memory Translator fake — the real server adapter is exercised in
+ * src/adapters/translation; App's wiring (candidate acceptance routed to the
+ * right Deck(s)) is what these tests care about. Never resolves by default,
+ * mirroring createFakeScanReader — most tests here don't exercise it at all. */
+function createFakeTranslator(): Translator & { translate: ReturnType<typeof vi.fn> } {
+  const translate = vi.fn<Translator['translate']>()
+  return { translate }
 }
 
 /** In-memory ErrorLog fake — the real IndexedDB-backed ring buffer is
@@ -199,10 +273,13 @@ async function renderApp(
   scanReader: ScanReader = createFakeScanReader(),
   errorLog: ErrorLog = createFakeErrorLog(),
   librarySyncClient: LibrarySyncClient = createFakeLibrarySyncClient(),
+  translator: Translator = createFakeTranslator(),
+  mixStore: MixStore = createFakeMixStore(),
 ) {
   await act(async () => {
     root.render(
       <App
+        mixStore={mixStore}
         deckStore={store}
         settingsStore={settingsStore}
         synthClient={synthClient}
@@ -211,6 +288,7 @@ async function renderApp(
         scanReader={scanReader}
         errorLog={errorLog}
         librarySyncClient={librarySyncClient}
+        translator={translator}
       />,
     )
   })
@@ -635,6 +713,101 @@ describe('App wired to Import', () => {
   })
 })
 
+describe('App wired to translate-and-add candidates (T057 scope addition)', () => {
+  it('accepting candidates routed to two different Decks persists each into its own Deck through DeckStore, and queues generation for each', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = createFakeDeckStore([
+        { id: 'd1', name: 'Home', phrases: [] },
+        { id: 'd2', name: 'Formal', phrases: [] },
+      ])
+      const translator = createFakeTranslator()
+      const candidates: PhraseCandidate[] = [
+        { text: 'Tu peux venir?', register: 'tu' },
+        { text: 'Pouvez-vous venir?', register: 'vous' },
+      ]
+      translator.translate.mockResolvedValue(candidates)
+      const generationQueue = createFakeGenerationQueue()
+      await renderApp(
+        store,
+        createFakeSettingsStore(),
+        createFakeSynthClient(),
+        generationQueue,
+        createFakeClipCache(),
+        createFakeScanReader(),
+        createFakeErrorLog(),
+        createFakeLibrarySyncClient(),
+        translator,
+      )
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+      const english = container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement
+      act(() => typeInto(english, 'Can you come?'))
+
+      await act(async () => {
+        vi.advanceTimersByTime(600)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(translator.translate).toHaveBeenCalledWith('Can you come?', 'en-to-fr', 'Home')
+
+      act(() => click(container.querySelector('[data-testid="candidate-checkbox-0"]')!))
+      act(() => click(container.querySelector('[data-testid="candidate-checkbox-1"]')!))
+      const deckSelect1 = container.querySelector('[data-testid="candidate-deck-1"]') as HTMLSelectElement
+      act(() => {
+        deckSelect1.value = 'd2'
+        deckSelect1.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      await act(async () => click(container.querySelector('[data-testid="add-candidates"]')!))
+
+      const home = store.decks.get('d1')!
+      const formal = store.decks.get('d2')!
+      expect(home.phrases).toEqual([expect.objectContaining({ french: 'Tu peux venir?', english: 'Can you come?' })])
+      expect(formal.phrases).toEqual([
+        expect.objectContaining({ french: 'Pouvez-vous venir?', english: 'Can you come?' }),
+      ])
+      expect(generationQueue.enqueued.map((p) => ({ french: p.french, english: p.english }))).toEqual([
+        { french: 'Tu peux venir?', english: 'Can you come?' },
+        { french: 'Pouvez-vous venir?', english: 'Can you come?' },
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("handleAddCandidates groups selections by destination Deck, matching handleImportSave's established pattern", async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [] },
+      { id: 'd2', name: 'Formal', phrases: [] },
+    ])
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      generationQueue,
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      createFakeLibrarySyncClient(),
+      createFakeTranslator(),
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+    // Manual save still works exactly as before with a Translator wired —
+    // the addition is additive, never a replacement of the existing path.
+    const french = container.querySelector('[data-testid="phrase-french-input"]') as HTMLInputElement
+    const english = container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement
+    act(() => typeInto(french, 'Bonjour'))
+    act(() => typeInto(english, 'Hello'))
+    await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
+
+    const saved = store.decks.get('d1')!
+    expect(saved.phrases).toHaveLength(1)
+    expect(saved.phrases[0]).toMatchObject({ french: 'Bonjour', english: 'Hello' })
+  })
+})
+
 describe('App wired to the backup nudge (T027)', () => {
   it('shows the backup nudge on the Decks empty state when not yet dismissed', async () => {
     const store = createFakeDeckStore([])
@@ -717,15 +890,15 @@ describe('App wired to library sync (T041)', () => {
     expect(container.textContent).toContain('From server')
   })
 
-  it('never pulls when local storage already has Decks — a device with local data is never overwritten by an empty or older server copy', async () => {
+  it('pulls on mount even when local storage already has Decks — otherwise a second device never sees the first one\'s work (T060)', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    let pullCalled = false
-    const librarySyncClient = createFakeLibrarySyncClient({
-      pull: async () => {
-        pullCalled = true
-        return { ok: false, reason: 'not-found' }
-      },
-    })
+    const library: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'remote', name: 'From server', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+    const librarySyncClient = createFakeLibrarySyncClient({ pull: async () => ({ ok: true, library }) })
 
     await renderApp(
       store,
@@ -737,8 +910,29 @@ describe('App wired to library sync (T041)', () => {
       createFakeErrorLog(),
       librarySyncClient,
     )
+    await flushMicrotasks()
 
-    expect(pullCalled).toBe(false)
+    expect(container.textContent).toContain('From server')
+    expect(container.textContent).toContain('Home')
+  })
+
+  it('never pushes on mount — merely opening the app can change nothing on the server (T060)', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const librarySyncClient = createFakeLibrarySyncClient()
+
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      librarySyncClient,
+    )
+    await flushMicrotasks()
+
+    expect(librarySyncClient.pushed).toEqual([])
   })
 
   it('pushes the whole library to the server after a Deck is created', async () => {
@@ -784,6 +978,196 @@ describe('App wired to library sync (T041)', () => {
     await flushMicrotasks()
 
     expect(librarySyncClient.pushed.length).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * One server, two devices (T060). The defect these pin: the phone never
+ * pulled, so its first local save pushed a library missing the Deck created
+ * on the web — and last-write-wins deleted her phrases with no error
+ * anywhere. Each test drives the real App twice, against two DeckStores and
+ * one shared server copy.
+ */
+function createFakeServer(): { library: Library | undefined; client(): LibrarySyncClient } {
+  const server: { library: Library | undefined; client(): LibrarySyncClient } = {
+    library: undefined,
+    client() {
+      return {
+        async push(library) {
+          server.library = library
+          return { ok: true }
+        },
+        async pull() {
+          return server.library ? { ok: true, library: server.library } : { ok: false, reason: 'not-found' }
+        },
+      }
+    },
+  }
+  return server
+}
+
+/** Tear the current App down and hand the next one a clean root — a second
+ * device is a second mount, not a re-render of the first. */
+function remount(): void {
+  act(() => root.unmount())
+  container.remove()
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
+}
+
+async function createDeckThroughUi(name: string): Promise<void> {
+  act(() => click(container.querySelector('[data-testid="new-deck"]')!))
+  const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+  act(() => typeInto(input, name))
+  await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+  await flushMicrotasks()
+}
+
+function serverDeckNames(server: { library: Library | undefined }): string[] {
+  return (server.library?.decks ?? []).map((d) => d.name).sort()
+}
+
+describe('App wired to two devices against one library (T060)', () => {
+  it('keeps a Deck created on one device when another device, which never saw it, saves', async () => {
+    const server = createFakeServer()
+
+    const web = createFakeDeckStore([], () => 1000)
+    await renderApp(
+      web,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Made on web')
+    expect(serverDeckNames(server)).toEqual(['Made on web'])
+
+    remount()
+    const phone = createFakeDeckStore([{ id: 'phone-deck', name: 'Made on phone', phrases: [] }], () => 2000)
+    await renderApp(
+      phone,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Also on phone')
+
+    expect(serverDeckNames(server)).toEqual(['Also on phone', 'Made on phone', 'Made on web'])
+  })
+
+  it('shows the other device\'s Deck on this one, without dropping this one\'s own', async () => {
+    const server = createFakeServer()
+    const web = createFakeDeckStore([], () => 1000)
+    await renderApp(
+      web,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Made on web')
+
+    remount()
+    const phone = createFakeDeckStore([{ id: 'phone-deck', name: 'Made on phone', phrases: [] }], () => 2000)
+    await renderApp(
+      phone,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await flushMicrotasks()
+
+    expect(container.textContent).toContain('Made on web')
+    expect(container.textContent).toContain('Made on phone')
+  })
+
+  it('does not push at all when it could not read the server copy first — a device that cannot merge must not overwrite', async () => {
+    const server = createFakeServer()
+    server.library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'web-deck', name: 'Made on web', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+    const offlinePull: LibrarySyncClient = {
+      ...server.client(),
+      async pull() {
+        return { ok: false, reason: 'network' }
+      },
+    }
+
+    const phone = createFakeDeckStore([{ id: 'phone-deck', name: 'Made on phone', phrases: [] }], () => 2000)
+    await renderApp(
+      phone,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      offlinePull,
+    )
+    await createDeckThroughUi('Also on phone')
+
+    expect(serverDeckNames(server)).toEqual(['Made on web'])
+  })
+
+  it('still deletes: a Deck deleted on one device does not come back from another device\'s stale copy', async () => {
+    const server = createFakeServer()
+
+    const web = createFakeDeckStore([], () => 1000)
+    await renderApp(
+      web,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Made on web')
+    const deckId = [...web.decks.keys()][0]!
+
+    // The phone had already synced that Deck down before it was deleted.
+    const phone = createFakeDeckStore([{ id: deckId, name: 'Made on web', phrases: [] }], () => 1500)
+
+    act(() => click(container.querySelector(`[data-testid="deck-row-${deckId}"]`)!))
+    act(() => click(container.querySelector('[data-testid="delete-deck"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-deck"]')!))
+    await flushMicrotasks()
+    expect(serverDeckNames(server)).toEqual([])
+
+    remount()
+    await renderApp(
+      phone,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Also on phone')
+
+    expect(serverDeckNames(server)).toEqual(['Also on phone'])
+    expect(container.textContent).not.toContain('Made on web')
   })
 })
 
@@ -851,5 +1235,134 @@ describe('App wired to Diagnostics (T039)', () => {
     await act(async () => click(container.querySelector('[data-testid="diagnostics-back"]')!))
 
     expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
+  })
+})
+
+describe('App wired to saved Mixes (T059)', () => {
+  const HOME: Deck = { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] }
+  const WORK: Deck = { id: 'd2', name: 'Work', phrases: [{ id: 'p2', french: 'Réunion', english: 'Meeting' }] }
+
+  async function renderWithMixes(
+    decks: readonly Deck[],
+    mixes: readonly Mix[],
+    ready: ReadonlySet<string> = new Set(['p1', 'p2']),
+  ) {
+    const deckStore = createFakeDeckStore(decks)
+    const mixStore = createFakeMixStore(mixes)
+    const sync = createFakeLibrarySyncClient()
+    await renderApp(
+      deckStore,
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(ready),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      sync,
+      // Slot 9 is `translator` (T057), slot 10 is `mixStore` (T059). Both
+      // branches added a parameter to the tail of this positional helper and
+      // each was correct alone; the merge is where they collided. Passed
+      // explicitly rather than relying on the default so the order is visible
+      // at the call site.
+      createFakeTranslator(),
+      mixStore,
+    )
+    return { deckStore, mixStore, sync }
+  }
+
+  it('saves a Mix through MixStore.save and lists it on the Mix screen', async () => {
+    const { mixStore } = await renderWithMixes([HOME, WORK], [])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d2"]')!))
+    act(() => click(container.querySelector('[data-testid="save-mix"]')!))
+    const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+    act(() => typeInto(input, 'Mornings'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+
+    expect(mixStore.mixes.size).toBe(1)
+    const saved = [...mixStore.mixes.values()][0]
+    expect(saved.name).toBe('Mornings')
+    expect(saved.deckIds).toEqual(['d1', 'd2'])
+    expect(typeof saved.id).toBe('string')
+    expect(saved.id.length).toBeGreaterThan(0)
+    expect(container.querySelector(`[data-testid="mix-row-${saved.id}"]`)).not.toBeNull()
+  })
+
+  it('loads saved Mixes on mount and drills one in a single tap', async () => {
+    await renderWithMixes([HOME, WORK], [{ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] }])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    await act(async () => click(container.querySelector('[data-testid="mix-row-m1"]')!))
+
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('2 phrases')
+  })
+
+  it('renames a saved Mix through MixStore.save, keeping its Decks', async () => {
+    const { mixStore } = await renderWithMixes([HOME, WORK], [{ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] }])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="rename-mix-m1"]')!))
+    const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+    act(() => typeInto(input, 'Evenings'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+
+    expect(mixStore.mixes.get('m1')).toEqual({ id: 'm1', name: 'Evenings', deckIds: ['d1', 'd2'] })
+  })
+
+  it('edits a saved Mix Deck selection through MixStore.save', async () => {
+    const { mixStore } = await renderWithMixes([HOME, WORK], [{ id: 'm1', name: 'Mornings', deckIds: ['d1'] }])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="edit-mix-m1"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d2"]')!))
+    await act(async () => click(container.querySelector('[data-testid="save-mix"]')!))
+
+    expect(mixStore.mixes.get('m1')).toEqual({ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] })
+  })
+
+  it('deleting a Mix removes it and never touches its source Decks', async () => {
+    const { deckStore, mixStore } = await renderWithMixes(
+      [HOME, WORK],
+      [{ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] }],
+    )
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="delete-mix-m1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-mix-m1"]')!))
+
+    expect(mixStore.mixes.size).toBe(0)
+    expect([...deckStore.decks.keys()].sort()).toEqual(['d1', 'd2'])
+    expect(deckStore.decks.get('d1')!.phrases).toHaveLength(1)
+    expect(container.querySelector('[data-testid="mix-row-m1"]')).toBeNull()
+  })
+
+  it('survives a Deck deleted out from under a saved Mix: the Mix still lists and drills what is left', async () => {
+    await renderWithMixes([HOME, WORK], [{ id: 'm1', name: 'Mornings', deckIds: ['d1', 'd2'] }])
+
+    // Delete Work from the Decks screen, then go to the Mix screen.
+    act(() => click(container.querySelector('[data-testid="delete-deck-d2"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-deck-d2"]')!))
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+
+    expect(container.querySelector('[data-testid="mix-row-m1"]')?.textContent).toContain('1 deck · 1 phrase')
+
+    await act(async () => click(container.querySelector('[data-testid="mix-row-m1"]')!))
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrases')
+  })
+
+  it('pushes the library to the server after a Mix is saved, so a new phone gets it', async () => {
+    const { sync } = await renderWithMixes([HOME, WORK], [])
+
+    await act(async () => click(container.querySelector('[data-testid="open-mix"]')!))
+    act(() => click(container.querySelector('[data-testid="deck-chip-d1"]')!))
+    act(() => click(container.querySelector('[data-testid="save-mix"]')!))
+    const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+    act(() => typeInto(input, 'Mornings'))
+    await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+    await flushMicrotasks()
+
+    expect(sync.pushed.length).toBeGreaterThan(0)
   })
 })

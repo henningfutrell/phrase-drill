@@ -7,7 +7,7 @@
 //
 // Usage:
 //   npm run useradd -- her
-//   (then type the password, Enter, Ctrl-D)
+//   (then type the password and press Enter — no Ctrl-D)
 //
 // An existing username is refused (server/db.js#createAuthStore.users.create
 // raises Postgres's own unique-violation on `users.username`) — this script
@@ -18,19 +18,65 @@
 
 import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { createPool, createAuthStore, waitForDatabase } from '../server/db.js'
 import { hashPassword } from '../server/session-auth.js'
 
-async function readPasswordFromStdin() {
+/**
+ * Reads one password, resolving on the FIRST newline — never on EOF (T055).
+ *
+ * The earlier version resolved on readline's `close` event, which fires only
+ * at EOF, so an interactive user had to press Ctrl-D. Render's web Shell does
+ * not reliably deliver Ctrl-D, and where it does it can end the session
+ * instead of the read — so the script simply hung after Enter, with no output
+ * to say why. It also printed no prompt at all, which made a silent wait
+ * indistinguishable from a crashed process.
+ *
+ * `output` gets the prompt (stderr by default, so `useradd ... > file` still
+ * shows it). `close` is still handled, but only as the failure path: a stream
+ * that ends without ever yielding a line means no password was supplied.
+ */
+export function readPasswordFrom({ input, output }) {
   return new Promise((resolve, reject) => {
-    const rl = createInterface({ input: process.stdin, terminal: false })
-    let line
-    rl.on('line', (l) => {
-      if (line === undefined) line = l
+    output.write(`password for the new account (typing is not echoed back by this script): `)
+    const rl = createInterface({ input, terminal: false })
+    let settled = false
+    rl.on('line', (line) => {
+      if (settled) return
+      settled = true
+      rl.close()
+      // `close()` pauses the stream but does not UNREF it, and a referenced
+      // `process.stdin` holds the event loop open forever. Without this the
+      // account is created and the process then hangs with nothing printed —
+      // from the keyboard, identical to the bug above. `unref` is absent on a
+      // plain Readable, hence the guard.
+      input.unref?.()
+      // A CRLF terminal leaves \r on the line; hashing it would make the
+      // password unenterable from anywhere that sends bare \n.
+      resolve(line.replace(/\r$/, ''))
     })
-    rl.on('close', () => (line !== undefined ? resolve(line) : reject(new Error('no password read from stdin'))))
-    rl.on('error', reject)
+    rl.on('close', () => {
+      if (settled) return
+      settled = true
+      reject(new Error('no password read from stdin'))
+    })
+    rl.on('error', (err) => {
+      if (settled) return
+      settled = true
+      reject(err)
+    })
   })
+}
+
+/** `host:port/database` — never the password, which is the only part of a connection string worth hiding. */
+export function describeTarget(connectionString) {
+  try {
+    const url = new URL(connectionString)
+    return `${url.hostname}:${url.port || '5432'}${url.pathname}`
+  } catch {
+    return '(unparseable DATABASE_URL)'
+  }
 }
 
 async function main() {
@@ -41,16 +87,45 @@ async function main() {
     return
   }
 
-  const password = await readPasswordFromStdin()
+  // No localhost fallback here, deliberately (T055). `server/index.js` may
+  // default, because it boots beside its own Postgres in compose. This CLI is
+  // run by hand, most often in a hosted shell where a missing DATABASE_URL
+  // means the environment is wrong — and silently defaulting to localhost sent
+  // the operator into 30 seconds of wordless retrying against a database that
+  // was never there. Refuse immediately and say what is missing.
+  const databaseUrl = process.env.DATABASE_URL
+  if (!databaseUrl) {
+    console.error('DATABASE_URL is not set — nothing to connect to.')
+    console.error('In Render, run this from the service Shell so the service env is present.')
+    console.error("Locally: DATABASE_URL='postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill' npm run useradd -- <username>")
+    process.exitCode = 1
+    return
+  }
+
+  const password = await readPasswordFrom({ input: process.stdin, output: process.stderr })
   if (password.length === 0) {
     console.error('empty password refused')
     process.exitCode = 1
     return
   }
 
-  const databaseUrl = process.env.DATABASE_URL ?? 'postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill'
-  const pool = createPool(databaseUrl)
-  await waitForDatabase(pool)
+  // Say where we are going before going there. waitForDatabase retries
+  // silently, so without this line an unreachable host is indistinguishable
+  // from a hung process — which is exactly how this was reported.
+  console.error(`connecting to ${describeTarget(databaseUrl)} ...`)
+  const pool = createPool(databaseUrl, { connectionTimeoutMillis: 3000 })
+  try {
+    // 3 tries, not the server's 30: a CLI in front of a human must fail while
+    // they are still watching. The server waits longer because compose starts
+    // every service at once and Postgres genuinely may not be up yet.
+    await waitForDatabase(pool, { retries: 3, delayMs: 1000 })
+  } catch (err) {
+    console.error(`could not reach the database at ${describeTarget(databaseUrl)} after 3 tries.`)
+    console.error(err instanceof Error ? err.message : String(err))
+    process.exitCode = 1
+    await pool.end()
+    return
+  }
   const authStore = createAuthStore(pool)
   await authStore.init()
 
@@ -73,7 +148,12 @@ async function main() {
   await authStore.close()
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err))
-  process.exitCode = 1
-})
+// Only run when executed directly. `useradd.test.js` imports `readPasswordFrom`
+// from this module, and an unguarded `main()` would open a database connection
+// on import — the test would hang against a database that isn't there.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err))
+    process.exitCode = 1
+  })
+}

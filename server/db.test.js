@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
-import { createLibraryStore, createAuthStore, waitForDatabase, extractPassword, sslConfigFor } from './db.js'
+import { createLibraryStore, createAuthStore, createClipStore, waitForDatabase, extractPassword, sslConfigFor } from './db.js'
 
 /**
  * A minimal stand-in for a `pg` `Pool`: real enough to exercise
@@ -109,6 +109,108 @@ describe('createLibraryStore (Postgres)', () => {
     const store = createLibraryStore(pool)
 
     await store.close()
+
+    expect(end).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * A minimal stand-in for a `pg` `Pool` covering `clips` (T063) — enough to
+ * exercise `createClipStore`'s SQL without a live Postgres. The real driver
+ * maps `bytea` to a `Buffer` in both directions, which is what this fake
+ * stores and returns.
+ */
+function fakeClipPool() {
+  let tableCreated = false
+  const rows = new Map()
+  const queries = []
+
+  return {
+    queries,
+    async query(text, params = []) {
+      queries.push({ text, params })
+      const sql = text.trim()
+
+      if (sql.startsWith('CREATE TABLE')) {
+        tableCreated = true
+        return { rows: [] }
+      }
+      if (!tableCreated) throw new Error('relation "clips" does not exist')
+
+      if (sql.startsWith('SELECT')) {
+        const row = rows.get(params[0])
+        return { rows: row ? [{ bytes: row.bytes, mime: row.mime, durationMs: row.durationMs }] : [] }
+      }
+
+      if (sql.startsWith('INSERT')) {
+        const [hash, bytes, mime, durationMs, createdAt] = params
+        // Mirrors `ON CONFLICT (hash) DO NOTHING`: the first write for a
+        // content address wins and later ones are silently no-ops.
+        if (!rows.has(hash)) rows.set(hash, { bytes, mime, durationMs, createdAt })
+        return { rows: [] }
+      }
+
+      throw new Error(`fakeClipPool: unrecognized query: ${sql}`)
+    },
+    async end() {},
+  }
+}
+
+describe('createClipStore (Postgres, T063)', () => {
+  const BYTES = Buffer.from([0xff, 0xfb, 0x90, 0x00])
+
+  it('creates its table idempotently, on init, before any read', async () => {
+    const pool = fakeClipPool()
+    const store = createClipStore(pool)
+
+    await store.init()
+    await store.init() // a second boot against an existing schema must not throw
+
+    const creates = pool.queries.filter((q) => q.text.trim().startsWith('CREATE TABLE'))
+    expect(creates.length).toBe(2)
+    expect(creates[0].text).toContain('IF NOT EXISTS')
+    // bytea, not text/base64: the bytes are stored as bytes (T063).
+    expect(creates[0].text).toContain('BYTEA')
+  })
+
+  it('returns null for a hash it has never stored', async () => {
+    const store = createClipStore(fakeClipPool())
+    await store.init()
+
+    expect(await store.get('deadbeef')).toBeNull()
+  })
+
+  it('round-trips the bytes, mime and duration under a content hash', async () => {
+    const store = createClipStore(fakeClipPool())
+    await store.init()
+
+    await store.put({ hash: 'abc123', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1_700_000_000_000 })
+
+    const clip = await store.get('abc123')
+    expect(Buffer.from(clip.bytes).equals(BYTES)).toBe(true)
+    expect(clip.mime).toBe('audio/mpeg')
+    expect(clip.durationMs).toBe(250)
+  })
+
+  it('does not throw or overwrite when the same hash is written twice', async () => {
+    const pool = fakeClipPool()
+    const store = createClipStore(pool)
+    await store.init()
+
+    await store.put({ hash: 'abc123', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+    await store.put({ hash: 'abc123', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 2 })
+
+    // Content-addressed: a second write for a hash is the same audio by
+    // definition, so a concurrent double-miss must be a no-op, never an error.
+    expect(pool.queries.some((q) => q.text.includes('ON CONFLICT (hash) DO NOTHING'))).toBe(true)
+    expect((await store.get('abc123')).durationMs).toBe(250)
+  })
+
+  it('closes by ending the pool', async () => {
+    const pool = fakeClipPool()
+    const end = vi.spyOn(pool, 'end')
+
+    await createClipStore(pool).close()
 
     expect(end).toHaveBeenCalledTimes(1)
   })

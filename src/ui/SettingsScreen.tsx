@@ -69,7 +69,7 @@ export function SettingsScreen({
   voices: readonly VoiceOption[]
   previewText: string
   onPreviewVoice: (
-    voice: { modelId: string; voiceId: string },
+    voice: { provider: string; modelId: string; voiceId: string },
     text: string,
     signal: AbortSignal,
   ) => Promise<PreviewOutcome>
@@ -102,7 +102,7 @@ export function SettingsScreen({
     setPreviewError(null)
     setPreviewingVoiceId(entry.voiceId)
 
-    onPreviewVoice({ modelId: entry.modelId, voiceId: entry.voiceId }, previewText, controller.signal)
+    onPreviewVoice({ provider: entry.provider, modelId: entry.modelId, voiceId: entry.voiceId }, previewText, controller.signal)
       .then((outcome) => {
         if (previewController.current !== controller) return
         previewController.current = null

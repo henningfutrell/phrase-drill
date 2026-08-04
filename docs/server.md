@@ -42,12 +42,25 @@ deleted the moment it's found, not left to expire on its own schedule.
 | GET    | `/api/health`  | Liveness check, no auth required.                     | —          | none               |
 | POST   | `/api/login`   | `{username, password}` → `200 {token, expiresAt}` or `401` (identical body whether the username doesn't exist or the password is wrong — no leak). | 2 KB | 5 / 60s per username |
 | POST   | `/api/logout`  | Deletes the session row for the bearer token, if any. Always `204`. | — | none |
-| POST   | `/api/tts`     | Synthesize speech for one phrase (`{text, voiceId, modelId}` → audio/mpeg). | 8 KB       | 60 / 60s per session |
+| POST   | `/api/tts`     | Speech for one phrase (`{text, voiceId, modelId, provider, lang}` → audio/mpeg), served from the shared Clip store when it holds it — see below. All five fields are required. | 8 KB       | 60 / 60s per session |
 | POST   | `/api/scan`    | Read handwritten phrases from an uploaded photo (image bytes → `{phrases}`). | 6 MB       | 10 / 60s per session |
+| POST   | `/api/translate` | Propose one or more Phrase Candidates translating one phrase (`{text, direction, deckName}` → `{candidates}`). | 4 KB | 30 / 60s per session |
 | GET    | `/api/library` | Fetch the stored library JSON for this user.          | —          | 30 / 60s per session |
-| PUT    | `/api/library` | Replace the stored library JSON for this user.        | 8 MB       | 30 / 60s per session |
+| PUT    | `/api/library` | Replace the stored library JSON for this user. `409 stale-client` if the body's `schemaVersion` is *lower* than the stored envelope's — see below. | 8 MB | 30 / 60s per session |
 | \*     | anything else under `/api/` | `404 not-found`.                        | —          | —                  |
 | \*     | anything not under `/api/`  | Falls back to the built PWA (`dist/`, SPA fallback to `index.html`). | — | — |
+
+**Why `PUT /api/library` can answer 409 (T060).** The device pushes the whole
+library, and the client merges the server copy into its own before pushing so
+that neither device can erase what only the other had. That merge depends on
+fields — `tombstones` above all — that only a client new enough to know about
+them can carry. Her two devices do not update together, so for a window after
+a deploy one of them is running an older bundle whose `exportAll()` silently
+omits those fields; letting it write would strip the merge metadata off the
+server copy and resurrect every Deck she had deleted. The server refuses that
+one case and nothing else: a push at the same version or newer is accepted as
+before. The refused device keeps its changes locally and syncs once it
+updates.
 
 Rate limits are in-memory, per-process token buckets (`server/rate-limiter.js`)
 — a restart resets every bucket to full; there is no distributed store to keep
@@ -59,6 +72,53 @@ impractical without punishing her for a typo.
 Provider failures map to HTTP status: `not-configured` (no key set on the
 server) → 503; `quota` (provider rate-limited us) → 429; `unreadable` (vision
 model found no usable phrases) → 422; anything else → 502.
+
+## The shared Clip store (T063)
+
+`/api/tts` looks a Clip up before it calls ElevenLabs. On a miss it calls the
+provider, writes the bytes through, and returns them; on a hit it returns the
+stored bytes and makes no provider call at all. One table:
+
+```
+clips (hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL, mime TEXT NOT NULL,
+       duration_ms BIGINT NOT NULL, created_at BIGINT NOT NULL)
+```
+
+**Why.** Before this the route was a straight proxy, so the same phrase in the
+same voice was generated and paid for again on every device and after every
+reinstall. The device's IndexedDB cache stays exactly as it was — it is what
+makes the drill work offline — but it is now a local copy of a shared store
+rather than the only copy there is.
+
+**Postgres `bytea`, not an object store.** One user, a few thousand clips at
+~10-30 KB: tens of megabytes, in a database this stack already runs. An object
+store would be a second service to run, a second credential to rotate, and a
+second thing to be down.
+
+**The server derives the content address; it does not trust one the client
+sends.** The address is SHA-256 of `provider|modelId|voiceId|lang|text`, which
+is the same material `src/adapters/storage/clip-cache.ts` uses for the device
+cache. A client-supplied key would be an assertion the server cannot check —
+"these bytes are what this address means" — and one bad build would write the
+wrong audio under a good address for *every* device, permanently and silently,
+because a cache is never re-checked against what it caches. Deriving it here
+makes the address a function of the request the server itself made.
+
+The cost is two implementations of one derivation, which can drift.
+`src/adapters/storage/clip-hash-parity.integration.test.ts` imports both and
+compares them, so neither can change alone. This is why `/api/tts` now requires
+`provider` and `lang`, which the ElevenLabs call itself has no use for.
+
+**A cache hit still spends rate-limit budget.** The limiter stays in front of
+the route. A hit is a smaller cost, not no cost — an authenticated request, a
+database read, ~20 KB streamed back — and making hits free would put an
+un-metered path behind a bearer token (see the stolen-token trade-off above).
+The consequence is worth stating plainly: a device sweeping a whole library
+still hits the 60/60s ceiling on the second device exactly as it did on the
+first. It just no longer pays ElevenLabs to get there.
+
+**A failed write does not fail the request.** The bytes are already generated
+and already paid for; the caller gets them, and the failure is logged.
 
 ## Concurrency and retry
 
@@ -193,7 +253,7 @@ These are deliberate stopping points, not gaps someone forgot to close:
 | Var                    | Default                                                     | Meaning                                           |
 | ----------------------- | ------------------------------------------------------------ | -------------------------------------------------- |
 | `PORT`                  | `8080`                                                        | HTTP port.                                          |
-| `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `users`, `sessions`. |
+| `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `users`, `sessions`, `clips`. |
 | `DIST_DIR`               | `../dist` (relative to `server/`)                             | Built PWA to serve statically.               |
 | `ELEVENLABS_API_KEY`     | unset                                                         | Speech generation returns `not-configured` if unset.|
 | `ANTHROPIC_API_KEY`      | unset                                                         | Scan reading returns `not-configured` if unset.      |
@@ -211,7 +271,8 @@ documents every variable this stack reads, with safe local-only defaults;
 
 ## Schema: creation and change
 
-`createLibraryStore(pool).init()` and `createAuthStore(pool).init()` both run
+`createLibraryStore(pool).init()`, `createAuthStore(pool).init()` and
+`createClipStore(pool).init()` (T063) all run
 `CREATE TABLE IF NOT EXISTS` on every boot (`server/db.js`) — idempotent, so
 a fresh database and one that already has the tables both end up in the same
 state with no separate migration step to remember to run.

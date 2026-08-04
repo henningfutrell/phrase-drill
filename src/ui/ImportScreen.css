@@ -58,6 +58,13 @@
   gap: 8px;
 }
 
+/* A draft is a phrase the scan read but she has not confirmed yet, so it needs
+   to look provisional rather than merely marked. A basting stitch is what
+   holds a piece in place before it is sewn in, and a dashed gilt thread is
+   literally that — in-world, and 1px, which a 3px accent border-left was not
+   (it read as a status stripe from a different design system entirely). */
 .draft-row {
-  border-left: 3px solid var(--accent);
+  border-style: dashed;
+  border-color: var(--gilt);
+  background: var(--bg-veil);
 }

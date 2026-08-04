@@ -85,6 +85,7 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
       for (let attempt = 1; ; attempt++) {
         try {
           const result = await deps.synthClient.synthesize(text, lang, {
+            provider: voice.provider,
             modelId: voice.modelId,
             voiceId: voice.voiceId,
           })

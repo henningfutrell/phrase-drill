@@ -2,7 +2,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DeckDetailScreen } from './DeckDetailScreen'
-import type { Deck } from '../domain'
+import type { Deck, Translator } from '../domain'
 
 function typeInto(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
@@ -66,12 +66,21 @@ describe('DeckDetailScreen', () => {
     expect(onDrillDeck).toHaveBeenCalledTimes(1)
   })
 
-  it('renders each Phrase, French over English, in author order', () => {
+  it('renders each Phrase, English over French, in author order', () => {
     renderScreen(threePhraseDeck)
     const rows = container.querySelectorAll('[data-testid^="phrase-row-"]')
     expect(rows).toHaveLength(3)
     expect(rows[0].textContent).toContain('Bonjour')
     expect(rows[0].textContent).toContain('Hello')
+
+    // She works English -> French, so the English is the entry the row leads
+    // with and the French is the answer under it (T062).
+    const lines = rows[0].querySelectorAll('.phrase-text > *')
+    expect(lines).toHaveLength(2)
+    expect(lines[0].className).toBe('phrase-english')
+    expect(lines[0].textContent).toBe('Hello')
+    expect(lines[1].className).toBe('phrase-french')
+    expect(lines[1].textContent).toBe('Bonjour')
   })
 
   it('shows an empty-state prompt when the Deck has no Phrases', () => {
@@ -155,5 +164,43 @@ describe('DeckDetailScreen', () => {
     const { onBack } = renderScreen(threePhraseDeck)
     act(() => click(container.querySelector('[data-testid="back"]')!))
     expect(onBack).toHaveBeenCalled()
+  })
+})
+
+describe('DeckDetailScreen — Phrase Candidates (T057 scope addition)', () => {
+  const otherDeck: Deck = { id: 'd2', name: 'Formal', phrases: [] }
+
+  function fakeTranslator(): Translator {
+    return { translate: vi.fn().mockResolvedValue([]) }
+  }
+
+  it('threads decks, translator, and currentDeckId into the Add sheet, not the Edit sheet', () => {
+    const translator = fakeTranslator()
+    renderScreen(threePhraseDeck, { decks: [threePhraseDeck, otherDeck], translator, onAddPhraseCandidates: vi.fn() })
+
+    act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+    act(() => {
+      const english = container.querySelector('[data-testid="phrase-english-input"]') as HTMLInputElement
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(english, 'Hello')
+      english.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(translator.translate).not.toHaveBeenCalled() // debounce hasn't fired yet — proves the port is wired, not that it fired
+    act(() => click(container.querySelector('[data-testid="phrase-save"]')!))
+    act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+
+    act(() => click(container.querySelector('[data-testid="edit-phrase-p1"]')!))
+    // Editing an existing Phrase must never offer candidates — only the Add sheet does.
+    expect(container.querySelector('[data-testid="translate-status"]')).toBeNull()
+  })
+
+  it('calls onAddPhraseCandidates and closes the sheet when candidates are accepted', () => {
+    const onAddPhraseCandidates = vi.fn()
+    renderScreen(
+      { ...threePhraseDeck, phrases: [] },
+      { decks: [threePhraseDeck, otherDeck], translator: fakeTranslator(), onAddPhraseCandidates },
+    )
+    act(() => click(container.querySelector('[data-testid="add-phrase"]')!))
+    expect(container.querySelector('[data-testid="phrase-french-input"]')).not.toBeNull()
   })
 })

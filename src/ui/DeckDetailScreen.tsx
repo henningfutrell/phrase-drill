@@ -1,8 +1,14 @@
 import { useState } from 'react'
-import type { Deck } from '../domain'
+import type { Deck, Translator } from '../domain'
 import type { PhraseId } from '../domain'
 import { NameSheet } from './NameSheet'
 import { PhraseSheet } from './PhraseSheet'
+
+interface AcceptedCandidate {
+  french: string
+  english: string
+  deckId: string
+}
 
 type PhraseSheetState = { kind: 'add' } | { kind: 'edit'; phraseId: PhraseId } | undefined
 
@@ -13,6 +19,9 @@ type PhraseSheetState = { kind: 'add' } | { kind: 'edit'; phraseId: PhraseId } |
  */
 export function DeckDetailScreen({
   deck,
+  decks,
+  translator,
+  onAddPhraseCandidates,
   onBack,
   onRenameDeck,
   onDeleteDeck,
@@ -24,6 +33,11 @@ export function DeckDetailScreen({
   onDrillDeck,
 }: {
   deck: Deck
+  /** All Decks, so a Phrase Candidate can be routed to one other than this one (T057). */
+  decks?: Deck[]
+  /** Wired only into the Add sheet — never Edit (T057). */
+  translator?: Translator
+  onAddPhraseCandidates?: (accepted: AcceptedCandidate[]) => void
   onBack: () => void
   onRenameDeck: (name: string) => void
   onDeleteDeck: () => void
@@ -93,8 +107,8 @@ export function DeckDetailScreen({
           {deck.phrases.map((phrase, index) => (
             <li key={phrase.id} data-testid={`phrase-row-${phrase.id}`} className="phrase-row">
               <div className="phrase-text">
-                <div className="phrase-french">{phrase.french}</div>
                 <div className="phrase-english">{phrase.english}</div>
+                <div className="phrase-french">{phrase.french}</div>
               </div>
               <div className="phrase-reorder">
                 <button
@@ -176,6 +190,17 @@ export function DeckDetailScreen({
 
       {phraseSheet?.kind === 'add' && (
         <PhraseSheet
+          deckName={deck.name}
+          decks={decks}
+          currentDeckId={deck.id}
+          translator={translator}
+          onAddCandidates={
+            onAddPhraseCandidates &&
+            ((accepted) => {
+              onAddPhraseCandidates(accepted)
+              setPhraseSheet(undefined)
+            })
+          }
           onCancel={() => setPhraseSheet(undefined)}
           onSave={(french, english) => {
             onAddPhrase(french, english)

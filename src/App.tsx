@@ -6,14 +6,29 @@ import type {
   DraftPhrase,
   Library,
   Mix,
+  MixId,
+  MixStore,
   Phrase,
   PhraseId,
   ScanReader,
   SpeechPort,
+  Translator,
 } from './domain'
-import { addPhrase, createDeck, removePhrase, renameDeck, reorderPhrase, updatePhrase } from './domain'
+import {
+  addPhrase,
+  createDeck,
+  createMix,
+  mergeLibraries,
+  removePhrase,
+  renameDeck,
+  renameMix,
+  reorderPhrase,
+  resolveMixPhrases,
+  setMixDecks,
+  updatePhrase,
+} from './domain'
 import type { ClipCache, Settings, SettingsStore } from './adapters/storage'
-import { backupFilename, parseLibraryFile } from './adapters/storage'
+import { backupFilename, normalizeLibrary, parseLibraryFile } from './adapters/storage'
 import type { ErrorLog } from './adapters/diagnostics'
 import { collectDiagnostics, copyText, formatDiagnosticsReport, getBuildInfo, getStorageEstimate } from './adapters/diagnostics'
 import { shareBackupFile } from './adapters/share/web-share'
@@ -94,6 +109,7 @@ function downloadFile(file: File): void {
  */
 function App({
   deckStore,
+  mixStore,
   settingsStore,
   synthClient,
   generationQueue,
@@ -101,8 +117,10 @@ function App({
   scanReader,
   errorLog,
   librarySyncClient,
+  translator,
 }: {
   deckStore: DeckStore
+  mixStore: MixStore
   settingsStore: SettingsStore
   synthClient: SynthClient
   generationQueue: GenerationQueue
@@ -110,8 +128,10 @@ function App({
   scanReader: ScanReader
   errorLog: ErrorLog
   librarySyncClient: LibrarySyncClient
+  translator: Translator
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
+  const [mixes, setMixes] = useState<Mix[]>([])
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -144,30 +164,42 @@ function App({
 
   useEffect(() => {
     let cancelled = false
-    void deckStore.loadAll().then(async (loaded) => {
+    void (async () => {
+      // Local first, always: what is on this device is shown without
+      // waiting for a network round-trip that may never answer.
+      const [loadedDecks, loadedMixes] = await Promise.all([deckStore.loadAll(), mixStore.loadAll()])
       if (cancelled) return
-      // A wiped or replaced phone (T041): nothing local yet, so pull
-      // whatever this library key's server copy holds before showing an
-      // empty Decks screen. `not-found`/`unauthorized`/`network` all leave
-      // her on the ordinary empty state — pulling is a bonus on top of
-      // local storage, never a blocker in front of it.
-      if (loaded.length === 0) {
-        const pulled = await librarySyncClient.pull()
-        if (!cancelled && pulled.ok) {
-          await deckStore.importAll(pulled.library)
-          const reloaded = await deckStore.loadAll()
-          if (!cancelled) {
-            setDecks(reloaded)
-            return
-          }
-        }
-      }
-      if (!cancelled) setDecks(loaded)
-    })
+      setDecks(loadedDecks)
+      setMixes(loadedMixes)
+
+      // Then pull, on every boot — not only when local storage is empty
+      // (T060). The old gate meant a device holding even one Deck never
+      // asked the server anything again, so a Deck made on the web was
+      // never seen by the phone. `not-found`/`unauthorized`/`network` all
+      // leave her exactly where she is: pulling is a bonus on top of local
+      // storage, never a blocker in front of it.
+      const pulled = await librarySyncClient.pull()
+      if (cancelled || !pulled.ok) return
+
+      // Merge, never replace. The server copy is another device's snapshot,
+      // not an authority: replacing local with it would delete anything
+      // saved here while offline. Boot deliberately does NOT push the
+      // result — opening the app must not be able to change the server
+      // copy; only a save or a delete pushes.
+      const merged = mergeLibraries(
+        normalizeLibrary(await deckStore.exportAll()),
+        normalizeLibrary(pulled.library),
+      )
+      await deckStore.importAll(merged)
+      const [mergedDecks, mergedMixes] = await Promise.all([deckStore.loadAll(), mixStore.loadAll()])
+      if (cancelled) return
+      setDecks(mergedDecks)
+      setMixes(mergedMixes)
+    })()
     return () => {
       cancelled = true
     }
-  }, [deckStore, librarySyncClient])
+  }, [deckStore, mixStore, librarySyncClient])
 
   useEffect(() => {
     let cancelled = false
@@ -196,18 +228,35 @@ function App({
    * point of view — a failed push never blocks the local save, which has
    * already happened by the time this runs; it only updates `lastSyncAt` on
    * success, so Diagnostics can show how stale the server copy might be.
+   *
+   * Read-merge-write, not write (T060). The push carries the whole library,
+   * so pushing this device's copy blind overwrites whatever only the other
+   * device had — which is how a Deck she made on the web was deleted by the
+   * next save on her phone. So: pull first, merge, push the union.
+   *
+   * A pull that fails means this device cannot know what it would be
+   * overwriting, and it does not push at all. Her change is already saved
+   * locally and goes up on the next successful sync; the alternative —
+   * pushing anyway — is exactly the destructive write this exists to
+   * prevent. `not-found` is not a failure: it means the server holds
+   * nothing yet, so there is nothing to merge with and nothing to lose.
    */
   function syncToServer(): void {
-    void deckStore
-      .exportAll()
-      .then((library) => librarySyncClient.push(library))
-      .then((result) => {
-        if (result.ok) {
-          const timestamp = Date.now()
-          setSettings((current) => ({ ...current, lastSyncAt: timestamp }))
-          void settingsStore.recordSync(timestamp)
-        }
-      })
+    void (async () => {
+      const pulled = await librarySyncClient.pull()
+      if (!pulled.ok && pulled.reason !== 'not-found') return
+
+      const local = await deckStore.exportAll()
+      const outgoing = pulled.ok
+        ? mergeLibraries(normalizeLibrary(local), normalizeLibrary(pulled.library))
+        : local
+
+      const result = await librarySyncClient.push(outgoing)
+      if (!result.ok) return
+      const timestamp = Date.now()
+      setSettings((current) => ({ ...current, lastSyncAt: timestamp }))
+      void settingsStore.recordSync(timestamp)
+    })()
   }
 
   function handleCreateDeck(name: string) {
@@ -218,6 +267,40 @@ function App({
     const deck = (decks ?? []).find((d) => d.id === id)
     if (!deck) return
     persist(renameDeck(deck, name))
+  }
+
+  /** Whole-Mix upsert into local state and the store, same shape as `persist`. */
+  function persistMix(mix: Mix) {
+    setMixes((current) =>
+      current.some((m) => m.id === mix.id) ? current.map((m) => (m.id === mix.id ? mix : m)) : [...current, mix],
+    )
+    void mixStore.save(mix).then(() => syncToServer())
+  }
+
+  function handleSaveMix(name: string, deckIds: readonly DeckId[]) {
+    persistMix(createMix(crypto.randomUUID(), name, deckIds))
+  }
+
+  function handleRenameMix(id: MixId, name: string) {
+    const mix = mixes.find((m) => m.id === id)
+    if (!mix) return
+    persistMix(renameMix(mix, name))
+  }
+
+  function handleEditMixDecks(id: MixId, deckIds: readonly DeckId[]) {
+    const mix = mixes.find((m) => m.id === id)
+    if (!mix) return
+    persistMix(setMixDecks(mix, deckIds))
+  }
+
+  /**
+   * Deleting a Mix reaches the `mixes` store and nothing else — the Decks
+   * it named are untouched, here and in the adapter (they are separate
+   * stores, so it is structural, not a promise).
+   */
+  function handleDeleteMix(id: MixId) {
+    setMixes((current) => current.filter((m) => m.id !== id))
+    void mixStore.remove(id).then(() => syncToServer())
   }
 
   function handleDeleteDeck(id: DeckId) {
@@ -251,12 +334,19 @@ function App({
     const library = pendingRestore
     if (!library) return
     setPendingRestore(undefined)
-    void deckStore.importAll(library).then(() => deckStore.loadAll()).then((loaded) => {
-      setDecks(loaded)
-      setSelectedDeckId(undefined)
-      setSettingsOpen(false)
-      syncToServer()
-    })
+    void deckStore
+      .importAll(library)
+      .then(() => Promise.all([deckStore.loadAll(), mixStore.loadAll()]))
+      .then(([loadedDecks, loadedMixes]) => {
+        // A restore replaces the whole library, saved Mixes included — read
+        // both back so the screens show what is actually stored, not what
+        // was stored a moment ago.
+        setDecks(loadedDecks)
+        setMixes(loadedMixes)
+        setSelectedDeckId(undefined)
+        setSettingsOpen(false)
+        syncToServer()
+      })
   }
 
   function handleCancelRestore() {
@@ -264,7 +354,7 @@ function App({
   }
 
   async function handlePreviewVoice(
-    voice: { modelId: string; voiceId: string },
+    voice: { provider: string; modelId: string; voiceId: string },
     text: string,
     signal: AbortSignal,
   ): Promise<PreviewOutcome> {
@@ -357,6 +447,33 @@ function App({
     setSelectedDeckId(updated.id)
   }
 
+  /**
+   * A batch of accepted Phrase Candidates from the Add sheet (T057), each
+   * already routed to a chosen Deck. Groups by destination Deck and persists
+   * once per Deck, matching `handleImportSave`'s established pattern; queues
+   * generation for every new Phrase, same as a manually-added one.
+   */
+  function handleAddCandidates(accepted: { french: string; english: string; deckId: string }[]): void {
+    const byDeck = new Map<string, typeof accepted>()
+    for (const c of accepted) {
+      const list = byDeck.get(c.deckId) ?? []
+      list.push(c)
+      byDeck.set(c.deckId, list)
+    }
+    for (const [deckId, group] of byDeck) {
+      const base = (decks ?? []).find((d) => d.id === deckId)
+      if (!base) continue
+      const newIds: PhraseId[] = []
+      const updated = group.reduce((deck, c) => {
+        const id = crypto.randomUUID()
+        newIds.push(id)
+        return addPhrase(deck, { id, french: c.french, english: c.english })
+      }, base)
+      persist(updated)
+      for (const id of newIds) queuePhraseGeneration(updated, id)
+    }
+  }
+
   if (decks === undefined) {
     return <main className="screen" />
   }
@@ -429,11 +546,20 @@ function App({
     return (
       <MixSelectScreen
         decks={decks}
+        mixes={mixes}
         onBack={() => setMixOpen(false)}
         onStartMix={(mix: Mix) => {
           setMixOpen(false)
-          setDrillTarget({ title: 'Mix', phrases: mix.phrases })
+          setDrillTarget({ title: mix.name, phrases: resolveMixPhrases(mix, decks) })
         }}
+        onStartSelection={(selected) => {
+          setMixOpen(false)
+          setDrillTarget({ title: 'Mix', phrases: selected.flatMap((deck) => deck.phrases) })
+        }}
+        onSaveMix={handleSaveMix}
+        onRenameMix={handleRenameMix}
+        onEditMixDecks={handleEditMixDecks}
+        onDeleteMix={handleDeleteMix}
       />
     )
   }
@@ -455,6 +581,9 @@ function App({
     return (
       <DeckDetailScreen
         deck={selectedDeck}
+        decks={decks}
+        translator={translator}
+        onAddPhraseCandidates={handleAddCandidates}
         onBack={() => setSelectedDeckId(undefined)}
         onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
         onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}

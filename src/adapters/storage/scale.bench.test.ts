@@ -274,6 +274,12 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
       const { buildLibrary } = await import('./library')
       const library = buildLibrary(
         decks.map((d) => ({ id: d.id, name: d.name, phrases: [...d.phrases], createdAt: 1, updatedAt: 1 })),
+        // No saved Mixes in the scale fixture: a Mix is a handful of ids,
+        // orders of magnitude below the Deck/Phrase volume this benchmark
+        // exists to bound. Same for Tombstones: one small record per
+        // deletion, never per Phrase.
+        [],
+        [],
         Date.now(),
       )
       const importStart = performance.now()

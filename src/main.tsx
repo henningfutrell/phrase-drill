@@ -1,10 +1,11 @@
 import { StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
-import { createIndexedDbClipCache, createIndexedDbDeckStore, createIndexedDbSettingsStore } from './adapters/storage'
+import { createIndexedDbClipCache, createIndexedDbDeckStore, createIndexedDbMixStore, createIndexedDbSettingsStore } from './adapters/storage'
 import { createServerSynthClient } from './adapters/audio/server-synth-client'
 import { createGenerationQueue } from './adapters/audio/generation-queue'
 import { createServerScanReader } from './adapters/vision/server-scan-reader'
+import { createServerTranslator } from './adapters/translation/server-translator'
 import { createLibrarySyncClient } from './adapters/sync/library-sync-client'
 import { createSessionAuth, AuthRequiredError } from './adapters/auth/session-auth'
 import { LoginScreen } from './ui/LoginScreen'
@@ -17,6 +18,7 @@ if (!rootElement) {
 }
 
 const deckStore = createIndexedDbDeckStore()
+const mixStore = createIndexedDbMixStore()
 const settingsStore = createIndexedDbSettingsStore()
 const clipCache = createIndexedDbClipCache()
 
@@ -89,10 +91,16 @@ function showApp(): void {
     read: withAdapterErrorLogging('scan', rawScanReader.read.bind(rawScanReader), errorLog),
   }
   const librarySyncClient = createLibrarySyncClient({ getAccessToken, fetchImpl: auth.authFetch })
+  const rawTranslator = createServerTranslator({ getAccessToken, fetchImpl: auth.authFetch })
+  const translator = {
+    ...rawTranslator,
+    translate: withAdapterErrorLogging('translate', rawTranslator.translate.bind(rawTranslator), errorLog),
+  }
 
   renderRoot(
     <App
       deckStore={deckStore}
+      mixStore={mixStore}
       settingsStore={settingsStore}
       synthClient={synthClient}
       generationQueue={generationQueue}
@@ -100,6 +108,7 @@ function showApp(): void {
       scanReader={scanReader}
       errorLog={errorLog}
       librarySyncClient={librarySyncClient}
+      translator={translator}
     />,
   )
 }

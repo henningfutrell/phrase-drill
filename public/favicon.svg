@@ -1,11 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="46" viewBox="0 0 48 46">
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
   <!--
-    Browser-tab favicon, matching public/icons/icon-source.svg: the same
-    accent-token "beat row" bars from the design palette (docs/design.md),
-    on a transparent ground so it sits on the browser's own tab chrome.
+    Browser-tab favicon: the same rose de mai as public/icons/icon-source.svg,
+    redrawn for 16px rather than scaled down to it.
+
+    Three differences from the app icon, all forced by the size:
+      - it keeps its own aubergine ground instead of sitting transparent on the
+        browser's chrome, because a gilt outline on a light tab bar disappears;
+      - the medallion ring is dropped — at 16px it closes up against the petal
+        tips and the mark turns into a blob;
+      - the stroke is proportionally heavier (2.6 at 64 against 9 at 512), since
+        a hairline that reads at 512 vanishes at 16.
+    A favicon is a different drawing of the same idea, not the icon shrunk.
   -->
-  <rect x="6" y="15" width="6" height="16" rx="3" fill="#ff8a3d" />
-  <rect x="16" y="10" width="6" height="26" rx="3" fill="#ff8a3d" />
-  <rect x="26" y="13" width="6" height="20" rx="3" fill="#ff8a3d" />
-  <rect x="36" y="8" width="6" height="30" rx="3" fill="#ff8a3d" />
+  <rect width="64" height="64" rx="13" fill="#191016"/>
+  <g fill="none" stroke="#c8a56e" stroke-width="2.6" stroke-linecap="round">
+    <ellipse cx="32" cy="19" rx="7.6" ry="11"/>
+    <ellipse cx="32" cy="19" rx="7.6" ry="11" transform="rotate(72 32 32)"/>
+    <ellipse cx="32" cy="19" rx="7.6" ry="11" transform="rotate(144 32 32)"/>
+    <ellipse cx="32" cy="19" rx="7.6" ry="11" transform="rotate(216 32 32)"/>
+    <ellipse cx="32" cy="19" rx="7.6" ry="11" transform="rotate(288 32 32)"/>
+    <circle cx="32" cy="32" r="4.4" stroke="#e3adbb"/>
+  </g>
 </svg>

@@ -269,10 +269,13 @@ first-class state, not an error:
 - Header: Deck name (tap to rename via sheet), phrase count, `Drill this Deck`
   primary button pinned under the header — starting a Drill from the Deck she is
   looking at should never require scrolling past its Phrase list first.
-- List rows, one per Phrase, author order: French text (`--text-base`, weight
-  600) over English text (`--text-sm`, `--ink-dim`) — the two lines stacked, not
-  side by side, because side-by-side on a narrow phone column forces truncation
-  on longer phrases and this list is read, not glanced at.
+- List rows, one per Phrase, author order: **English over French** (T062) — she
+  works English → French, so the English is the entry she scans for and the
+  French is the answer under it. Both lines are EB Garamond at `--text-base`:
+  English roman in `--ink`, French italic in `--ink-soft`, i.e. a dictionary
+  entry and its foreign headword, not a phrase and a dimmed gloss. The two lines
+  are stacked, not side by side, because side-by-side on a narrow phone column
+  forces truncation on longer phrases and this list is read, not glanced at.
 - **What shipped instead of a drag handle: `Move up` / `Move down` buttons**,
   one pair per row, each disabled at its end of the list. A deliberate
   substitution, not an oversight — the worktree that built this screen could not
@@ -287,7 +290,7 @@ first-class state, not an error:
   undo toast. Deleting is still two deliberate taps, just not the sketched
   pattern.
 - `+ Add phrase` row pinned at the list's end, opens a **sheet** with two fields,
-  French / English, `Save`.
+  English / French (T061 put English first there too), `Save`.
 - Tap a row to edit the same two fields in the same sheet shape (add and edit
   share one component).
 - **Empty (0 phrases):** list is replaced by `Add phrases to drill this Deck.`
@@ -331,9 +334,28 @@ first-class state, not an error:
   tapping it opens the Mix screen itself, which then shows its own empty state
   in place of the picker: `Add another Deck to mix`. Same message reaches her,
   one tap later than sketched.
-- No "saved Mix" concept anywhere (open question 2 in the domain notes was left
-  unresolved for the owner; this design does not invent persistence for it —
-  re-selecting is three taps, matching the domain model's own reasoning).
+- **Saved Mixes (T059)** — the owner answered open question 2: "make where you
+  can save, edit and delete mixes". A Mix is now a persisted entity, and this
+  screen has two halves:
+  - **Her saved Mixes, listed first**, above the picker: name in `--font-script`,
+    then `2 decks · 15 phrases` in the muted register. The row *is* the start
+    control — one tap goes straight into a Drill on that Mix, titled with the
+    Mix's name rather than the generic `Mix`. Beside each row, three held-back
+    `btn-icon` actions: `Rename`, `Edit decks`, and `Delete` (second-tap confirm
+    in place, exactly as Deck delete works). `No saved mixes yet` where the list
+    would be.
+  - **The picker below**, unchanged, plus one control: `Save mix` beside
+    `Start Mix`. `Save mix` opens the shared name sheet; while she is editing an
+    existing Mix it reads `Save changes` and a `Cancel` sits next to it, with
+    the Mix's current Decks preloaded into the selection.
+  - **A Deck deleted out from under a Mix** does not remove the Mix or rewrite
+    it. The row lists what is left (`1 deck · 9 phrases`); a Mix whose Decks are
+    all gone reads `Its decks are gone` and its row is disabled, because an
+    empty Drill is not a thing to start. The dead id leaves the Mix only when
+    she edits and re-saves it herself.
+  - The saved list is shown whatever the Deck count is, including below 2, where
+    the picker is replaced by `Add another Deck to mix`. A screen that hid her
+    saved Mixes would be indistinguishable from one that had lost them.
 
 ### 3.5 Scan / correction — photograph, review, assign
 
@@ -384,7 +406,7 @@ thumbnail and no beat-row animation, just the status line above.
   `ScanError` failures, not an empty-but-successful read.
 
 **Step 3 — Review & assign.** A list of **Draft Phrase** rows — same visual
-shape as a Phrase row (French over English) but with a distinct left-edge
+shape as a Phrase row (English over French, T062) but with a distinct left-edge
 treatment (a thin `--accent` bar) marking them as unconfirmed, never silently
 identical to a saved Phrase, per the domain model's explicit distinction. Each
 row is directly editable inline (tap either line to correct OCR misreads) and
@@ -511,10 +533,12 @@ to paste it somewhere.
 - **No progress bar, streak, score, or due-count anywhere** — the domain notes
   ban this outright (a Deck has no scheduler); the Rep counter and phrase counts
   are the only quantities shown, and both describe material, not achievement.
-- **No saved/named Mix** — open question in the domain notes, left to the owner;
-  designing it in now would answer a question that is not this session's to
-  answer, and the re-selection flow (§3.4) is cheap enough that its absence is
-  not a hardship.
+- ~~**No saved/named Mix**~~ — the owner answered the open question in T059
+  ("make where you can save, edit and delete mixes"); saved Mixes shipped, and
+  §3.4 describes what they look like. Kept here struck through because the
+  reasoning for the original omission (it was the owner's question to answer,
+  not the design's) is still the right reasoning — it was answered, not
+  overruled.
 - **No custom camera capture UI** — native `<input capture>` used as-is; a custom
   viewfinder is real risk (permissions, orientation, iOS camera quirks) for a
   feature (Scan) that is explicitly secondary to Drill.

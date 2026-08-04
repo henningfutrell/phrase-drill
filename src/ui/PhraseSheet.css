@@ -1,0 +1,220 @@
+/*
+ * PhraseSheet (T061). T057 shipped the translate flow with no styling at all —
+ * the candidate list, the register labels, the deck picker and the checkboxes
+ * rendered as raw iOS Safari control chrome inside a lace-and-velvet sheet.
+ * Everything here is presentation only; the shared `.sheet-*` rules in
+ * styles.css still own the ground, the labels and the two text fields.
+ *
+ * Ornament rule from tokens.css holds: lace frames, never fills. The only lace
+ * in this file is the band that separates the candidate list from the fields.
+ * Every colour is a token; the SVGs below repeat a token's own hex because a
+ * data URI cannot read a custom property — the same compromise tokens.css makes
+ * for --lace-band and --rose-mark.
+ */
+
+/* ---- The suggested marker -----------------------------------------------
+   She typed French and the machine wrote the English back. The whole safety
+   property of that path is that she can see it was not her, so this is the one
+   place in the sheet allowed to carry the rose. */
+
+.suggested-badge {
+  margin-left: 9px;
+  padding: 2px 9px 3px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-family: var(--font-body);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  vertical-align: 0.08em;
+  white-space: nowrap;
+}
+
+/* ---- Translate state ----------------------------------------------------- */
+
+.translate-status {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: var(--text-sm);
+  font-style: italic;
+}
+
+.translate-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+/* ---- The candidate list -------------------------------------------------
+   A second thing has arrived inside the sheet, so it is fenced off from the
+   fields above it by the same scalloped selvedge the sheet wears at its top. */
+
+.candidate-list {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 20px;
+}
+
+.candidate-list::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 14px;
+  background-image: var(--lace-band);
+  background-repeat: repeat-x;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Explicit placement, because the register label and the deck picker are both
+   conditional — a flow layout would let the picker slide up into the register's
+   slot on a candidate that has no register. */
+.candidate-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 8px;
+  padding: 8px 12px 10px;
+  border: 1px solid var(--gilt-dim);
+  border-radius: 13px;
+  background: var(--surface-lift);
+}
+
+.candidate-text {
+  grid-column: 2;
+  grid-row: 1;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: 1.25;
+}
+
+/* Metadata — "tu"/"vous"/"formal". It qualifies the phrase, it is never the
+   thing she reads, so it stays quiet and never takes the rose. */
+.candidate-register {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: center;
+  color: var(--ink-dim);
+  font-size: var(--text-xs);
+  letter-spacing: 0.14em;
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+
+/* ---- The checkbox -------------------------------------------------------
+   `appearance: none` and an authored mark: iOS draws its own blue tick
+   otherwise, which is the one saturated colour this palette does not contain.
+   The element is a 44px hit target; the drawn box inside it is 26px. */
+
+.candidate-checkbox {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 11px;
+  background-color: transparent;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 26px 26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Crect x='1.1' y='1.1' width='23.8' height='23.8' rx='7' fill='%23120b10' stroke='%23c8a56e' stroke-width='1.1' opacity='.75'/%3E%3C/svg%3E");
+  transition: background-color 180ms var(--ease-out);
+}
+
+.candidate-checkbox:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Crect x='1.1' y='1.1' width='23.8' height='23.8' rx='7' fill='%23422533' stroke='%23e3adbb' stroke-width='1.4'/%3E%3Cpath d='M7.2 13.4 11 17.2 18.8 9.2' fill='none' stroke='%23e3adbb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.candidate-checkbox:focus-visible {
+  outline: 2px solid var(--gilt);
+  outline-offset: -6px;
+}
+
+/* ---- The deck picker ----------------------------------------------------
+   Matched to `.sheet-input` — same height, radius, border and ground — so a
+   themed control sits beside a themed field instead of beside it.
+   `appearance: none` plus an authored chevron is mandatory: without both, iOS
+   keeps drawing the native control, arrow and all.
+
+   What iOS Safari will NOT let this file restyle, stated rather than papered
+   over: tapping the select opens the system picker (a wheel on iPhone), and
+   that surface — its ground, its typeface, its selection bar, its Done bar —
+   is drawn by the OS and is out of CSS reach. The `option` rules below set the
+   colours iOS does honour in the collapsed control and in the popover on iPad;
+   on an iPhone wheel they are ignored. The closed control is fully ours; the
+   open picker is the system's, and matching it exactly is not possible. */
+
+.candidate-deck {
+  grid-column: 2 / -1;
+  grid-row: 2;
+  justify-self: start;
+  max-width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  min-height: 48px;
+  border-radius: 11px;
+  border: 1px solid var(--gilt-dim);
+  background-color: var(--bg-veil);
+  color: var(--ink-soft);
+  font-family: var(--font-body);
+  /* Height, radius, border, ground and focus are `.sheet-input`'s, so the
+     control belongs to the same set. The width and the type size are not: at
+     full width and --text-base, three of these read louder than the three
+     French phrases they annotate, which is backwards — the deck is a choice
+     about the phrase, never the thing she is reading. */
+  font-size: var(--text-sm);
+  padding: 0 38px 0 13px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath d='M1.2 1.4 7 7.2 12.8 1.4' fill='none' stroke='%23c8a56e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 14px 9px;
+  transition: border-color 180ms var(--ease-out);
+}
+
+.candidate-deck:focus {
+  border-color: var(--gilt);
+  outline: none;
+}
+
+.candidate-deck option {
+  background-color: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-body);
+}
+
+/* One rose per screen (T061 follow-up).
+   With candidates on screen there were two full-accent buttons about 100px
+   apart — "Add selected" and "Save" — and nothing said which one was the
+   action. Only visible in a render; the source reads as two ordinary
+   `.btn-primary` calls in different branches.
+
+   While candidates are showing, accepting them IS the action, so the manual
+   Save demotes to the secondary treatment. Nothing about it changes
+   functionally: it stays enabled, keeps its testid, and still saves the one
+   phrase she typed by hand. `:has()` scopes this to exactly the state where
+   the competition exists, and iOS Safari — the only browser this app must
+   run in (AGENTS.md) — has supported it since 16.4. */
+.sheet:has(.candidate-list) > .sheet-actions > .btn-primary {
+  background: transparent;
+  color: var(--ink-soft);
+  box-shadow: inset 0 0 0 1px var(--gilt-dim);
+}
+
+.sheet:has(.candidate-list) > .sheet-actions > .btn-primary:hover:not(:disabled) {
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--gilt);
+  filter: none;
+}
