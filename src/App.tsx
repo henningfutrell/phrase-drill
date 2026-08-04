@@ -100,6 +100,17 @@ const NOOP_SPEECH: SpeechPort = {
 }
 
 /**
+ * Records a silence `clip-player.ts` deliberately swallows (T002) into the
+ * diagnostics ring buffer, tagged so a report reads "clip-player: …". Module
+ * scope, not inline in the component: `Date.now()` inside a `useMemo` factory
+ * reads as an impure call during render to `react-hooks/purity`, even though
+ * this closure only actually runs later, from `speak()`/`unlock()`.
+ */
+function logSilentClipFailure(errorLog: ErrorLog, message: string): void {
+  void errorLog.record({ timestamp: Date.now(), source: 'adapter', message: `clip-player: ${message}` })
+}
+
+/**
  * Plays a previewed voice clip. Best-effort: a preview isn't guaranteed on
  * every platform/state (autoplay policy, an unimplemented `Audio` in a
  * headless test environment), and a failed preview is a silent no-op here,
@@ -251,9 +262,20 @@ function App({
   const clipPlayer = useMemo(
     () =>
       settings.voice
-        ? createClipPlayer({ element: new Audio(), clipCache, voices: knownVoices(settings.voice) })
+        ? createClipPlayer({
+            element: new Audio(),
+            clipCache,
+            voices: knownVoices(settings.voice),
+            // T002: the three silences clip-player deliberately swallows
+            // (a play() rejection after unlock, a Clip missing at play
+            // time, unlock()'s "unlocked after a second AbortError" call)
+            // still leave a trace in Diagnostics instead of none — the
+            // adapter itself stays free of a diagnostics import; this is
+            // the composition root wiring its port to the log.
+            onSilentFailure: (message) => logSilentClipFailure(errorLog, message),
+          })
         : null,
-    [settings.voice, clipCache],
+    [settings.voice, clipCache, errorLog],
   )
 
   const [sync, setSync] = useState<SyncSnapshot>(() => syncEngine.snapshot())
