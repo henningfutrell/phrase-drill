@@ -70,8 +70,46 @@ in sync, which is the right failure direction for a single-container app.
 impractical without punishing her for a typo.
 
 Provider failures map to HTTP status: `not-configured` (no key set on the
-server) → 503; `quota` (provider rate-limited us) → 429; `unreadable` (vision
-model found no usable phrases) → 422; anything else → 502.
+server) → 503; `quota` (the provider is out of credits) → **402**;
+`unreadable` (vision model found no usable phrases) → 422; anything else →
+502.
+
+## 429 is ours, 402 is the provider's (T035)
+
+**This server answers 429 for exactly one reason: its own limiter.** Every
+such response carries `Retry-After`, in seconds, computed from the bucket
+itself (`allow()` returns the wait, not a bare boolean) — the client cannot
+derive that number, because it cannot see how full the bucket is.
+
+**A provider running out of credits answers 402.** They used to share 429, and
+that collapse is the defect T035 fixed. Measured, on a cold 1,000-Phrase
+library: the device issued ~2,000 simultaneous requests, the first ~60 passed
+the limiter, and the other ~1,940 came back 429 and were marked permanently
+`quota`-failed — by *us*, not by ElevenLabs. The device could not tell "wait a
+moment" from "this will never succeed", so it treated both as the latter.
+
+The two are different facts with different remedies and they now have
+different statuses:
+
+| | Status | What it means | What a client does |
+|---|---|---|---|
+| this server's limiter | `429` + `Retry-After` | asking too fast | wait exactly that long, then retry |
+| provider out of credits | `402` | somebody has to pay | stop; retrying cannot succeed |
+
+Why the status and not a field in the body: a `/api/tts` success is audio
+bytes, so the client branches on status alone and never parses a body on the
+happy path. `Retry-After` is RFC 9110's own field, readable by anything
+between here and the device — a log, a proxy, `curl` — where a private JSON
+key would not be. 402 is used nowhere else in this API, so nothing else can
+produce it by accident.
+
+**The device holds up its end** (`src/adapters/audio/generation-queue.ts`): at
+most 4 requests in flight, and a 429 pauses the *whole* queue until
+`Retry-After` elapses rather than only the request that hit it — the limiter
+is per session, so every other request in flight would be refused for the same
+reason. Waits are bounded (50 per Clip), so a sweep always terminates; a Clip
+that runs out of them ends `failed`, which the UI can show, not silently
+missing.
 
 ## The shared Clip store (T063)
 
@@ -113,9 +151,10 @@ compares them, so neither can change alone. This is why `/api/tts` now requires
 the route. A hit is a smaller cost, not no cost — an authenticated request, a
 database read, ~20 KB streamed back — and making hits free would put an
 un-metered path behind a bearer token (see the stolen-token trade-off above).
-The consequence is worth stating plainly: a device sweeping a whole library
-still hits the 60/60s ceiling on the second device exactly as it did on the
-first. It just no longer pays ElevenLabs to get there.
+So a device sweeping a whole library still meets the 60/60s ceiling on the
+second device exactly as it did on the first. Since T035 that ceiling is a
+pace, not a wall: the sweep drains at one Clip per second instead of dying on
+it, and it no longer pays ElevenLabs to get there.
 
 **A failed write does not fail the request.** The bytes are already generated
 and already paid for; the caller gets them, and the failure is logged.
@@ -128,8 +167,10 @@ Every outbound call to a paid provider goes through a bounded queue
 - ElevenLabs: concurrency 4
 - Anthropic: concurrency 2
 
-This is the fix for the `docs/scale.md` defect: the device used to fire one
-request per phrase with no concurrency bound at all. Numbers are conservative
+This bounds what reaches a provider once a request is *inside* the server. It
+never paced the inbound sweep, because it sits behind the limiter — the device
+bounding itself to 4 in flight (T035) is the other half, and the necessary
+one. Numbers are conservative
 starting points for a single non-technical user's traffic, not a tuned
 ceiling — Anthropic's vision calls are heavier per-request than a short TTS
 call, hence the lower number.

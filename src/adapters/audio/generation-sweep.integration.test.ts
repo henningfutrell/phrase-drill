@@ -65,7 +65,6 @@ interface FakeServer {
   requestCount(): number
   rejectedCount(): number
   peakInFlight(): number
-  activity(): number
 }
 
 /** This app's own server, reduced to what a sweep can see: the real limiter,
@@ -84,6 +83,10 @@ function createFakeServer(now: () => number): FakeServer {
     inFlight++
     peak = Math.max(peak, inFlight)
     try {
+      // A real request is not instantaneous, and a fake one that is would
+      // make `peak` unable to observe overlap at all — it would read 1 for
+      // any concurrency bound, including none.
+      await macrotask()
       const body = JSON.parse(String(init.body)) as { text: string; lang: string }
       const decision = limiter.allow('her-session')
       if (!decision.ok) {
@@ -105,7 +108,6 @@ function createFakeServer(now: () => number): FakeServer {
     requestCount: () => requests,
     rejectedCount: () => rejected,
     peakInFlight: () => peak,
-    activity: () => requests,
   }
 }
 
@@ -145,20 +147,16 @@ function createFakeClipCache(): ClipCache {
   }
 }
 
-/** Let every promise chain that can progress without the clock progress.
- * A real macrotask, repeatedly, because `computeClipHash` resolves through
+/** One real macrotask. `computeClipHash` resolves through
  * `crypto.subtle.digest`, which a microtask flush does not reach. */
-async function settle(activity: () => number): Promise<void> {
-  let last = -1
-  for (let round = 0; round < 50 && activity() !== last; round++) {
-    last = activity()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-  }
+function macrotask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 describe('a cold library sweep against a rate-limiting server', () => {
   it(
     'drains every Phrase instead of dying on our own limiter, and never exceeds its concurrency bound',
+    { timeout: 180_000 },
     async () => {
       const clock = createVirtualClock()
       const server = createFakeServer(clock.now)
@@ -189,22 +187,20 @@ describe('a cold library sweep against a rate-limiting server', () => {
       for (const phrase of phrases) queue.enqueue(phrase)
 
       // Quiescence is the queue's own answer (`whenIdle`), never a counted
-      // number of turns; the clock only moves when the sweep has nothing
-      // left to do without it.
+      // number of turns. Each pass lets the real event loop do everything it
+      // can, then moves the clock to the next thing waiting on it — `tick()`
+      // is a no-op when nothing is. Advancing early costs nothing: it only
+      // ever jumps to the *earliest* pending wake-up, so no sleeper is
+      // skipped, and the fake server reads the same clock.
       let idle = false
       void queue.whenIdle().then(() => {
         idle = true
       })
       for (let guard = 0; !idle; guard++) {
-        await settle(server.activity)
-        if (idle) break
-        expect(guard).toBeLessThan(20_000) // the sweep terminates, or this test does
-        if (!clock.tick()) {
-          await settle(server.activity)
-          break
-        }
+        expect(guard).toBeLessThan(60_000) // the sweep terminates, or this test does
+        await macrotask()
+        clock.tick()
       }
-      expect(idle).toBe(true)
 
       const byKind = new Map<GenerationStatus['kind'], number>()
       for (const status of settledStatuses.values()) byKind.set(status.kind, (byKind.get(status.kind) ?? 0) + 1)
@@ -219,11 +215,13 @@ describe('a cold library sweep against a rate-limiting server', () => {
 
       // The device bounds itself. Before: 2,000 at once.
       expect(server.peakInFlight()).toBeLessThanOrEqual(MAX_CONCURRENT)
+      // ...and the counter can see overlap, so the line above is a bound and
+      // not an artefact of requests never overlapping in the first place.
+      expect(server.peakInFlight()).toBeGreaterThan(1)
 
       // And the limiter really did fire — otherwise this proves nothing.
       expect(server.rejectedCount()).toBeGreaterThan(0)
       expect(server.requestCount()).toBeGreaterThan(PHRASE_COUNT * 2)
     },
-    { timeout: 180_000 },
   )
 })
