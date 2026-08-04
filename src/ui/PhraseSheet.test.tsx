@@ -86,6 +86,34 @@ describe('PhraseSheet — mode without a translator (edit sheet, and Add when un
   })
 })
 
+describe('PhraseSheet — field order', () => {
+  // She works English -> French, so the sheet leads with English and the
+  // French is what she (or the translator) fills in under it. Reported twice
+  // as French-first; fixed in T061, pinned here in T064 (the same order
+  // assertion the phrase lists carry from T062).
+  it('puts the English label and input before the French label and input', () => {
+    act(() => {
+      root.render(<PhraseSheet onSave={vi.fn()} onCancel={vi.fn()} />)
+    })
+    const fields = container.querySelectorAll('.sheet-label, .sheet-input')
+    expect(fields).toHaveLength(4)
+    expect(fields[0].getAttribute('for')).toBe('phrase-english')
+    expect(fields[0].textContent).toBe('English')
+    expect(fields[1].id).toBe('phrase-english')
+    expect(fields[2].getAttribute('for')).toBe('phrase-french')
+    expect(fields[2].textContent).toBe('French')
+    expect(fields[3].id).toBe('phrase-french')
+  })
+
+  it('gives English the initial focus', () => {
+    act(() => {
+      root.render(<PhraseSheet onSave={vi.fn()} onCancel={vi.fn()} />)
+    })
+    const english = container.querySelector('[data-testid="phrase-english-input"]')
+    expect(document.activeElement).toBe(english)
+  })
+})
+
 describe('PhraseSheet — EN to FR candidates', () => {
   it('offers a register-labelled checklist after typing English and pausing', async () => {
     const translator = fakeTranslator()
