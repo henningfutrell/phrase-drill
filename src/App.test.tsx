@@ -2,13 +2,25 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import type { Deck, DeckStore, DraftPhrase, Library, Mix, MixStore, PhraseCandidate, ScanReader, Translator } from './domain'
+import type {
+  Deck,
+  DeckStore,
+  DraftPhrase,
+  Library,
+  Mix,
+  MixStore,
+  PhraseCandidate,
+  ScanReader,
+  Tombstone,
+  Translator,
+} from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { ClipCache, Settings, SettingsStore, Voice } from './adapters/storage'
 import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry } from './adapters/diagnostics'
 import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/library-sync-client'
+import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
@@ -64,9 +76,17 @@ function createFakeLibrarySyncClient(
 
 /** In-memory DeckStore fake — the real DeckStore is exercised in
  * src/adapters/storage; this fake only lets App's wiring to the port be
- * asserted without a browser IndexedDB. */
-function createFakeDeckStore(initial: readonly Deck[] = []): DeckStore & { decks: Map<string, Deck> } {
+ * asserted without a browser IndexedDB. It keeps `updatedAt` per Deck and a
+ * Tombstone per removal, because those are what App's sync path merges on
+ * (T060); `now` is injectable so a two-device test can date one device's
+ * writes before the other's. */
+function createFakeDeckStore(
+  initial: readonly Deck[] = [],
+  now: () => number = () => Date.now(),
+): DeckStore & { decks: Map<string, Deck> } {
   const decks = new Map(initial.map((d) => [d.id, d]))
+  const updatedAt = new Map(initial.map((d) => [d.id, 0]))
+  const tombstones = new Map<string, Tombstone>()
   return {
     decks,
     async loadAll() {
@@ -77,14 +97,40 @@ function createFakeDeckStore(initial: readonly Deck[] = []): DeckStore & { decks
     },
     async save(deck) {
       decks.set(deck.id, deck)
+      updatedAt.set(deck.id, now())
     },
     async remove(id) {
       decks.delete(id)
+      updatedAt.delete(id)
+      tombstones.set(id, { id, kind: 'deck', deletedAt: now() })
     },
     async exportAll(): Promise<Library> {
-      return { format: LIBRARY_FORMAT, schemaVersion: 1, exportedAt: 0, decks: [] }
+      return {
+        format: LIBRARY_FORMAT,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        exportedAt: now(),
+        decks: [...decks.values()].map((d) => ({
+          id: d.id,
+          name: d.name,
+          phrases: d.phrases,
+          createdAt: 0,
+          updatedAt: updatedAt.get(d.id) ?? 0,
+        })),
+        tombstones: [...tombstones.values()],
+      }
     },
-    async importAll() {},
+    async importAll(library) {
+      decks.clear()
+      updatedAt.clear()
+      tombstones.clear()
+      for (const record of library.decks) {
+        decks.set(record.id, { id: record.id, name: record.name, phrases: record.phrases })
+        updatedAt.set(record.id, record.updatedAt)
+      }
+      for (const tombstone of library.tombstones ?? []) {
+        tombstones.set(tombstone.id, tombstone)
+      }
+    },
   }
 }
 
@@ -844,15 +890,15 @@ describe('App wired to library sync (T041)', () => {
     expect(container.textContent).toContain('From server')
   })
 
-  it('never pulls when local storage already has Decks — a device with local data is never overwritten by an empty or older server copy', async () => {
+  it('pulls on mount even when local storage already has Decks — otherwise a second device never sees the first one\'s work (T060)', async () => {
     const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
-    let pullCalled = false
-    const librarySyncClient = createFakeLibrarySyncClient({
-      pull: async () => {
-        pullCalled = true
-        return { ok: false, reason: 'not-found' }
-      },
-    })
+    const library: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'remote', name: 'From server', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+    const librarySyncClient = createFakeLibrarySyncClient({ pull: async () => ({ ok: true, library }) })
 
     await renderApp(
       store,
@@ -864,8 +910,29 @@ describe('App wired to library sync (T041)', () => {
       createFakeErrorLog(),
       librarySyncClient,
     )
+    await flushMicrotasks()
 
-    expect(pullCalled).toBe(false)
+    expect(container.textContent).toContain('From server')
+    expect(container.textContent).toContain('Home')
+  })
+
+  it('never pushes on mount — merely opening the app can change nothing on the server (T060)', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const librarySyncClient = createFakeLibrarySyncClient()
+
+    await renderApp(
+      store,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      librarySyncClient,
+    )
+    await flushMicrotasks()
+
+    expect(librarySyncClient.pushed).toEqual([])
   })
 
   it('pushes the whole library to the server after a Deck is created', async () => {
@@ -911,6 +978,196 @@ describe('App wired to library sync (T041)', () => {
     await flushMicrotasks()
 
     expect(librarySyncClient.pushed.length).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * One server, two devices (T060). The defect these pin: the phone never
+ * pulled, so its first local save pushed a library missing the Deck created
+ * on the web — and last-write-wins deleted her phrases with no error
+ * anywhere. Each test drives the real App twice, against two DeckStores and
+ * one shared server copy.
+ */
+function createFakeServer(): { library: Library | undefined; client(): LibrarySyncClient } {
+  const server: { library: Library | undefined; client(): LibrarySyncClient } = {
+    library: undefined,
+    client() {
+      return {
+        async push(library) {
+          server.library = library
+          return { ok: true }
+        },
+        async pull() {
+          return server.library ? { ok: true, library: server.library } : { ok: false, reason: 'not-found' }
+        },
+      }
+    },
+  }
+  return server
+}
+
+/** Tear the current App down and hand the next one a clean root — a second
+ * device is a second mount, not a re-render of the first. */
+function remount(): void {
+  act(() => root.unmount())
+  container.remove()
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
+}
+
+async function createDeckThroughUi(name: string): Promise<void> {
+  act(() => click(container.querySelector('[data-testid="new-deck"]')!))
+  const input = container.querySelector('[data-testid="deck-name-input"]') as HTMLInputElement
+  act(() => typeInto(input, name))
+  await act(async () => click(container.querySelector('[data-testid="deck-name-save"]')!))
+  await flushMicrotasks()
+}
+
+function serverDeckNames(server: { library: Library | undefined }): string[] {
+  return (server.library?.decks ?? []).map((d) => d.name).sort()
+}
+
+describe('App wired to two devices against one library (T060)', () => {
+  it('keeps a Deck created on one device when another device, which never saw it, saves', async () => {
+    const server = createFakeServer()
+
+    const web = createFakeDeckStore([], () => 1000)
+    await renderApp(
+      web,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Made on web')
+    expect(serverDeckNames(server)).toEqual(['Made on web'])
+
+    remount()
+    const phone = createFakeDeckStore([{ id: 'phone-deck', name: 'Made on phone', phrases: [] }], () => 2000)
+    await renderApp(
+      phone,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Also on phone')
+
+    expect(serverDeckNames(server)).toEqual(['Also on phone', 'Made on phone', 'Made on web'])
+  })
+
+  it('shows the other device\'s Deck on this one, without dropping this one\'s own', async () => {
+    const server = createFakeServer()
+    const web = createFakeDeckStore([], () => 1000)
+    await renderApp(
+      web,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Made on web')
+
+    remount()
+    const phone = createFakeDeckStore([{ id: 'phone-deck', name: 'Made on phone', phrases: [] }], () => 2000)
+    await renderApp(
+      phone,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await flushMicrotasks()
+
+    expect(container.textContent).toContain('Made on web')
+    expect(container.textContent).toContain('Made on phone')
+  })
+
+  it('does not push at all when it could not read the server copy first — a device that cannot merge must not overwrite', async () => {
+    const server = createFakeServer()
+    server.library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'web-deck', name: 'Made on web', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+    const offlinePull: LibrarySyncClient = {
+      ...server.client(),
+      async pull() {
+        return { ok: false, reason: 'network' }
+      },
+    }
+
+    const phone = createFakeDeckStore([{ id: 'phone-deck', name: 'Made on phone', phrases: [] }], () => 2000)
+    await renderApp(
+      phone,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      offlinePull,
+    )
+    await createDeckThroughUi('Also on phone')
+
+    expect(serverDeckNames(server)).toEqual(['Made on web'])
+  })
+
+  it('still deletes: a Deck deleted on one device does not come back from another device\'s stale copy', async () => {
+    const server = createFakeServer()
+
+    const web = createFakeDeckStore([], () => 1000)
+    await renderApp(
+      web,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Made on web')
+    const deckId = [...web.decks.keys()][0]!
+
+    // The phone had already synced that Deck down before it was deleted.
+    const phone = createFakeDeckStore([{ id: deckId, name: 'Made on web', phrases: [] }], () => 1500)
+
+    act(() => click(container.querySelector(`[data-testid="deck-row-${deckId}"]`)!))
+    act(() => click(container.querySelector('[data-testid="delete-deck"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-delete-deck"]')!))
+    await flushMicrotasks()
+    expect(serverDeckNames(server)).toEqual([])
+
+    remount()
+    await renderApp(
+      phone,
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(),
+      createFakeScanReader(),
+      createFakeErrorLog(),
+      server.client(),
+    )
+    await createDeckThroughUi('Also on phone')
+
+    expect(serverDeckNames(server)).toEqual(['Also on phone'])
+    expect(container.textContent).not.toContain('Made on web')
   })
 })
 
