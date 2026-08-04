@@ -51,3 +51,11 @@ export type {
   DrillPlayerOptions,
 } from './drill-player'
 export { createDrillPlayer } from './drill-player'
+export type { BackupAge, BackupAgeLevel } from './backup-age'
+export {
+  BACKUP_AGING_AFTER_DAYS,
+  BACKUP_OVERDUE_AFTER_DAYS,
+  backupAge,
+  isBackupUrgent,
+  lastBackupAt,
+} from './backup-age'
