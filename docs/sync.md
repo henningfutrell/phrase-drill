@@ -239,9 +239,28 @@ instant it was persisted, which made T086 unobservable end to end.
 
 So `importAll` and `updateAll` both split first (`duplicate-ids.ts`): the
 second and later holder of an id keeps its content and takes `${id}-2`,
-`${id}-3`, …, skipping any candidate the library already holds. Deterministic,
-so repeated merges converge instead of minting a Deck per sync; collision-free,
-so the repair can never overwrite a record itself.
+`${id}-3`, …, skipping any candidate the library already holds **or has a
+Tombstone of the same `kind` for**. Deterministic, so repeated merges converge
+instead of minting a Deck per sync; collision-free, so the repair can never
+overwrite a record itself.
+
+**The Tombstone half of that rule was missing, and it deleted a Deck (T093).**
+It is reachable from the split's own design, not from anything exotic: she is
+left two Decks to merge or delete in one tap, and deleting the split one writes
+a Tombstone under `${id}-2`. If a duplicate of `id` arrives again, the split ran
+*after* `mergeLibraries` had filtered Tombstones against the surviving ids —
+nothing held `${id}-2` at that instant, so the Tombstone was kept — and then
+minted `${id}-2` anyway. That library went to disk, to the server, and into the
+Sync Baseline. On the **next** merge the record was unchanged from the baseline,
+so `rewritten` was false, `isDeleted` fired on the Tombstone's clock, and the
+Deck went with every Phrase in it, silently. One round-trip showed only a
+surprising id; the second showed the loss.
+
+The candidate is skipped rather than the Tombstone dropped: a Tombstone naming a
+record nothing holds is inert, and dropping one here would be this module
+deciding a deletion, which is the merge's judgement and not its. Matching on
+`kind` mirrors `mergeLibraries`, which namespaces deletion `kind:id` — a Deck's
+Tombstone can never delete a Mix, so it must never block a Mix's split either.
 
 **What that does to the phone/server disagreement.** `libraries.data` is whole
 JSON, so the server never collapsed the duplicate and the phone always did —
