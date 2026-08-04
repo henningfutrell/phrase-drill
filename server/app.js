@@ -1,4 +1,5 @@
 import { getBearerToken } from './auth.js'
+import { computeClipHash } from './clip-hash.js'
 import { readBody, sendJson, PayloadTooLargeError } from './http-helpers.js'
 import { createStaticHandler } from './static.js'
 
@@ -35,6 +36,7 @@ function storedSchemaVersion(data) {
  */
 export function createApp({
   libraryStore,
+  clipStore,
   elevenLabs,
   anthropic,
   ttsLimiter,
@@ -89,6 +91,21 @@ export function createApp({
     res.end()
   }
 
+  /**
+   * Speech for one phrase, served from the shared Clip store when it can be
+   * (T063).
+   *
+   * **The rate limiter stays in front, and a cache hit spends a token.** The
+   * tempting alternative — free hits, since a hit costs no provider money —
+   * puts an un-metered path behind a bearer token: a stolen one (docs/server.md
+   * lists that in the threat model) could then pull audio out of Postgres as
+   * fast as the process would serve it. A hit is still an authenticated
+   * request doing a database read and streaming ~20 KB back, so it is still
+   * work worth bounding. Note what this does *not* fix: a device sweeping a
+   * whole library still hits the 60/60s ceiling on the second device exactly
+   * as it did on the first. It gets there without spending money now, which
+   * is a smaller bill, not a working sweep.
+   */
   async function handleTts(req, res, key) {
     if (!ttsLimiter.allow(key)) return sendJson(res, 429, { error: 'rate-limited' })
 
@@ -107,7 +124,13 @@ export function createApp({
       return sendJson(res, 400, { error: 'invalid-json' })
     }
 
-    const { text, voiceId, modelId } = parsed ?? {}
+    // `provider` and `lang` are required even though the ElevenLabs call uses
+    // neither: they are two of the five fields the Clip's content address is
+    // derived from, and an address missing a field is a different address
+    // from the one the device holds. Required outright, with no default
+    // invented for a caller that omits them — a guessed `provider` would
+    // silently key the shared store against a value nobody chose.
+    const { text, voiceId, modelId, provider, lang } = parsed ?? {}
     if (
       typeof text !== 'string' ||
       text.length === 0 ||
@@ -115,19 +138,33 @@ export function createApp({
       typeof voiceId !== 'string' ||
       voiceId.length === 0 ||
       typeof modelId !== 'string' ||
-      modelId.length === 0
+      modelId.length === 0 ||
+      typeof provider !== 'string' ||
+      provider.length === 0 ||
+      typeof lang !== 'string' ||
+      lang.length === 0
     ) {
       return sendJson(res, 400, { error: 'invalid-request' })
     }
 
+    const hash = computeClipHash({ provider, modelId, voiceId, lang, text })
+
+    const cached = await clipStore.get(hash)
+    if (cached) return sendClip(res, cached)
+
     try {
       const result = await elevenLabs.synthesize({ text, voiceId, modelId })
-      res.writeHead(200, {
-        'content-type': 'audio/mpeg',
-        'content-length': result.bytes.byteLength,
-        'x-duration-ms': String(result.durationMs),
-      })
-      res.end(result.bytes)
+      const clip = { bytes: result.bytes, mime: 'audio/mpeg', durationMs: result.durationMs }
+      // A failed write must not fail the request: these bytes have already
+      // been generated and paid for, and the caller wants the audio far more
+      // than it wants the store to be complete. The next request for this
+      // phrase pays again — the cost of a store outage, not of a bug.
+      try {
+        await clipStore.put({ hash, ...clip, createdAt: Date.now() })
+      } catch (err) {
+        logger.warn('could not store generated clip', { hash, message: describeError(err) })
+      }
+      sendClip(res, clip)
     } catch (err) {
       sendJson(res, statusForProviderError(err), { error: err.kind ?? 'network' })
     }
@@ -310,6 +347,16 @@ export function createApp({
       })
     }
   }
+}
+
+/** One response shape for a Clip, whether it came from the store or the provider — the caller cannot tell, and must not have to. */
+function sendClip(res, clip) {
+  res.writeHead(200, {
+    'content-type': clip.mime,
+    'content-length': clip.bytes.byteLength,
+    'x-duration-ms': String(clip.durationMs),
+  })
+  res.end(clip.bytes)
 }
 
 function statusForProviderError(err) {

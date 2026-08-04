@@ -354,7 +354,7 @@ function App({
   }
 
   async function handlePreviewVoice(
-    voice: { modelId: string; voiceId: string },
+    voice: { provider: string; modelId: string; voiceId: string },
     text: string,
     signal: AbortSignal,
   ): Promise<PreviewOutcome> {

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { createApp } from './app.js'
-import { createLibraryStore, createAuthStore, createPool, waitForDatabase, extractPassword } from './db.js'
+import { createLibraryStore, createAuthStore, createClipStore, createPool, waitForDatabase, extractPassword } from './db.js'
 import { createSessionAuth } from './session-auth.js'
 import { createLogger } from './logger.js'
 import { createRateLimiter } from './rate-limiter.js'
@@ -39,6 +39,11 @@ export async function buildServer(env = process.env) {
   await libraryStore.init()
   const authStore = createAuthStore(pool)
   await authStore.init()
+  // T063: adds the `clips` table. Same `CREATE TABLE IF NOT EXISTS` shape as
+  // the two above, so a deployed database gets it on the next restart with no
+  // manual step and nothing existing touched.
+  const clipStore = createClipStore(pool)
+  await clipStore.init()
 
   // T050: identity is a session row in Postgres, not a Keycloak-issued
   // JWT — no issuer, no audience, no JWKS to configure or trust. T052:
@@ -72,6 +77,7 @@ export async function buildServer(env = process.env) {
 
   const handleRequest = createApp({
     libraryStore,
+    clipStore,
     elevenLabs,
     anthropic,
     ttsLimiter,
@@ -85,7 +91,7 @@ export async function buildServer(env = process.env) {
   })
 
   const server = createServer(handleRequest)
-  return { server, port, logger, libraryStore, authStore }
+  return { server, port, logger, libraryStore, authStore, clipStore }
 }
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`

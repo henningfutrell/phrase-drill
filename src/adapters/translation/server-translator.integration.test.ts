@@ -50,6 +50,7 @@ async function boot(anthropicFetch: typeof fetch) {
   })
   const handleRequest = createApp({
     libraryStore: { get: async () => undefined, put: async () => {} },
+    clipStore: { get: async () => null, put: async () => {} },
     elevenLabs: { synthesize: async () => ({ bytes: new ArrayBuffer(0), durationMs: 0 }) },
     anthropic,
     ttsLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
