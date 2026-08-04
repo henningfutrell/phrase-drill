@@ -619,6 +619,80 @@ describe('App wired to backup and restore', () => {
     vi.unstubAllGlobals()
   })
 
+  it('records nothing for a download — this platform cannot say the file landed, and a guess would silence the warning', async () => {
+    // The same rule `lastSyncAt` already obeys: written on the success path
+    // and nowhere else, because an age written on a failure silences the
+    // backup warning with nothing behind it. A download's outcome is not
+    // observable from JavaScript at all — no event, no promise, no error —
+    // so "unknown" is recorded as "not backed up".
+    vi.mocked(shareBackupFile).mockResolvedValue('unsupported')
+    vi.mocked(readInstallStateFromBrowser).mockReturnValue({ platform: 'other', installed: false })
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const settingsStore = createFakeSettingsStore({ lastSyncAt: null, lastExportAt: null })
+    vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn().mockReturnValue('blob:fake'), revokeObjectURL: vi.fn() })
+
+    await renderApp(store, settingsStore)
+    await openSettings()
+    await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
+
+    expect((await settingsStore.load()).lastExportAt).toBeNull()
+    expect(container.querySelector('[data-testid="backup-status"]')?.getAttribute('data-level')).toBe('never')
+    vi.unstubAllGlobals()
+  })
+
+  it('offers the text to copy when the download itself throws — nothing left the app, so nothing claims it did', async () => {
+    vi.mocked(shareBackupFile).mockResolvedValue('unsupported')
+    vi.mocked(readInstallStateFromBrowser).mockReturnValue({ platform: 'other', installed: false })
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const settingsStore = createFakeSettingsStore({ lastSyncAt: null, lastExportAt: null })
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn(() => {
+        throw new Error('blob urls are not available here')
+      }),
+      revokeObjectURL: vi.fn(),
+    })
+
+    await renderApp(store, settingsStore)
+    await openSettings()
+    await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
+
+    expect(container.querySelector('[data-testid="backup-copy-sheet"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="backup-status-result"]')).toBeNull()
+    expect((await settingsStore.load()).lastExportAt).toBeNull()
+    vi.unstubAllGlobals()
+  })
+
+  it('lets the blob URL outlive the click, so the download is not cancelled by its own cleanup', async () => {
+    // Revoking synchronously after `anchor.click()` races the browser's own
+    // fetch of the blob URL: the download it is meant to clean up after may
+    // not have started yet, and revoking first is a download that silently
+    // produces no file.
+    vi.mocked(shareBackupFile).mockResolvedValue('unsupported')
+    vi.mocked(readInstallStateFromBrowser).mockReturnValue({ platform: 'other', installed: false })
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }])
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn().mockReturnValue('blob:fake'), revokeObjectURL })
+
+    await renderApp(store)
+    await openSettings()
+    vi.useFakeTimers()
+    try {
+      await act(async () => click(container.querySelector('[data-testid="backup-status-export"]')!))
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+
+      await act(async () => {
+        // Long enough that the browser has certainly finished with the URL,
+        // and short enough that the memory is not held for the session.
+        vi.advanceTimersByTime(60_000)
+      })
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:fake')
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('replaces the whole library through DeckStore.importAll once a valid backup is confirmed', async () => {
     const store = createFakeDeckStore([{ id: 'stale', name: 'Stale', phrases: [] }])
     const replacement: Library = {
