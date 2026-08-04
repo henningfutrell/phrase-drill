@@ -1,27 +1,40 @@
 import { describe, expect, it } from 'vitest'
-import { LIBRARY_FORMAT, type Library } from '../../domain'
-import { backupFilename, buildLibrary, migrateLibraryDecks, migrateLibraryMixes, parseLibraryFile } from './library'
+import { LIBRARY_FORMAT, type Library, type Tombstone } from '../../domain'
+import {
+  backupFilename,
+  buildLibrary,
+  migrateLibraryDecks,
+  migrateLibraryMixes,
+  normalizeLibrary,
+  parseLibraryFile,
+} from './library'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 const MIX_RECORDS = [{ id: 'm1', name: 'Mornings', deckIds: ['d1'], createdAt: 2, updatedAt: 2 }]
+const TOMBSTONES: Tombstone[] = [{ id: 'gone', kind: 'deck', deletedAt: 999 }]
 
 describe('buildLibrary', () => {
-  it('wraps deck and mix records with the format, current schema version, and export time', () => {
+  it('wraps deck records, mix records and Tombstones with the format, current schema version, and export time', () => {
     const records = [
       { id: 'd1', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 },
     ]
 
-    expect(buildLibrary(records, MIX_RECORDS, 12345)).toEqual({
+    expect(buildLibrary(records, MIX_RECORDS, TOMBSTONES, 12345)).toEqual({
       format: LIBRARY_FORMAT,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       exportedAt: 12345,
       decks: records,
       mixes: MIX_RECORDS,
+      tombstones: TOMBSTONES,
     })
   })
 
   it('carries saved Mixes so they survive a new phone — the whole point of the sync envelope (T059)', () => {
-    expect(buildLibrary([], MIX_RECORDS, 1).mixes).toEqual(MIX_RECORDS)
+    expect(buildLibrary([], MIX_RECORDS, [], 1).mixes).toEqual(MIX_RECORDS)
+  })
+
+  it('carries Tombstones, so another device learns what was deleted rather than pushing it back (T060)', () => {
+    expect(buildLibrary([], [], TOMBSTONES, 1).tombstones).toEqual(TOMBSTONES)
   })
 })
 
@@ -47,6 +60,40 @@ describe('migrateLibraryMixes', () => {
     }
 
     expect(migrateLibraryMixes(library)).toEqual([])
+  })
+})
+
+describe('normalizeLibrary', () => {
+  it('brings an older library up to the current schema version, decks intact and every optional field filled in', () => {
+    const older: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: 1,
+      exportedAt: 7,
+      decks: [{ id: 'd1', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+
+    expect(normalizeLibrary(older)).toEqual({
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 7,
+      decks: older.decks,
+      mixes: [],
+      tombstones: [],
+    })
+  })
+
+  it('keeps the Mixes and Tombstones a current library already carries', () => {
+    const current: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 7,
+      decks: [],
+      mixes: MIX_RECORDS,
+      tombstones: TOMBSTONES,
+    }
+
+    expect(normalizeLibrary(current).mixes).toEqual(MIX_RECORDS)
+    expect(normalizeLibrary(current).tombstones).toEqual(TOMBSTONES)
   })
 })
 

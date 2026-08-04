@@ -1,0 +1,253 @@
+import { describe, expect, it } from 'vitest'
+import { LIBRARY_FORMAT, type DeckRecord, type Library, type MixRecord, type Tombstone } from './ports'
+import { mergeLibraries } from './library-merge'
+
+/** An arbitrary shared schema version — merge only requires the two sides to agree. */
+const VERSION = 5
+
+function deck(overrides: Partial<DeckRecord> & { id: string }): DeckRecord {
+  return {
+    name: 'Home',
+    phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  }
+}
+
+function mix(overrides: Partial<MixRecord> & { id: string }): MixRecord {
+  return { name: 'Mornings', deckIds: ['d1'], createdAt: 1, updatedAt: 1, ...overrides }
+}
+
+function library(parts: {
+  decks?: readonly DeckRecord[]
+  mixes?: readonly MixRecord[]
+  tombstones?: readonly Tombstone[]
+  exportedAt?: number
+}): Library {
+  return {
+    format: LIBRARY_FORMAT,
+    schemaVersion: VERSION,
+    exportedAt: parts.exportedAt ?? 0,
+    decks: parts.decks ?? [],
+    mixes: parts.mixes ?? [],
+    tombstones: parts.tombstones ?? [],
+  }
+}
+
+describe('mergeLibraries — the union half (T060: a device that never saw a Deck cannot erase it)', () => {
+  it('keeps a Deck that exists only on one side, from either side', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'local' })] }),
+      library({ decks: [deck({ id: 'remote' })] }),
+    )
+
+    expect(merged.decks.map((d) => d.id).sort()).toEqual(['local', 'remote'])
+  })
+
+  it('keeps the Deck with the later updatedAt when both sides hold the same id', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Old', updatedAt: 10 })] }),
+      library({ decks: [deck({ id: 'd1', name: 'New', updatedAt: 20 })] }),
+    )
+
+    expect(merged.decks).toEqual([deck({ id: 'd1', name: 'New', updatedAt: 20 })])
+  })
+
+  it('keeps the later Deck regardless of which side it is on', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'New', updatedAt: 20 })] }),
+      library({ decks: [deck({ id: 'd1', name: 'Old', updatedAt: 10 })] }),
+    )
+
+    expect(merged.decks).toEqual([deck({ id: 'd1', name: 'New', updatedAt: 20 })])
+  })
+
+  it('breaks an exact updatedAt tie in favour of the local copy, deterministically', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', name: 'Local', updatedAt: 10 })] }),
+      library({ decks: [deck({ id: 'd1', name: 'Remote', updatedAt: 10 })] }),
+    )
+
+    expect(merged.decks).toEqual([deck({ id: 'd1', name: 'Local', updatedAt: 10 })])
+  })
+
+  it('never loses a Phrase held on only one side of a same-id Deck: the whole later record wins', () => {
+    const older = deck({ id: 'd1', updatedAt: 10, phrases: [{ id: 'p1', french: 'a', english: 'a' }] })
+    const newer = deck({
+      id: 'd1',
+      updatedAt: 20,
+      phrases: [
+        { id: 'p1', french: 'a', english: 'a' },
+        { id: 'p2', french: 'b', english: 'b' },
+      ],
+    })
+
+    expect(mergeLibraries(library({ decks: [older] }), library({ decks: [newer] })).decks[0]!.phrases).toHaveLength(2)
+  })
+
+  it('unions saved Mixes by the same rule, so a Mix made on one device is not erased by the other', () => {
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'local' })] }),
+      library({ mixes: [mix({ id: 'remote' })] }),
+    )
+
+    expect(merged.mixes?.map((m) => m.id).sort()).toEqual(['local', 'remote'])
+  })
+
+  it('keeps the Mix with the later updatedAt when both sides hold the same id', () => {
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'm1', name: 'Old', updatedAt: 10 })] }),
+      library({ mixes: [mix({ id: 'm1', name: 'New', updatedAt: 20 })] }),
+    )
+
+    expect(merged.mixes).toEqual([mix({ id: 'm1', name: 'New', updatedAt: 20 })])
+  })
+})
+
+describe('mergeLibraries — the Tombstone half (a delete must still delete)', () => {
+  it('drops a Deck the other side deleted after that copy was last written', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10 })] }),
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 20 }] }),
+    )
+
+    expect(merged.decks).toEqual([])
+  })
+
+  it('drops a Deck deleted locally even when the server still holds it', () => {
+    const merged = mergeLibraries(
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 20 }] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 10 })] }),
+    )
+
+    expect(merged.decks).toEqual([])
+  })
+
+  it('drops a Deck whose Tombstone carries the same instant as its last write — the delete of exactly that record', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 10 })] }),
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 10 }] }),
+    )
+
+    expect(merged.decks).toEqual([])
+  })
+
+  it('keeps a Deck written again after the delete — recreating an id beats the Tombstone', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 30 })] }),
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 20 }] }),
+    )
+
+    expect(merged.decks.map((d) => d.id)).toEqual(['d1'])
+  })
+
+  it('discards a Tombstone the recreated Deck has outlived, so it cannot delete the Deck again later', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 30 })] }),
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 20 }] }),
+    )
+
+    expect(merged.tombstones).toEqual([])
+  })
+
+  it('carries every still-effective Tombstone into the result, so the next device to merge also deletes', () => {
+    const merged = mergeLibraries(
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 20 }] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 10 })] }),
+    )
+
+    expect(merged.tombstones).toEqual([{ id: 'd1', kind: 'deck', deletedAt: 20 }])
+  })
+
+  it('deletes a Mix by its own Tombstone, and never by a Deck Tombstone that happens to share an id', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'shared', updatedAt: 10 })], mixes: [mix({ id: 'shared', updatedAt: 10 })] }),
+      library({ tombstones: [{ id: 'shared', kind: 'mix', deletedAt: 20 }] }),
+    )
+
+    expect(merged.mixes).toEqual([])
+    expect(merged.decks.map((d) => d.id)).toEqual(['shared'])
+  })
+
+  it('leaves a deleted Deck deleted even when a surviving Mix still names it — a dead id resurrects nothing', () => {
+    const merged = mergeLibraries(
+      library({ mixes: [mix({ id: 'm1', deckIds: ['d1'], updatedAt: 30 })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 10 })], tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 20 }] }),
+    )
+
+    expect(merged.decks).toEqual([])
+    expect(merged.mixes?.[0]!.deckIds).toEqual(['d1'])
+  })
+
+  it('keeps the later deletedAt when both sides deleted the same Deck', () => {
+    const merged = mergeLibraries(
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 20 }] }),
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 50 }] }),
+    )
+
+    expect(merged.tombstones).toEqual([{ id: 'd1', kind: 'deck', deletedAt: 50 }])
+  })
+
+  it('keeps the later deletedAt whichever side holds it', () => {
+    const merged = mergeLibraries(
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 50 }] }),
+      library({ tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 20 }] }),
+    )
+
+    expect(merged.tombstones).toEqual([{ id: 'd1', kind: 'deck', deletedAt: 50 }])
+  })
+
+  it('unions Tombstones from both sides', () => {
+    const merged = mergeLibraries(
+      library({ tombstones: [{ id: 'a', kind: 'deck', deletedAt: 1 }] }),
+      library({ tombstones: [{ id: 'b', kind: 'mix', deletedAt: 2 }] }),
+    )
+
+    expect(merged.tombstones?.map((t) => t.id).sort()).toEqual(['a', 'b'])
+  })
+
+  it('treats a library from before Tombstones existed as having none, never as having deleted everything', () => {
+    const before: Library = { format: LIBRARY_FORMAT, schemaVersion: VERSION, exportedAt: 0, decks: [deck({ id: 'd2' })] }
+
+    const merged = mergeLibraries(library({ decks: [deck({ id: 'd1' })] }), before)
+
+    expect(merged.decks.map((d) => d.id).sort()).toEqual(['d1', 'd2'])
+    expect(merged.tombstones).toEqual([])
+  })
+})
+
+describe('mergeLibraries — the envelope', () => {
+  it('carries the shared format and schema version through', () => {
+    const merged = mergeLibraries(library({}), library({}))
+
+    expect(merged.format).toBe(LIBRARY_FORMAT)
+    expect(merged.schemaVersion).toBe(VERSION)
+  })
+
+  it('takes the later exportedAt, so the merged snapshot is never dated older than its newest input', () => {
+    expect(mergeLibraries(library({ exportedAt: 100 }), library({ exportedAt: 300 })).exportedAt).toBe(300)
+    expect(mergeLibraries(library({ exportedAt: 300 }), library({ exportedAt: 100 })).exportedAt).toBe(300)
+  })
+
+  it('refuses two libraries at different schema versions rather than comparing records of different shapes', () => {
+    const older: Library = { ...library({}), schemaVersion: VERSION - 1 }
+
+    expect(() => mergeLibraries(library({}), older)).toThrow(/schema version/)
+  })
+
+  it('mutates neither input', () => {
+    const local = library({
+      decks: [deck({ id: 'd1', updatedAt: 10 })],
+      tombstones: [{ id: 'gone', kind: 'deck', deletedAt: 1 }],
+    })
+    const remote = library({ decks: [deck({ id: 'd2', updatedAt: 20 })], mixes: [mix({ id: 'm1' })] })
+    const localBefore = JSON.stringify(local)
+    const remoteBefore = JSON.stringify(remote)
+
+    mergeLibraries(local, remote)
+
+    expect(JSON.stringify(local)).toBe(localBefore)
+    expect(JSON.stringify(remote)).toBe(remoteBefore)
+  })
+})
