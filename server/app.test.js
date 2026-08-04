@@ -192,7 +192,6 @@ describe('server app (integration, fake upstreams)', () => {
 
   afterEach(async () => {
     await new Promise((resolve) => server.close(resolve))
-    await libraryStore.close()
     rmSync(distDir, { recursive: true, force: true })
   })
 

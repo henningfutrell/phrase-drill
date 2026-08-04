@@ -134,7 +134,7 @@ async function main() {
     console.error(`user "${username}" already exists — this script never overwrites an account.`)
     console.error('To reset a password, delete the row from `users` and re-run this script (there is no admin UI, by design).')
     process.exitCode = 1
-    await authStore.close()
+    await pool.end()
     return
   }
 
@@ -145,7 +145,7 @@ async function main() {
     createdAt: Date.now(),
   })
   console.log(`created user "${username}"`)
-  await authStore.close()
+  await pool.end()
 }
 
 // Only run when executed directly. `useradd.test.js` imports `readPasswordFrom`
