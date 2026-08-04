@@ -502,6 +502,74 @@ describe('server app (integration, fake upstreams)', () => {
       expect(res.status).toBe(400)
     })
 
+    /**
+     * Version skew (T060). Her phone runs the bundle it last installed, not
+     * the one just deployed, so for a window there is an OLD client pushing
+     * against a NEW envelope. An old client's `exportAll()` cannot carry a
+     * field it has never heard of, so its push would silently strip the
+     * Tombstones off the server copy — and every deleted Deck would come
+     * back on the next sync. The server refuses that push instead: her old
+     * device simply does not sync until it updates, and nothing of hers is
+     * destroyed in the meantime.
+     */
+    it('refuses a push from a client older than the stored envelope, and keeps the stored one intact', async () => {
+      await boot()
+      const current = {
+        format: 'phrase-drill-library',
+        schemaVersion: 5,
+        exportedAt: 2,
+        decks: [{ id: 'd1', name: 'Café', phrases: [], createdAt: 1, updatedAt: 1 }],
+        mixes: [],
+        tombstones: [{ id: 'gone', kind: 'deck', deletedAt: 9 }],
+      }
+      const first = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify(current),
+      })
+      expect(first.status).toBe(204)
+
+      const fromOldClient = {
+        format: 'phrase-drill-library',
+        schemaVersion: 4,
+        exportedAt: 3,
+        decks: [{ id: 'gone', name: 'Deleted elsewhere', phrases: [], createdAt: 1, updatedAt: 1 }],
+        mixes: [],
+      }
+      const stale = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify(fromOldClient),
+      })
+      expect(stale.status).toBe(409)
+
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(await get.json()).toEqual(current)
+    })
+
+    it('accepts a push at the same schema version as the stored envelope', async () => {
+      await boot()
+      const envelope = { format: 'phrase-drill-library', schemaVersion: 5, exportedAt: 1, decks: [], mixes: [], tombstones: [] }
+      for (const exportedAt of [1, 2]) {
+        const res = await fetch(`${baseUrl}/api/library`, {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ ...envelope, exportedAt }),
+        })
+        expect(res.status).toBe(204)
+      }
+    })
+
+    it('rejects a PUT whose tombstones field is present but not an array', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 5, decks: [], tombstones: 'nope' }),
+      })
+      expect(res.status).toBe(400)
+    })
+
     it('rejects an oversized library payload with 413', async () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/library`, {

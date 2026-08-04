@@ -69,10 +69,36 @@ export interface MixRecord {
 export const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
+ * The record that a Deck or a Mix was deleted, and when (T060). It outlives
+ * the thing it names, on purpose.
+ *
+ * Sync merges two libraries instead of overwriting one with the other, and
+ * a merge cannot tell "absent because she deleted it" from "absent because
+ * this device has never seen it" — absence alone means both. Without this
+ * record the safe merge is a union, and a union makes a delete impossible:
+ * every device that still holds the Deck pushes it back. So a deletion is
+ * itself data, and it travels in the `Library` envelope like everything
+ * else that is hers.
+ *
+ * `kind` is not decoration: Deck ids and Mix ids live in one namespace here,
+ * and a Tombstone must delete exactly the aggregate it was written for.
+ */
+export interface Tombstone {
+  readonly id: string
+  readonly kind: 'deck' | 'mix'
+  readonly deletedAt: number
+}
+
+/**
  * A whole-library snapshot for export/import — also the recovery path for
  * iOS's IndexedDB eviction, and the body of the `/api/library` sync
- * envelope. Import replaces the whole library; it never merges, because
- * merge is a design problem nobody has asked to solve.
+ * envelope.
+ *
+ * `importAll` still replaces the whole library, and a restore from a backup
+ * file still never merges. Sync is the one path that does merge, through
+ * `mergeLibraries` (library-merge.ts) — because there the two sides are two
+ * of her own devices rather than a file she chose, and replacing one with
+ * the other deletes whatever only the loser had (T060).
  */
 export interface Library {
   readonly format: typeof LIBRARY_FORMAT
@@ -86,6 +112,13 @@ export interface Library {
    * — absent means "no saved Mixes", never "invalid file".
    */
   readonly mixes?: readonly MixRecord[]
+  /**
+   * What has been deleted, so a merge can tell a deletion from an absence
+   * (T060). Optional for the same reason `mixes` is: every envelope written
+   * before schema v5 has no such field, and absent means "nothing known to
+   * be deleted", never "invalid file".
+   */
+  readonly tombstones?: readonly Tombstone[]
 }
 
 export interface DeckStore {

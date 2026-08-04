@@ -49,6 +49,18 @@ describe('createIndexedDbMixStore', () => {
     expect(await store.loadAll()).toEqual([])
   })
 
+  it('records a Tombstone when a Mix is removed, so another device cannot resurrect it (T060)', async () => {
+    const store = createIndexedDbMixStore()
+    const deckStore = createIndexedDbDeckStore()
+    await store.save(makeMix())
+
+    await store.remove('mix-1')
+
+    expect((await deckStore.exportAll()).tombstones).toEqual([
+      { id: 'mix-1', kind: 'mix', deletedAt: expect.any(Number) },
+    ])
+  })
+
   it('deleting a Mix never touches the Decks it named', async () => {
     const deckStore = createIndexedDbDeckStore()
     await deckStore.save({ id: 'home', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] })

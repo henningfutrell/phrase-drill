@@ -70,6 +70,77 @@ describe('createIndexedDbDeckStore', () => {
     expect(await store.loadAll()).toEqual([])
   })
 
+  it('records a Tombstone when a deck is removed, so another device cannot resurrect it (T060)', async () => {
+    const store = createIndexedDbDeckStore()
+    const deck = makeDeck()
+    await store.save(deck)
+
+    await store.remove(deck.id)
+
+    const library = await store.exportAll()
+    expect(library.tombstones).toEqual([{ id: deck.id, kind: 'deck', deletedAt: expect.any(Number) }])
+  })
+
+  it('dates the Tombstone at or after the deck record it replaces, so the delete outranks the write', async () => {
+    const store = createIndexedDbDeckStore()
+    const deck = makeDeck()
+    await store.save(deck)
+    const beforeRemoval = await store.exportAll()
+    const written = beforeRemoval.decks[0]!.updatedAt
+
+    await store.remove(deck.id)
+
+    const library = await store.exportAll()
+    expect(library.tombstones![0]!.deletedAt).toBeGreaterThanOrEqual(written)
+  })
+
+  it('carries Tombstones through exportAll and importAll, so a restored device still knows what was deleted', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.save(makeDeck())
+    await store.remove('deck-1')
+
+    const other = createIndexedDbDeckStore()
+    await other.importAll(await store.exportAll())
+
+    expect((await other.exportAll()).tombstones).toEqual([
+      { id: 'deck-1', kind: 'deck', deletedAt: expect.any(Number) },
+    ])
+  })
+
+  it('replaces the Tombstones on import rather than accumulating them', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.save(makeDeck())
+    await store.remove('deck-1')
+
+    await store.importAll({
+      ...(await store.exportAll()),
+      tombstones: [{ id: 'other', kind: 'deck' as const, deletedAt: 5 }],
+    })
+
+    expect((await store.exportAll()).tombstones).toEqual([{ id: 'other', kind: 'deck', deletedAt: 5 }])
+  })
+
+  it('exports no Tombstones from a library that has never had a deletion', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.save(makeDeck())
+
+    expect((await store.exportAll()).tombstones).toEqual([])
+  })
+
+  it('accepts a library from before Tombstones existed, leaving none behind', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.importAll({
+      format: 'phrase-drill-library',
+      schemaVersion: 1,
+      exportedAt: 1,
+      decks: [{ id: 'old', name: 'Old', phrases: [], createdAt: 1, updatedAt: 1 }],
+    })
+
+    const library = await store.exportAll()
+    expect(library.decks.map((d) => d.id)).toEqual(['old'])
+    expect(library.tombstones).toEqual([])
+  })
+
   it('round-trips the whole library through exportAll and importAll', async () => {
     const store = createIndexedDbDeckStore()
     const home = makeDeck({ id: 'home', name: 'Home' })

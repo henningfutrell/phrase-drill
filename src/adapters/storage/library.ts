@@ -1,5 +1,11 @@
 import { LIBRARY_FORMAT, type Library } from '../../domain'
-import { CURRENT_SCHEMA_VERSION, migrateDeckRecord, type DeckRecord, type MixRecord } from './migrations'
+import {
+  CURRENT_SCHEMA_VERSION,
+  migrateDeckRecord,
+  type DeckRecord,
+  type MixRecord,
+  type Tombstone,
+} from './migrations'
 
 export type { Library }
 
@@ -40,6 +46,12 @@ export function parseLibraryFile(raw: string): ParseLibraryResult {
   if (candidate.mixes !== undefined && !Array.isArray(candidate.mixes)) {
     return { ok: false, reason: 'invalid' }
   }
+  // `tombstones` arrived at schema v5 (T060), and reads the same way:
+  // absent is every backup written before then, present-and-not-an-array is
+  // corrupt.
+  if (candidate.tombstones !== undefined && !Array.isArray(candidate.tombstones)) {
+    return { ok: false, reason: 'invalid' }
+  }
 
   return { ok: true, library: candidate as unknown as Library }
 }
@@ -64,6 +76,7 @@ export function backupFilename(date: Date): string {
 export function buildLibrary(
   decks: readonly DeckRecord[],
   mixes: readonly MixRecord[],
+  tombstones: readonly Tombstone[],
   exportedAt: number,
 ): Library {
   return {
@@ -72,7 +85,47 @@ export function buildLibrary(
     exportedAt,
     decks: [...decks],
     mixes: [...mixes],
+    tombstones: [...tombstones],
   }
+}
+
+/**
+ * Bring a library — this device's or the server's — to the current schema
+ * and fill in every field a merge reads, so `mergeLibraries` compares two
+ * envelopes of the same shape and never has to guess what an absent field
+ * meant (T060).
+ *
+ * The one judgement here is what an absent field means, and it is always
+ * "nothing", never "everything": a pre-v5 envelope has no `tombstones`
+ * because Tombstones did not exist when it was written, not because she
+ * deleted nothing — but "nothing known to be deleted" is exactly what this
+ * build can honestly act on. Reading absence as a deletion would let an old
+ * envelope wipe her library, which is the defect this whole change exists
+ * to end.
+ *
+ * Nothing is invented for a record's own timestamps: `updatedAt` has been
+ * on every deck record since v1 and every mix record since v4, so the merge
+ * compares times that were really written at save time, on the device that
+ * made the change. No migration here stamps a clock.
+ */
+export function normalizeLibrary(library: Library): Library {
+  return {
+    format: LIBRARY_FORMAT,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    exportedAt: library.exportedAt,
+    decks: migrateLibraryDecks(library),
+    mixes: migrateLibraryMixes(library),
+    tombstones: migrateLibraryTombstones(library),
+  }
+}
+
+/**
+ * The Tombstones of a library. Born at schema v5 with one shape, so there
+ * is no chain to run — only the question a pre-v5 envelope asks, answered
+ * in `normalizeLibrary` above.
+ */
+export function migrateLibraryTombstones(library: Library): Tombstone[] {
+  return [...(library.tombstones ?? [])]
 }
 
 /**

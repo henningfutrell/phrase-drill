@@ -8,7 +8,13 @@ import type { Library } from '../../domain'
  * before nobody has ever synced, not a failure.
  */
 export type PullResult = { ok: true; library: Library } | { ok: false; reason: 'not-found' | 'unauthorized' | 'network' }
-export type PushResult = { ok: true } | { ok: false; reason: 'unauthorized' | 'network' }
+/**
+ * `stale-client` is the server refusing a push from a build older than the
+ * envelope it already holds (T060) — this device would strip fields it does
+ * not know about, so it is told to keep its changes local until it updates.
+ * Not a failure to retry: retrying the same build gets the same answer.
+ */
+export type PushResult = { ok: true } | { ok: false; reason: 'unauthorized' | 'stale-client' | 'network' }
 
 export interface LibrarySyncClientDeps {
   getAccessToken(): Promise<string>
@@ -46,6 +52,7 @@ export function createLibrarySyncClient(deps: LibrarySyncClientDeps): LibrarySyn
         return { ok: false, reason: 'network' }
       }
       if (response.status === 401) return { ok: false, reason: 'unauthorized' }
+      if (response.status === 409) return { ok: false, reason: 'stale-client' }
       if (!response.ok) return { ok: false, reason: 'network' }
       return { ok: true }
     },

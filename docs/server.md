@@ -46,9 +46,21 @@ deleted the moment it's found, not left to expire on its own schedule.
 | POST   | `/api/scan`    | Read handwritten phrases from an uploaded photo (image bytes → `{phrases}`). | 6 MB       | 10 / 60s per session |
 | POST   | `/api/translate` | Propose one or more Phrase Candidates translating one phrase (`{text, direction, deckName}` → `{candidates}`). | 4 KB | 30 / 60s per session |
 | GET    | `/api/library` | Fetch the stored library JSON for this user.          | —          | 30 / 60s per session |
-| PUT    | `/api/library` | Replace the stored library JSON for this user.        | 8 MB       | 30 / 60s per session |
+| PUT    | `/api/library` | Replace the stored library JSON for this user. `409 stale-client` if the body's `schemaVersion` is *lower* than the stored envelope's — see below. | 8 MB | 30 / 60s per session |
 | \*     | anything else under `/api/` | `404 not-found`.                        | —          | —                  |
 | \*     | anything not under `/api/`  | Falls back to the built PWA (`dist/`, SPA fallback to `index.html`). | — | — |
+
+**Why `PUT /api/library` can answer 409 (T060).** The device pushes the whole
+library, and the client merges the server copy into its own before pushing so
+that neither device can erase what only the other had. That merge depends on
+fields — `tombstones` above all — that only a client new enough to know about
+them can carry. Her two devices do not update together, so for a window after
+a deploy one of them is running an older bundle whose `exportAll()` silently
+omits those fields; letting it write would strip the merge metadata off the
+server copy and resurrect every Deck she had deleted. The server refuses that
+one case and nothing else: a push at the same version or newer is accepted as
+before. The refused device keeps its changes locally and syncs once it
+updates.
 
 Rate limits are in-memory, per-process token buckets (`server/rate-limiter.js`)
 — a restart resets every bucket to full; there is no distributed store to keep
