@@ -84,13 +84,14 @@ export interface SyncEngine {
   /** Sync now, skipping the debounce window. */
   syncNow(): void
   /**
-   * The whole local library was just replaced from a backup FILE (T072).
+   * Replace the whole local library from a backup FILE (T072). Never for an
+   * ordinary local change.
    *
-   * Await it before writing that library, and never for an ordinary local
-   * change: it is what stops the restore from undoing itself. See
-   * `nothingIsAgreed` below for the argument.
+   * `applyLibrary` is the write that replaces it, and it is handed in rather
+   * than done by the caller either side of this call because the two writes
+   * have to stand or fall together (T081). See `nothingIsAgreed` below.
    */
-  libraryRestored(): Promise<void>
+  libraryRestored(applyLibrary: () => Promise<void>): Promise<void>
   snapshot(): SyncSnapshot
   subscribe(listener: (snapshot: SyncSnapshot) => void): () => void
 }
@@ -159,6 +160,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   let cancelTimer: (() => void) | undefined
   let retries = 0
   let detach: (() => void)[] = []
+  /**
+   * How many restores from file have been applied. A round-trip reads it once
+   * and compares before every step that would act on what it computed: a
+   * restore replaces the entire library, so a merge or a baseline derived from
+   * the library it replaced describes a device that no longer exists (T081).
+   * Counted rather than flagged so a restore that lands between two checks of
+   * the same round-trip is still seen.
+   */
+  let restores = 0
 
   function emit(next: Partial<SyncSnapshot>): void {
     snapshot = { ...snapshot, ...next }
@@ -187,8 +197,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
    * already understands.
    */
   async function roundTrip(): Promise<
-    { ok: true } | { ok: false; reason: 'network' | 'unauthorized' | 'stale-client' | 'unreadable' | 'device-storage' }
+    | { ok: true }
+    | {
+        ok: false
+        reason: 'network' | 'unauthorized' | 'stale-client' | 'unreadable' | 'device-storage' | 'superseded'
+      }
   > {
+    // Everything below is computed from the library this device holds NOW. A
+    // restore replaces that library wholesale, so if one lands while this is
+    // running, everything computed here is about a device that no longer
+    // exists and none of it may be written (T081).
+    const restoresAtStart = restores
+
     let pulled: Awaited<ReturnType<LibrarySyncClient['pull']>>
     try {
       pulled = await deps.client.pull()
@@ -231,8 +251,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // hold is a lie the next merge would act on.
     let outgoing: Library
     let refused = false
+    let superseded = false
     try {
       const written = await deps.updateLocal((stored) => {
+        // Checked here, inside the write, because this is the one instant at
+        // which the merge is applied to what is stored. A restore that landed
+        // while the pull or the baseline read was in flight would otherwise be
+        // merged against the baseline it has just replaced, and the Deck she
+        // restored would be deleted with no push involved at all.
+        if (restores !== restoresAtStart) {
+          superseded = true
+          return stored
+        }
         try {
           const local = normalizeLibrary(stored)
           return remote ? mergeLibraries(local, remote, baseline) : local
@@ -245,6 +275,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           throw error
         }
       })
+      if (superseded) return { ok: false, reason: 'superseded' }
       outgoing = written.library
       if (written.changed) emit({ libraryRevision: snapshot.libraryRevision + 1 })
     } catch {
@@ -265,6 +296,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // The retry re-merges against a stale baseline, which costs precision and
     // never a Phrase.
     const at = now()
+    // The push landed, so the server really does hold `outgoing` — but a
+    // restore confirmed while it was on the network means this device no
+    // longer does. Writing it into the baseline would put the pre-restore
+    // snapshot back over the empty one the restore wrote, and the next merge
+    // would then read every restored record as unchanged since the last
+    // agreement and let a Tombstone the server still holds delete it (T081).
+    // No sync time either: what is on this phone has not been anywhere.
+    if (restores !== restoresAtStart) return { ok: false, reason: 'superseded' }
     try {
       await deps.baseline.write(outgoing)
       await deps.recordSync(at)
@@ -314,8 +353,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // Retrying the same build gets the same answer.
         emit({ state: 'needs-update' })
       } else {
-        // 'network' and 'device-storage': both are conditions that pass. Say
-        // her work is safe here, and try again.
+        // 'network', 'device-storage' and 'superseded': all three are
+        // conditions that pass. Say her work is safe here, and try again — a
+        // superseded round-trip is a restore that has just landed and not yet
+        // been anywhere, which is exactly what 'waiting' means.
         emit({ state: 'waiting' })
         scheduleRetry()
       }
@@ -417,12 +458,40 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
      * degraded round-trip — a Deck both sides hold keeps the later name and
      * the UNION of its Phrases, which cannot lose a Phrase (docs/sync.md).
      *
-     * It rejects if the baseline cannot be written, and the caller must let
-     * that stop the restore: a restore applied on top of an intact baseline is
-     * the defect happening.
+     * **Both writes, or neither** (T081). The empty baseline still goes first,
+     * for T072's reason: a restore applied on top of an intact baseline is the
+     * defect happening, so a baseline that cannot be recorded rejects here and
+     * `applyLibrary` is never called. The other order was open just as wide —
+     * an emptied baseline over a library the device failed to replace makes
+     * every Tombstone she ever wrote read as written since the agreement, and
+     * the next merge resurrects every Deck she has ever deleted, here and on
+     * the server. So a local write that refuses puts the previous baseline
+     * back and rethrows.
+     *
+     * The one case with nothing to put back is a device that has never synced.
+     * Empty and absent are not equally safe there: absent lets a Tombstone
+     * delete on its clock alone, empty resurrects a deletion. Only one of
+     * those can lose a Phrase, so the empty one stays.
+     *
+     * Counting the restore BEFORE the baseline is emptied is what a round-trip
+     * already in flight tests itself against — see `restores` above.
      */
-    async libraryRestored(): Promise<void> {
+    async libraryRestored(applyLibrary: () => Promise<void>): Promise<void> {
+      // A baseline that cannot be read is one there is nothing to put back to.
+      // That is not a reason to refuse the restore.
+      const previous = await deps.baseline.read().catch(() => undefined)
+      restores += 1
       await deps.baseline.write(nothingIsAgreed())
+      try {
+        await applyLibrary()
+      } catch (error) {
+        if (previous !== undefined) {
+          // Best effort by necessity: this is already the failure path, and
+          // the caller is being told the restore did not happen either way.
+          await deps.baseline.write(previous).catch(() => {})
+        }
+        throw error
+      }
     },
 
     snapshot(): SyncSnapshot {

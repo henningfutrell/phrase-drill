@@ -201,7 +201,8 @@ Two Phrases sharing an id are both kept, never folded into one. No write path
 enforces uniqueness, so a duplicate id is already a defect — answering it by
 dropping one of her phrases would make it a loss.
 
-**With no baseline** (the first sync ever, or after IndexedDB eviction) a Deck
+**With no baseline** (the first sync ever, after IndexedDB eviction, or one
+written under a schema version this build does not read — see below) a Deck
 held by both sides keeps the later record's name and dates and the **union** of
 its Phrases. A missing baseline degrades the merge; it never deletes through
 it.
@@ -231,6 +232,37 @@ object store under the `syncBaseline` key
 store of its own, because a new store is a schema version bump and a migration
 for every existing database, and this is derived data whose loss costs one
 round-trip's precision.
+
+### A baseline the last build wrote (T081)
+
+Nothing migrates it. The IndexedDB upgrade path rewrites records in the `decks`
+store only, the baseline store reads its value back raw, and the library beside
+it *is* migrated — so the morning after any app update that bumps the schema,
+the two are one version apart.
+
+`mergeLibraries` used to refuse that outright. The engine read the refusal as
+an envelope this build cannot understand and parked at `needs-update`, which by
+design never retries, so **sync died permanently on a phone whose app was
+already current**, with the line telling her to update it. No race and no
+second device: it fired for every user on the next bump, and it silently
+removed the only thing keeping her library alive anywhere but one phone.
+
+A baseline this build cannot compare against is now simply one it does not
+have — which is what the thing has always claimed to be, and the next accepted
+push writes a fresh one at the current version. The cost is one round-trip of
+degraded precision (the row above), never a Phrase.
+
+**Only the version is judged.** An empty baseline at the current version is
+still a baseline, and it means the opposite thing — see *Empty, not absent*
+below.
+
+Rejected: migrating the baseline through `normalizeLibrary` on read, which is
+more precise and buys a round-trip of `updatedAt`-only exposure back. It also
+puts her records through a second, unwitnessed migration path whose failure
+mode is a baseline that wrongly reads as agreed — and that direction *can*
+delete. Dropping can only degrade. Also rejected: clearing the baseline in the
+IDB upgrade, which fixes the version skew and none of the other reasons a
+stored baseline can be unusable.
 
 ## The pinned voice (T067)
 
@@ -286,9 +318,48 @@ The fix uses the record the merge already trusts over any clock. A Tombstone
 deletes only a record unchanged from the last state both sides agreed on
 (T070) — and **every record a restore wrote was written by the restore**, after
 any agreement, whatever its `updatedAt` says. So a restore sets the baseline to
-an **empty library**: `syncEngine.libraryRestored()`, awaited *before* the
-library is written, so a baseline that could not be recorded stops the restore
-instead of letting it apply on top of an intact one.
+an **empty library**: `syncEngine.libraryRestored(applyLibrary)`, which empties
+the baseline *before* it applies the local write, so a baseline that could not
+be recorded stops the restore instead of letting it apply on top of an intact
+one.
+
+### Both writes, or neither (T081)
+
+The two writes were originally the caller's to sequence —
+`libraryRestored().then(() => writeLocal(library))` — and they came apart in
+both directions.
+
+**A round-trip already in flight.** The last thing a successful round-trip does
+is write the library it pushed into the baseline, and that library was computed
+before the restore. It landed on top of the empty baseline, so the next merge
+read every restored Deck as unchanged since the last agreement and let the
+server's Tombstone delete it — on the phone and on the server. The T072 defect
+verbatim, through a race T072 never closed: its own tests all called
+`libraryRestored()` with the engine idle, and the engine is not idle when she
+taps Restore.
+
+The engine now counts restores. A round-trip reads the count once at the start
+and compares it before the merge and again before the baseline write; a
+round-trip that finds it moved writes nothing, claims no sync time, and ends at
+`waiting` with a retry scheduled — its push may well have been accepted, but
+what is on the phone now is the restored library and that has not been
+anywhere.
+
+**A local write that failed.** The emptied baseline over an unchanged library
+is the same defect pointing the other way: every Tombstone she ever wrote reads
+as written since the agreement, so the next merge resurrects every Deck she has
+ever deleted, here and on the server. `libraryRestored` therefore takes the
+local write, and puts the previous baseline back if it refuses.
+
+Where there is nothing to put back — a device that has never synced — the empty
+baseline stays. Empty and absent are not equally safe here: absent lets a
+Tombstone delete on its clock alone, empty resurrects a deletion. Only one of
+those can lose a Phrase.
+
+Rejected: writing the library first and the baseline second, which makes the
+common failure the T072 defect rather than a resurrection. Rejected: stopping
+the engine for the duration of a restore, which leaves an unstarted engine
+behind on any path that throws.
 
 **Empty, not absent.** They are different answers and only one is right: absent
 means "there is no baseline to reason from", which is the first row of the
@@ -352,6 +423,10 @@ each maps onto a state the engine already had:
 | `baseline.read()` | `device-storage` | `waiting`, retry scheduled |
 | `updateLocal()` — its read or its write | `device-storage` | `waiting`, retry scheduled — **and the push is skipped**, so a merge this device could not save is never made the agreed state |
 | `baseline.write()`, `recordSync()` | `device-storage` | `waiting`, retry scheduled, and no sync time claimed |
+
+One failure is not a throw at all: a restore landing mid-round-trip reports
+`superseded`, which ends the same way — `waiting`, retry scheduled, nothing
+written and no sync time claimed (T081, above).
 
 `device-storage` is the storage counterpart of `network`: a condition that
 passes, so it waits and tries again. It is deliberately **not** `unreadable`
