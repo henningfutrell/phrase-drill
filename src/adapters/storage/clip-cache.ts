@@ -147,6 +147,16 @@ export const DEFAULT_CLIP_CACHE_MAX_BYTES = 200 * 1024 * 1024
  */
 const EVICT_TO_FRACTION = 0.9
 
+/**
+ * How many Clips the index backfill reads before writing their rows and
+ * letting them go (T072). At ~89 KB a Clip (docs/scale.md §1) this is about
+ * 2 MB in hand at once — bounded by a constant instead of by the size of her
+ * cache, which is the whole point. Reading one at a time would bound it
+ * tighter and cost a round-trip per Clip over ~10,000 of them; a chunk trades
+ * two megabytes for that.
+ */
+export const CLIP_META_BACKFILL_CHUNK = 25
+
 export interface ClipCacheOptions {
   /** Defaults to `DEFAULT_CLIP_CACHE_MAX_BYTES`. */
   readonly maxBytes?: number
@@ -205,20 +215,72 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
   /**
    * The size index, read once per cache instance. Small rows only — the whole
    * reason `clipMeta` is its own store is that this never loads audio.
+   *
+   * Any Clip with no index row is indexed here first (T072), so a phone that
+   * upgraded into this build keeps the audio it already has instead of
+   * re-fetching it. Blocking, not background: an index that under-reports the
+   * cache says "not ready" for Phrases that are ready, which queues audio for
+   * regeneration that is already on the disk.
    */
   function getIndex(): Promise<Map<string, ClipMeta>> {
     indexPromise ??= (async () => {
       const db = await getDatabase()
       const rows = (await db.getAll(CLIP_META_STORE)) as ClipMeta[]
-      rows.sort((a, b) => a.lastUsedAt - b.lastUsedAt)
+      const backfilled = await backfillMissingMeta(db, rows)
+      const all = [...rows, ...backfilled].sort((a, b) => a.lastUsedAt - b.lastUsedAt)
       const index = new Map<string, ClipMeta>()
-      for (const row of rows) {
+      for (const row of all) {
         index.set(row.hash, row)
         totalBytes += row.bytes
       }
       return index
     })()
     return indexPromise
+  }
+
+  /**
+   * Index rows for Clips that have none, written and returned (T072).
+   *
+   * This is the v5 -> v6 backfill, moved out of the versionchange transaction
+   * that used to do it with one `getAll` over the whole clip store — ~890 MB
+   * at a full library (docs/scale.md §1), which is an out-of-memory kill on a
+   * phone, retried on every launch because the upgrade never completes. Here
+   * it is ordinary work on an open database: no transaction to hold, nothing
+   * to crashloop, and a failure costs a re-fetch rather than her library.
+   *
+   * Three properties it needs, and no more:
+   *
+   * - **Bounded memory.** Audio is read one chunk at a time and only the size
+   *   is kept, so a few megabytes are in hand at once rather than the store.
+   * - **Resumable.** It is driven off the difference between the two stores,
+   *   so an interrupted run leaves the rows it managed and the next launch
+   *   does the rest.
+   * - **Free once done.** `count` answers "is anything missing?" without
+   *   reading a key, let alone a byte, which is what every launch after the
+   *   upgrade pays.
+   *
+   * `lastUsedAt` seeds from `createdAt`: nothing recorded when a Clip was last
+   * played before this store existed, and generation order is the only honest
+   * answer available.
+   */
+  async function backfillMissingMeta(db: IDBPDatabase, known: readonly ClipMeta[]): Promise<ClipMeta[]> {
+    if ((await db.count(CLIPS_STORE)) <= known.length) return []
+
+    const indexed = new Set(known.map((row) => row.hash))
+    const missing = ((await db.getAllKeys(CLIPS_STORE)) as string[]).filter((hash) => !indexed.has(hash))
+
+    const written: ClipMeta[] = []
+    for (let from = 0; from < missing.length; from += CLIP_META_BACKFILL_CHUNK) {
+      const chunk = missing.slice(from, from + CLIP_META_BACKFILL_CHUNK)
+      const clips = (await Promise.all(chunk.map((hash) => db.get(CLIPS_STORE, hash)))) as (Clip | undefined)[]
+      for (const clip of clips) {
+        if (!clip) continue
+        const meta: ClipMeta = { hash: clip.hash, bytes: clip.bytes.byteLength, lastUsedAt: clip.createdAt }
+        await db.put(CLIP_META_STORE, meta)
+        written.push(meta)
+      }
+    }
+    return written
   }
 
   /** Re-dates a Clip and moves it to the young end of the LRU order. */

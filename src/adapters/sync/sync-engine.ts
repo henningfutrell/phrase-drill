@@ -1,5 +1,5 @@
 import { mergeLibraries, type Library } from '../../domain'
-import { normalizeLibrary } from '../storage/library'
+import { buildLibrary, normalizeLibrary } from '../storage/library'
 import type { LibrarySyncClient } from './library-sync-client'
 
 /**
@@ -83,6 +83,14 @@ export interface SyncEngine {
   requestSync(): void
   /** Sync now, skipping the debounce window. */
   syncNow(): void
+  /**
+   * The whole local library was just replaced from a backup FILE (T072).
+   *
+   * Await it before writing that library, and never for an ordinary local
+   * change: it is what stops the restore from undoing itself. See
+   * `nothingIsAgreed` below for the argument.
+   */
+  libraryRestored(): Promise<void>
   snapshot(): SyncSnapshot
   subscribe(listener: (snapshot: SyncSnapshot) => void): () => void
 }
@@ -379,6 +387,44 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
     syncNow,
 
+    /**
+     * A restore from file happened. Record that this device and the server now
+     * agree on **nothing** (T072).
+     *
+     * The defect: `importAll` clears this device's Tombstones and the server
+     * keeps its own, so the next round-trip pulls them back and re-deletes the
+     * Deck she just restored. She sees the restore work and then watches it
+     * vanish — against handwritten phrases that exist nowhere else.
+     *
+     * The record that outranks a stale deletion is the one the merge already
+     * trusts over any clock: the baseline. A Tombstone deletes only a record
+     * unchanged from the last state both sides agreed on (T070), and every
+     * record a restore wrote was written by the restore — after any agreement,
+     * whatever its `updatedAt` says. So the baseline becomes an EMPTY library,
+     * and the merge then reads each restored record as written since, keeps
+     * it, and drops the Tombstone so the deletion leaves the server too. It
+     * resolves once rather than flapping.
+     *
+     * **Empty, not absent.** They are different answers and only one is right:
+     * absent means "there is no baseline to reason from", under which a
+     * Tombstone wins on its clock alone — which is the defect, not the fix.
+     * That distinction is `byId` and `rewritten` in `library-merge.ts`.
+     *
+     * No new persisted field, and no schema bump: the baseline is derived,
+     * per-device bookkeeping that is never sent anywhere
+     * (`sync-baseline-store.ts`), so nothing about her library's format
+     * changes and no existing database needs migrating. The price is one
+     * degraded round-trip — a Deck both sides hold keeps the later name and
+     * the UNION of its Phrases, which cannot lose a Phrase (docs/sync.md).
+     *
+     * It rejects if the baseline cannot be written, and the caller must let
+     * that stop the restore: a restore applied on top of an intact baseline is
+     * the defect happening.
+     */
+    async libraryRestored(): Promise<void> {
+      await deps.baseline.write(nothingIsAgreed())
+    },
+
     snapshot(): SyncSnapshot {
       return snapshot
     },
@@ -388,6 +434,16 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       return () => listeners.delete(listener)
     },
   }
+}
+
+/**
+ * A baseline that holds nothing: "this device and the server are known to have
+ * agreed on no record at all" (T072). Every record on this device therefore
+ * reads as written since the agreement, which is what a restore from file
+ * makes true of all of them at once.
+ */
+function nothingIsAgreed(): Library {
+  return buildLibrary([], [], [], 0)
 }
 
 function browserScheduler(): Scheduler {

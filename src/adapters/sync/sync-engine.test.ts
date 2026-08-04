@@ -757,3 +757,92 @@ describe('createSyncEngine — the pinned voice (T067)', () => {
     expect(h.server.pushes[0]!.voice).toEqual(VOICE)
   })
 })
+
+/**
+ * Restore from a backup file, against a server that still holds the deletion
+ * (T072).
+ *
+ * The file is the only copy of phrases that were handwritten and scanned in,
+ * so restoring one is the most deliberate act in the app. It used to undo
+ * itself: `importAll` clears this device's Tombstones, the server keeps its
+ * own, and the next round-trip pulls them back and re-deletes exactly the Deck
+ * she just restored. She watches it work and then watches it vanish.
+ *
+ * The record that stops it is the Sync Baseline, which is already causal
+ * rather than chronological (T070): a Tombstone deletes only a record
+ * unchanged from the last state both sides agreed on. After a restore nothing
+ * on this device is agreed with the server — every record in it was written by
+ * the restore, after any agreement — so the baseline is set to an EMPTY
+ * library. Empty, not absent: absent means "nothing can be shown", under which
+ * a Tombstone wins on its clock alone, which is the defect.
+ */
+describe('createSyncEngine — a restore outranks a deletion the server still holds (T072)', () => {
+  it('agrees with the server about nothing after a restore', async () => {
+    const h = createHarness({ local: library([deck('d1', 'Home')]) })
+    h.engine.start()
+    await settle()
+    expect(h.baseline.value?.decks).toHaveLength(1)
+
+    await h.engine.libraryRestored()
+
+    expect(h.baseline.value).toMatchObject({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      decks: [],
+      mixes: [],
+      tombstones: [],
+    })
+  })
+
+  it('keeps the restored Deck on a phone that has never synced, and clears the deletion off the server', async () => {
+    // A new phone: no baseline at all, and a server that holds the deletion of
+    // the very Deck the backup file carries. This is the shape of the day she
+    // gets a replacement phone and restores from Files.
+    const server = createFakeServer({
+      ...library([]),
+      tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 500 }],
+    })
+    const h = createHarness({ local: library([]), server })
+
+    await h.engine.libraryRestored()
+    h.setLocal(library([deck('d1', 'Home', 100)]))
+    h.engine.start()
+    await settle()
+
+    expect(h.local.decks.map((d) => d.id)).toEqual(['d1'])
+    expect(h.server.library?.decks.map((d) => d.id)).toEqual(['d1'])
+    expect(h.server.library?.tombstones).toEqual([])
+  })
+
+  it('keeps the restored Deck when the other device deleted it after the last agreed state', async () => {
+    // The hard case: this device and the server DID agree, and they agreed
+    // that d1 exists. The other device then deleted it. A restore that puts d1
+    // back byte for byte reads as "unchanged since the agreement", which is
+    // exactly what lets a Tombstone through (T070).
+    const h = createHarness({ local: library([deck('d1', 'Home', 100)]) })
+    h.engine.start()
+    await settle()
+    expect(h.baseline.value?.decks).toHaveLength(1)
+
+    h.server.library = { ...library([]), tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 500 }] }
+    await h.engine.libraryRestored()
+    h.setLocal(library([deck('d1', 'Home', 100)]))
+    h.engine.syncNow()
+    await settle()
+
+    expect(h.local.decks.map((d) => d.id)).toEqual(['d1'])
+    expect(h.server.library?.tombstones).toEqual([])
+  })
+
+  it('re-deletes the restored Deck when nothing tells the engine a restore happened — the defect, pinned', async () => {
+    const server = createFakeServer({
+      ...library([]),
+      tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 500 }],
+    })
+    const h = createHarness({ local: library([deck('d1', 'Home', 100)]), server })
+
+    h.engine.start()
+    await settle()
+
+    expect(h.local.decks).toEqual([])
+  })
+})

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { resetFakeIdb } from './idb.test-support'
+import { idbOperations, resetFakeIdb, triggerBlocked, triggerTerminated } from './idb.test-support'
 
 vi.mock('idb', async () => {
   const fake = await import('./idb.test-support')
@@ -8,7 +8,18 @@ vi.mock('idb', async () => {
 
 // Imported after the mock is registered, per Vitest's hoisting contract.
 const idbModule = await import('idb')
-const { openDatabase, DB_NAME, DECKS_STORE, SETTINGS_STORE, CLIPS_STORE, ERRORS_STORE, MIXES_STORE } = await import('./database')
+const {
+  openDatabase,
+  databaseTrouble,
+  DB_NAME,
+  DECKS_STORE,
+  SETTINGS_STORE,
+  CLIPS_STORE,
+  CLIP_META_STORE,
+  ERRORS_STORE,
+  MIXES_STORE,
+  TOMBSTONES_STORE,
+} = await import('./database')
 
 /**
  * Fixture: a v1 database, as it would sit on a real device today — no
@@ -216,5 +227,111 @@ describe('openDatabase v3 -> v4 migration (T059: saved Mixes)', () => {
       updatedAt: 2,
     })
     expect(db.objectStoreNames.contains(MIXES_STORE)).toBe(true)
+  })
+})
+
+describe('openDatabase v5 -> v6 migration (T072: the upgrade may not load the clip cache)', () => {
+  beforeEach(() => {
+    resetFakeIdb()
+  })
+
+  /**
+   * Fixture: a v5 database as it sits on her phone before this build — every
+   * store except `clipMeta`, with real decks and a warm clip cache. The clip
+   * cache is the whole point: it is modelled at ~890 MB at a full library
+   * (docs/scale.md §1), and reading it whole inside a versionchange
+   * transaction is an out-of-memory crash on the launch that upgrades — and
+   * then again on every launch after it, because the upgrade retries. Her
+   * library becomes permanently unreachable, not transiently broken.
+   */
+  async function seedV5Database(): Promise<void> {
+    const v5db = await idbModule.openDB(DB_NAME, 5, {
+      upgrade(db) {
+        db.createObjectStore(DECKS_STORE, { keyPath: 'id' })
+        db.createObjectStore(SETTINGS_STORE)
+        db.createObjectStore(CLIPS_STORE, { keyPath: 'hash' })
+        db.createObjectStore(ERRORS_STORE, { keyPath: 'id' })
+        db.createObjectStore(MIXES_STORE, { keyPath: 'id' })
+        db.createObjectStore(TOMBSTONES_STORE, { keyPath: 'id' })
+      },
+    })
+    await v5db.put(DECKS_STORE, {
+      id: 'home',
+      name: 'Home',
+      phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    await v5db.put(MIXES_STORE, { id: 'm1', name: 'Mornings', deckIds: ['home'], createdAt: 3, updatedAt: 3 })
+    await v5db.put(TOMBSTONES_STORE, { id: 'gone', kind: 'deck', deletedAt: 4 })
+    await v5db.put(CLIPS_STORE, { hash: 'a', bytes: new ArrayBuffer(8), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
+    await v5db.put(CLIPS_STORE, { hash: 'b', bytes: new ArrayBuffer(4), mime: 'audio/mpeg', durationMs: 1, createdAt: 20 })
+  }
+
+  it('never reads the clip store while upgrading — not whole, and not clip by clip', async () => {
+    await seedV5Database()
+    idbOperations.length = 0
+
+    await openDatabase()
+
+    expect(idbOperations.filter((op) => op.store === CLIPS_STORE)).toEqual([])
+  })
+
+  it('adds the clipMeta store on top of a real v5 database, with every Deck, Mix, Tombstone and Clip intact', async () => {
+    await seedV5Database()
+
+    const db = await openDatabase()
+
+    expect(db.objectStoreNames.contains(CLIP_META_STORE)).toBe(true)
+    expect(await db.get(DECKS_STORE, 'home')).toEqual({
+      id: 'home',
+      name: 'Home',
+      phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    expect(await db.get(MIXES_STORE, 'm1')).toMatchObject({ name: 'Mornings' })
+    expect(await db.get(TOMBSTONES_STORE, 'gone')).toEqual({ id: 'gone', kind: 'deck', deletedAt: 4 })
+    expect((await db.getAll(CLIPS_STORE)).length).toBe(2)
+  })
+})
+
+describe('openDatabase says so when the database cannot be opened (T072)', () => {
+  beforeEach(() => {
+    resetFakeIdb()
+  })
+
+  it('reports a blocked upgrade instead of waiting forever in silence', async () => {
+    const seen: string[] = []
+    const unsubscribe = databaseTrouble.subscribe((trouble) => seen.push(trouble))
+
+    void openDatabase()
+    await Promise.resolve()
+    triggerBlocked(DB_NAME)
+
+    expect(seen).toEqual(['blocked'])
+    unsubscribe()
+  })
+
+  it('reports a connection the browser closed underneath it', async () => {
+    const seen: string[] = []
+    const unsubscribe = databaseTrouble.subscribe((trouble) => seen.push(trouble))
+
+    await openDatabase()
+    triggerTerminated(DB_NAME)
+
+    expect(seen).toEqual(['terminated'])
+    unsubscribe()
+  })
+
+  it('stops reporting to a listener that unsubscribed', async () => {
+    const seen: string[] = []
+    const unsubscribe = databaseTrouble.subscribe((trouble) => seen.push(trouble))
+    await openDatabase()
+    unsubscribe()
+
+    triggerTerminated(DB_NAME)
+
+    expect(seen).toEqual([])
   })
 })

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Clip } from './clip-cache'
-import { openDB, resetFakeIdb } from './idb.test-support'
+import { idbOperations, openDB, resetFakeIdb } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 
 vi.mock('idb', async () => {
@@ -9,8 +9,9 @@ vi.mock('idb', async () => {
 })
 
 // Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbClipCache, computeClipHash, DEFAULT_CLIP_CACHE_MAX_BYTES } = await import('./clip-cache')
-const { CLIPS_STORE, CLIP_META_STORE, DB_NAME } = await import('./database')
+const { createIndexedDbClipCache, computeClipHash, DEFAULT_CLIP_CACHE_MAX_BYTES, CLIP_META_BACKFILL_CHUNK } =
+  await import('./clip-cache')
+const { CLIPS_STORE, CLIP_META_STORE, DB_NAME, openDatabase } = await import('./database')
 
 const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
@@ -340,11 +341,98 @@ describe('createIndexedDbClipCache', () => {
       const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
 
       expect(await cache.usage()).toEqual({ bytes: 6144, clipCount: 2, maxBytes: 1_000_000 })
-      // Written down at upgrade time, not recomputed on every launch — the
-      // whole point of a separate index is that reading it never touches the
-      // audio bytes.
+      // Written down once, not recomputed on every launch — the whole point
+      // of a separate index is that reading it never touches the audio bytes.
+      // Since T072 that writing happens on the first index build after the
+      // upgrade, never inside the upgrade itself.
       const upgraded = await openDB(DB_NAME, 6)
       expect((await upgraded.getAll(CLIP_META_STORE)).length).toBe(2)
+    })
+  })
+  /**
+   * The size index over a cache that already has audio in it (T072).
+   *
+   * This used to be done inside the v5 -> v6 versionchange transaction, with
+   * one `getAll` over the whole clip store: ~890 MB at a full library
+   * (docs/scale.md §1), which on a phone is an out-of-memory kill — and the
+   * upgrade re-runs on the next launch, so it is a crashloop with her library
+   * behind it. The backfill therefore happens here, outside the upgrade, one
+   * bounded chunk at a time, and is resumable: whatever it managed last time
+   * is not done again.
+   */
+  describe('backfilling the size index outside the upgrade', () => {
+    function sizedClip(hash: string, bytes: number, createdAt = 1): Clip {
+      return { hash, bytes: new ArrayBuffer(bytes), mime: 'audio/mpeg', durationMs: 1000, createdAt }
+    }
+
+    /** Clips on disk with no index row beside them — the state a phone is in
+     * the moment the v5 -> v6 upgrade has run. */
+    async function seedUnindexedClips(clips: readonly Clip[]): Promise<void> {
+      const db = await openDatabase()
+      for (const clip of clips) await db.put(CLIPS_STORE, clip)
+    }
+
+    it('never loads the whole clip store to build the index', async () => {
+      await seedUnindexedClips([sizedClip('a', 4096), sizedClip('b', 2048)])
+      idbOperations.length = 0
+
+      await createIndexedDbClipCache({ maxBytes: 1_000_000 }).usage()
+
+      expect(idbOperations.filter((op) => op.op === 'getAll' && op.store === CLIPS_STORE)).toEqual([])
+    })
+
+    it('never holds more than one chunk of audio before writing the index rows for it', async () => {
+      const clips = Array.from({ length: CLIP_META_BACKFILL_CHUNK * 2 + 1 }, (_, i) => sizedClip(`c${i}`, 8))
+      await seedUnindexedClips(clips)
+      idbOperations.length = 0
+
+      await createIndexedDbClipCache({ maxBytes: 1_000_000 }).usage()
+
+      // The ops log, read as "how much audio was in hand at once": every run of
+      // clip reads has to be closed by the index rows for it before the next
+      // run starts. A run longer than a chunk is the whole store in memory
+      // again, which is the crash this moved out of the upgrade to avoid.
+      let run = 0
+      let longestRun = 0
+      for (const op of idbOperations) {
+        if (op.store === CLIPS_STORE && op.op === 'get') run += 1
+        if (op.store === CLIP_META_STORE && op.op === 'put') run = 0
+        longestRun = Math.max(longestRun, run)
+      }
+      expect(longestRun).toBeLessThanOrEqual(CLIP_META_BACKFILL_CHUNK)
+      expect(longestRun).toBeGreaterThan(0)
+    })
+
+    it('seeds lastUsedAt from createdAt, so the oldest audio is the first evicted', async () => {
+      await seedUnindexedClips([sizedClip('older', 400, 10), sizedClip('newer', 400, 20)])
+
+      const cache = createIndexedDbClipCache({ maxBytes: 1000, now: () => 30 })
+      await cache.put(sizedClip('fresh', 400, 30))
+
+      expect(await cache.has('older')).toBe(false)
+      expect(await cache.has('newer')).toBe(true)
+    })
+
+    it('leaves an index row that already exists exactly as it was found', async () => {
+      const indexed = createIndexedDbClipCache({ maxBytes: 1_000_000, now: () => 99 })
+      await indexed.put(sizedClip('indexed', 400, 1))
+      await seedUnindexedClips([sizedClip('unindexed', 100, 2)])
+
+      const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
+
+      expect(await cache.usage()).toEqual({ bytes: 500, clipCount: 2, maxBytes: 1_000_000 })
+      const db = await openDatabase()
+      expect(await db.get(CLIP_META_STORE, 'indexed')).toEqual({ hash: 'indexed', bytes: 400, lastUsedAt: 99 })
+    })
+
+    it('asks nothing of the clip store once every clip is indexed', async () => {
+      const cache = createIndexedDbClipCache({ maxBytes: 1_000_000 })
+      await cache.put(sizedClip('a', 400))
+      idbOperations.length = 0
+
+      await createIndexedDbClipCache({ maxBytes: 1_000_000 }).usage()
+
+      expect(idbOperations.filter((op) => op.store === CLIPS_STORE && op.op !== 'count')).toEqual([])
     })
   })
 })

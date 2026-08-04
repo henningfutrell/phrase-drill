@@ -218,6 +218,48 @@ The same field travels in a backup FILE, and restore treats it the same way:
 restore pins the file's voice if it has one and leaves the local pin alone if
 it does not.
 
+## A restore outranks a deletion the server still holds (T072)
+
+Restore from a file used to undo itself. `importAll` clears this device's
+Tombstones; the server keeps its own; the next round-trip pulls them back and
+re-deletes exactly the Deck she just restored. She sees the restore work, and
+seconds later watches it vanish — against handwritten phrases that exist
+nowhere else.
+
+It bites in the two cases she actually meets:
+
+| Situation | Why the Tombstone won |
+| --------- | --------------------- |
+| A new phone, restored from Files | No baseline at all, so nothing can be shown to have been written since — the Tombstone wins on its clock alone |
+| A phone that has not yet picked up the other device's deletion | The baseline still holds the Deck, and a restored Deck is byte-identical to it, so it reads as *unchanged since the agreement* |
+
+The fix uses the record the merge already trusts over any clock. A Tombstone
+deletes only a record unchanged from the last state both sides agreed on
+(T070) — and **every record a restore wrote was written by the restore**, after
+any agreement, whatever its `updatedAt` says. So a restore sets the baseline to
+an **empty library**: `syncEngine.libraryRestored()`, awaited *before* the
+library is written, so a baseline that could not be recorded stops the restore
+instead of letting it apply on top of an intact one.
+
+**Empty, not absent.** They are different answers and only one is right: absent
+means "there is no baseline to reason from", which is the first row of the
+table above. Empty means "we agreed on nothing", under which every local record
+reads as written since, outranks the Tombstone, and — because a Tombstone whose
+record survives is dropped — takes the deletion off the server too. It resolves
+once instead of flapping.
+
+**No new persisted field and no schema bump.** The baseline is derived,
+per-device bookkeeping in the `settings` store that is never sent anywhere, so
+nothing about the `Library` envelope changes and no existing database needs
+migrating. The price is one degraded round-trip: with an empty baseline a Deck
+both sides hold keeps the later name and the **union** of its Phrases, which
+cannot lose a Phrase.
+
+Rejected: re-dating the restored records (`updatedAt = now`), which overwrites
+timestamps that are hers and still loses to a phone whose clock is ahead; and a
+"restoredAt" field on the envelope, which is a persisted-state change to protect
+against a case the baseline already answers.
+
 ## What she sees
 
 One line on the Decks screen (`src/ui/sync-status-text.ts`). The time is
@@ -297,6 +339,12 @@ indicator is what surfaces it, and repairing the row is a server-side job.
   deletes it too (T070). The fix is a Phrase-level deletion record, which is a
   change to the persisted `Library` envelope and to every write path — not a
   merge change.
+- **A Phrase deleted on the other device between a restore and the next sync
+  comes back**, like any other Phrase deletion the other side records (row
+  above). An empty baseline widens that to Decks and Mixes on the first
+  round-trip after a restore: a deletion made elsewhere that this phone had not
+  yet seen is undone, and she has to delete it again — one tap. The trade is
+  deliberate; the other direction is her restore being undone.
 - **No conflict is surfaced to her.** The merge is silent because every
   outcome it can produce keeps her phrases; the one lossy case above is not
   reported. Reporting it would need a place to show it and a decision for her
