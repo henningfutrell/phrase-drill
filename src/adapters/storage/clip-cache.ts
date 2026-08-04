@@ -1,6 +1,6 @@
 import type { IDBPDatabase } from 'idb'
 import type { Language, PhraseRecord, Voice } from '../../domain'
-import { CLIPS_STORE, CLIP_META_STORE, openDatabase } from './database'
+import { CLIPS_STORE, CLIP_META_STORE, createDatabaseConnection } from './database'
 
 /**
  * A cached rendering of one side of one Phrase, in one voice — the on-disk
@@ -210,29 +210,19 @@ interface ClipMeta {
 export function createIndexedDbClipCache(options: ClipCacheOptions = {}): BoundedClipCache {
   const maxBytes = options.maxBytes ?? DEFAULT_CLIP_CACHE_MAX_BYTES
   const now = options.now ?? Date.now
-  let dbPromise: Promise<IDBPDatabase> | undefined
   // Insertion order is LRU order, oldest first — every touch re-inserts, so
   // the first key is always the least recently played.
   let indexPromise: Promise<Map<string, ClipMeta>> | undefined
   let totalBytes = 0
 
   /**
-   * The open database handle, opened once — **and forgotten again if the open
-   * fails (T085).** A rejected promise is still a settled promise, so a plain
-   * `??=` memoizes the failure as firmly as it memoizes success: one
-   * transient refusal (iOS killing the connection under memory pressure)
-   * became silence for the rest of the session, because every later call
-   * replayed the same rejection without ever trying again. Clearing the slot
-   * on the way out costs one retry per failure and is the difference between
-   * a bad moment and a bad session.
+   * The open database handle, opened once — **and given up again both when
+   * the open fails (T085) and when the browser closes the connection (T077).**
+   * `createDatabaseConnection` owns why. What this store loses by holding a
+   * handle it should have dropped is silence: audio is derived and can always
+   * be made again, but not until something opens the database.
    */
-  function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase().catch((error: unknown) => {
-      dbPromise = undefined
-      throw error
-    })
-    return dbPromise
-  }
+  const getDatabase = createDatabaseConnection()
 
   /**
    * The size index, read once per cache instance. Small rows only — the whole

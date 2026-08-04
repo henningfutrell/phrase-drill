@@ -347,8 +347,15 @@ function App({
               detail: 'Close the other window, then open this one again. Nothing has been lost.',
             }
           : {
+              // Not "close the app and open it again" any more (T077). Every
+              // store now drops a terminated connection and opens a fresh one
+              // on its next call, so that instruction sent her to perform a
+              // repair that has already happened — and on the app holding
+              // phrases that exist nowhere else, "close this" is the last
+              // thing to tell her. What is genuinely hers to do is the one
+              // change that was in flight when the connection died.
               message: 'This phone closed the app’s connection to your phrases.',
-              detail: 'Close the app and open it again. Anything you change before then may not be saved.',
+              detail: 'The app will open it again by itself. If a change you just made did not save, make it once more.',
             },
       )
     })

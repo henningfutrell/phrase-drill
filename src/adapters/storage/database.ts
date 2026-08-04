@@ -193,3 +193,116 @@ export function openDatabase(): Promise<IDBPDatabase> {
     },
   })
 }
+
+/**
+ * One lazily-opened, reused connection to this database — and the two ways it
+ * is given up again. Every store that opens this database holds one of these
+ * (T077); it replaces the copy of this logic each of them used to carry.
+ *
+ * **A refused open is forgotten (T085, T087).** A rejected promise is still a
+ * settled promise, so a plain `??=` remembers a refusal as firmly as a handle:
+ * one transient failure was replayed by every later call and nothing ever
+ * tried again. On the deck store, where every write is optimistic (`App.tsx`
+ * `persistLocally`), that was a session in which nothing she typed could be
+ * saved while the screen kept showing it saved.
+ *
+ * **A TERMINATED connection is forgotten too (T077).** The other half, and the
+ * one `.catch()` above cannot see: the open SUCCEEDED and the browser closed
+ * the connection afterwards — iOS reclaiming memory, the same realistic
+ * trigger arriving later. Nothing rejects, so the slot kept handing out a dead
+ * handle and every write after that moment failed against it.
+ *
+ * **Why every store forgets on one store's `terminated`.** T087 rejected a
+ * SHARED module-level handle, correctly: that couples five adapters through
+ * mutable module state and lets one store's failure invalidate another's live
+ * connection. Nothing is shared here — each call to this function owns its own
+ * slot — and the event only makes a slot EMPTY. Forgetting cannot invalidate a
+ * live connection: no handle is closed, nothing in flight is disturbed, and
+ * the cost of being wrong is one redundant `openDB`. Meanwhile `terminated` is
+ * a fact about the DATABASE, not about one adapter — the browser reclaiming
+ * this origin's storage does not pick a favourite among five connections to
+ * one database, and `databaseTrouble` carries no connection identity to pick
+ * with. So the asymmetry is: forget too widely and pay an open; forget too
+ * narrowly and four stores write to dead handles for the rest of the session.
+ *
+ * **Forgetting is a retry, not a loop.** Nothing here re-opens on its own. The
+ * next call the app makes opens again; a database that is persistently
+ * refusing rejects once per call, still reaching `persistLocally` and the T069
+ * notice, or the T083 launch screen. One refusal costs one re-open; it does
+ * not buy silence.
+ *
+ * The subscription is never released, deliberately: a store instance lives for
+ * the life of the app (the composition root makes exactly one of each), so
+ * there is no moment at which unsubscribing would be correct.
+ */
+export function createDatabaseConnection(): () => Promise<IDBPDatabase> {
+  let dbPromise: Promise<IDBPDatabase> | undefined
+
+  databaseTrouble.subscribe((trouble) => {
+    if (trouble === 'terminated') dbPromise = undefined
+  })
+
+  return function getDatabase(): Promise<IDBPDatabase> {
+    dbPromise ??= openDatabase().catch((error: unknown) => {
+      dbPromise = undefined
+      throw error
+    })
+    return dbPromise
+  }
+}
+
+/**
+ * The structural minimum of an `idb` transaction this module needs. Named
+ * rather than taking `IDBPTransaction`, whose store-name and mode parameters
+ * differ at every call site and carry nothing this function uses.
+ */
+interface TransactionLike {
+  readonly done: Promise<void>
+  abort(): void
+}
+
+/**
+ * Run `work` on `tx` and settle only when the transaction has (T077). Every
+ * explicit transaction in this adapter goes through here, because two things
+ * have to be true on EVERY failure path and were true on none of them.
+ *
+ * **`done` is marked handled once, before any work starts.** `tx.done` rejects
+ * when a transaction aborts — including the abort IndexedDB performs itself
+ * when a write is refused. On that path the `put` rejects, the caller's
+ * function throws, and `done` was left rejecting with nothing awaiting it,
+ * which on her phone reaches `error-capture.ts`'s `unhandledrejection`
+ * listener and logs a SECOND error on top of the one she was already shown —
+ * in the log Diagnostics reports. `idb` caches `done` per transaction, so the
+ * handler attached here is on the same promise the success path awaits, and
+ * the rejection still reaches the caller.
+ *
+ * **A failure aborts, rather than letting a partial write commit.** The
+ * request pipeline aborts by itself when a request fires `error`, but
+ * `DataCloneError` and `DataError` are thrown at request CREATION: no request
+ * exists, nothing fires, and the transaction auto-commits whatever it has
+ * already done. In `importAll` that is a `clear()` of all three stores plus
+ * however many Decks were written before the bad one — her library replaced by
+ * a fragment. It is unreachable from app data today (`importAll` values come
+ * from `JSON.parse`), and it is the one error class the rollback did not
+ * cover, so it is closed by this `catch` rather than by machinery of its own.
+ *
+ * The abort is best-effort: on the ordinary refused-write path the transaction
+ * is already aborting, and asking an inactive transaction to abort throws.
+ * That throw must not replace the error the caller needs to see.
+ */
+export async function runTransaction<T>(tx: TransactionLike, work: () => Promise<T>): Promise<T> {
+  void tx.done.catch(() => {})
+  try {
+    const result = await work()
+    await tx.done
+    return result
+  } catch (error) {
+    try {
+      tx.abort()
+    } catch {
+      // Already aborted, or already committed. Either way the caller's error
+      // is the one worth raising.
+    }
+    throw error
+  }
+}
