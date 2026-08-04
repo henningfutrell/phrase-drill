@@ -281,21 +281,45 @@ button:disabled {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+}
+
+/* Only visible in a render (T062): a Deck row carries two control groups —
+   reorder AND edit/delete — and beside both of them the text column fell to
+   about 140px, so an ordinary phrase broke into three or four fragments and the
+   entry line could not be scanned at all. Where both groups are present the text
+   takes the whole first line and the controls wrap under it. Draft rows have one
+   group, still fit beside the text, and are left alone. */
+.phrase-row:has(.phrase-reorder) .phrase-text {
+  flex-basis: 100%;
+}
+
+/* A phrase row is a dictionary entry, and she reads it English -> French (T062).
+   So the English leads and takes the headword treatment — roman, full ink, the
+   line the eye lands on when scanning the list for the phrase she wants.
+
+   The French is second and is NOT demoted to a gloss: it is the thing she is
+   learning, the only text on this row she will ever have to reproduce, so it
+   holds the same face and the same size and steps back by one value only
+   (--ink-soft), marked as the other language by italic — the oldest convention
+   there is for exactly that, and the same one every bilingual dictionary uses.
+
+   Script is deliberately gone from these rows. Pinyon carried the English while
+   the English was decorative; it cannot carry the French, because an accented
+   phrase at 19px in a copperplate hand is the one thing she must be able to read
+   letter by letter. Script keeps its work in deck names, titles and the
+   wordmark. */
+.phrase-english {
+  font-size: var(--text-base);
+  line-height: 1.3;
+  color: var(--ink);
 }
 
 .phrase-french {
   font-size: var(--text-base);
-  color: var(--ink);
-}
-
-/* The gloss is the one place script earns a run of ordinary prose: it is short,
-   it is never drilled from, and it is what makes the list feel handwritten. */
-.phrase-english {
-  font-family: var(--font-script);
-  font-size: var(--text-base);
+  font-style: italic;
   line-height: 1.3;
-  color: var(--ink-dim);
+  color: var(--ink-soft);
 }
 
 /* ---- Buttons ------------------------------------------------------------
