@@ -512,10 +512,15 @@ button:disabled {
   overflow: hidden;
 }
 
+/* Driven by transform, not width: a width transition lays out every frame.
+   scaleX composites. The bar is plain gilt with nothing inside it, so there is
+   nothing for the scale to distort. */
 .audio-meter-fill {
+  width: 100%;
   height: 100%;
   background: var(--gilt);
-  transition: width 400ms var(--ease-out);
+  transform-origin: left;
+  transition: transform 400ms var(--ease-out);
 }
 
 @media (prefers-reduced-motion: reduce) {

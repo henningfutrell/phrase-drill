@@ -277,7 +277,7 @@ export function SettingsScreen({
             <div
               className="audio-meter-fill"
               style={{
-                width: `${Math.min(100, Math.round((savedAudio.bytes / savedAudio.maxBytes) * 100))}%`,
+                transform: `scaleX(${Math.min(1, savedAudio.bytes / savedAudio.maxBytes)})`,
               }}
             />
           </div>
