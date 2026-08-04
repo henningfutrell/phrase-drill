@@ -19,7 +19,7 @@ import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore } from '
 import type { Voice } from './domain'
 import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
-import type { ErrorLog, LogEntry } from './adapters/diagnostics'
+import type { ErrorLog, LogEntry, NewLogEntry } from './adapters/diagnostics'
 import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/library-sync-client'
 import { createSyncEngine, type PlatformPort, type Scheduler, type SyncEngine } from './adapters/sync/sync-engine'
 import { createSyncedLibrary } from './adapters/sync/synced-library'
@@ -902,6 +902,69 @@ describe('App wired to the Drill screen', () => {
     await act(async () => click(container.querySelector('[data-testid="start-mix"]')!))
 
     expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('2 phrases')
+  })
+
+  it('wires clip-player silent failures through to the diagnostics log (T002) — a Clip missing at play time', async () => {
+    // Readiness says p1 is playable (readyIds), but createFakeClipCache's
+    // `get()` always resolves undefined regardless — exactly the gap T002
+    // is about: a Phrase readiness cleared to play, with no Clip there when
+    // playback actually asks for it. Runs through the real App composition
+    // (not a clip-player unit test — that already owns proving the adapter
+    // calls its port), so this is the one test that fails if App.tsx stops
+    // wiring clip-player's `onSilentFailure` to `errorLog.record`.
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    const clipCache = createFakeClipCache(new Set(['p1']))
+    const recorded: NewLogEntry[] = []
+    const errorLog: ErrorLog = {
+      async record(entry) {
+        recorded.push(entry)
+      },
+      async list() {
+        return []
+      },
+    }
+    // jsdom has no real media pipeline (`clip-player.test.ts`'s own note) —
+    // `new Audio()`'s play() rejects as "not implemented" by default, which
+    // would fail unlock() before the Drill ever starts. Stubbed here, not in
+    // clip-player's own tests, because this is the one place a real `Audio`
+    // element is actually constructed (App.tsx's composition root).
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    const pause = vi.spyOn(window.HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+
+    try {
+      await renderApp(
+        store,
+        createFakeSettingsStore({ voice: FAKE_VOICE }),
+        createFakeSynthClient(),
+        createFakeGenerationQueue(),
+        clipCache,
+        createFakeScanReader(),
+        errorLog,
+      )
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+      await act(async () => click(container.querySelector('[data-testid="drill-start"]')!))
+
+      // speak()'s hash lookup crosses a genuine async boundary
+      // (crypto.subtle.digest) that doesn't resolve on microtask-flushing
+      // alone (see clip-player.test.ts's `waitUntil` doc comment) — poll
+      // with real timers instead of a fixed microtask count.
+      const deadline = Date.now() + 2000
+      while (recorded.length === 0 && Date.now() < deadline) {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        })
+      }
+
+      expect(recorded.some((entry) => entry.source === 'adapter' && entry.message.startsWith('clip-player:'))).toBe(
+        true,
+      )
+    } finally {
+      play.mockRestore()
+      pause.mockRestore()
+    }
   })
 })
 
