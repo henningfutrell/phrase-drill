@@ -45,8 +45,8 @@ deleted the moment it's found, not left to expire on its own schedule.
 | POST   | `/api/tts`     | Speech for one phrase (`{text, voiceId, modelId, provider, lang}` → audio/mpeg), served from the shared Clip store when it holds it — see below. All five fields are required. | 8 KB       | 60 / 60s per session |
 | POST   | `/api/scan`    | Read handwritten phrases from an uploaded photo (image bytes → `{phrases}`). | 6 MB       | 10 / 60s per session |
 | POST   | `/api/translate` | Propose one or more Phrase Candidates translating one phrase (`{text, direction, deckName}` → `{candidates}`). | 4 KB | 30 / 60s per session |
-| GET    | `/api/library` | Fetch the stored library JSON for this user.          | —          | 30 / 60s per session |
-| PUT    | `/api/library` | Replace the stored library JSON for this user. `409 stale-client` if the body's `schemaVersion` is *lower* than the stored envelope's — see below. | 8 MB | 30 / 60s per session |
+| GET    | `/api/library` | Fetch the stored library JSON for this user. `500 library-unreadable` if the stored row will not parse as a library envelope — see below. | —          | 30 / 60s per session |
+| PUT    | `/api/library` | Replace the stored library JSON for this user, keeping the version it replaces. `409 stale-client` if the body's `schemaVersion` is *lower* than the stored envelope's — see below. | 8 MB | 30 / 60s per session |
 | \*     | anything else under `/api/` | `404 not-found`.                        | —          | —                  |
 | \*     | anything not under `/api/`  | Falls back to the built PWA (`dist/`, SPA fallback to `index.html`). | — | — |
 
@@ -61,6 +61,128 @@ server copy and resurrect every Deck she had deleted. The server refuses that
 one case and nothing else: a push at the same version or newer is accepted as
 before. The refused device keeps its changes locally and syncs once it
 updates.
+
+## The library is kept recoverable, not defended (T071)
+
+This server holds the only off-device copy of a library that cannot be
+recreated. Before T071 a `PUT` replaced it wholesale and the version it
+replaced stopped existing: `PUT {format, schemaVersion, decks: []}` — a
+client bug, a half-migrated device, a bad merge — answered `204` and the
+previous contents were gone from the last place they were. Only Render's own
+managed backup stood behind that.
+
+**What was built is recoverability, and deliberately not refusal.** Two
+reasons, and the second is the decisive one:
+
+- The server cannot judge the push. A smaller library is exactly what
+  deleting a deck looks like, and she is allowed to delete a deck. Any
+  content rule strict enough to catch the bad push also catches the real
+  one, and *a refusal she cannot get past is its own failure*.
+- The device turns an unrecognised refusal into an infinite retry.
+  `library-sync-client.ts` maps `401` → `unauthorized`, `404` →
+  `not-found`, `409` → `stale-client`, and **everything else → `network`**,
+  which the sync engine retries with backoff forever. A new refusal status
+  would therefore present to her as a sync line that says "waiting" and
+  never finishes, while everything she writes stays on the phone. That is a
+  worse failure than the one it guards, and it cannot be fixed here — it
+  needs the client to learn the status first.
+
+So every well-formed push is still accepted. What changed is that the
+version it replaces is kept:
+
+```
+library_versions (id BIGSERIAL PRIMARY KEY, library_key TEXT NOT NULL,
+                  data TEXT NOT NULL, updated_at BIGINT NOT NULL,
+                  archived_at BIGINT NOT NULL)
+```
+
+**Archiving is the store's invariant, not the route's.** It happens inside
+`libraryStore.put` (`server/db.js`), before the overwrite, so there is no
+code path — route, script, future caller — that can replace the only copy by
+forgetting a step. The two statements are deliberately unordered by any
+transaction: a crash between them leaves the previous version archived and
+the new one unwritten, which is a duplicate at worst and never a loss.
+
+**Snapshots are throttled by time, not by content**, at most one per hour
+per key. The tempting rule is "archive whenever the push shrinks the
+library", and it is worse: a bad push repeated then archives its own
+shrunken states and prunes the good one out of the retention window. An
+hourly snapshot cannot be accelerated by any push pattern at all, so the
+worst case is bounded — *up to one hour of edits lost* — whatever the client
+does. A push whose bytes are identical to what is stored archives nothing.
+
+**Retention: 72 snapshots or 32 MB per key, whichever binds first, and never
+the last one.** 72 hourly snapshots is three days of history. 32 MB is ~26
+copies of the largest library `docs/scale.md` models (1.2 MB at 10,000
+Phrases) or ~250 copies of a 1,000-Phrase one, against the deployed plan's 1
+GB — so a big library trades depth for size automatically instead of
+quietly filling the disk `clips` shares. The newest archived version is
+never a prune candidate however large it is.
+
+### Recovering a library a bad push destroyed
+
+There is no endpoint and no CLI for this yet — it is a `psql` session
+against the database (Render dashboard → the database → Connect, or
+`docker compose exec postgres psql -U phrase_drill`). Her `library_key` is
+the `users.id` of her account.
+
+```sql
+-- What is retained, newest first.
+SELECT id, updated_at, archived_at, octet_length(data) AS bytes
+FROM library_versions
+WHERE library_key = (SELECT id FROM users WHERE username = 'her-username')
+ORDER BY id DESC;
+
+-- Look before restoring: how many decks each version holds.
+SELECT id, archived_at, jsonb_array_length((data::jsonb)->'decks') AS decks
+FROM library_versions
+WHERE library_key = (SELECT id FROM users WHERE username = 'her-username')
+ORDER BY id DESC;
+
+-- Restore one. Archives the bad row on the way past, because `put`'s rule
+-- is the store's, not this statement's — so do it through the app if you
+-- can. Directly, the bad row must be preserved by hand first:
+INSERT INTO library_versions (library_key, data, updated_at, archived_at)
+SELECT library_key, data, updated_at, (extract(epoch from now()) * 1000)::bigint
+FROM libraries WHERE library_key = '<her-user-id>';
+
+UPDATE libraries
+SET data = (SELECT data FROM library_versions WHERE id = <chosen-id>),
+    updated_at = (extract(epoch from now()) * 1000)::bigint
+WHERE library_key = '<her-user-id>';
+```
+
+Then the device merges it back down on its next sync. Note the interaction
+with `AUDIT-T068` finding 1: the client's three-way merge reads "present
+only on my side, unchanged from the baseline" as *the server deleted it*, so
+a server rollback can make the phone delete newer phrases. Restoring an old
+version is the same move as the `pg_dump` restore drill, and carries the same
+hazard until that finding is fixed.
+
+### When the stored row itself will not parse
+
+`GET /api/library` used to answer `res.end(row.data)` with no validation at
+all. A row that will not parse — hand-repaired, half-restored, truncated
+upstream — came back as a `200` claiming to be a library; the device called
+`response.json()` on it, that threw, and the sync engine died for the rest of
+the session while the UI still said "syncing" (`AUDIT-T068` finding 2).
+Everything written after that stayed on the phone.
+
+It now parses and shape-checks the row before serving it — the same envelope
+test a `PUT` body must pass — and answers `500 {"error":"library-unreadable"}`
+otherwise, with an `error`-level log line carrying the key, the byte count and
+`updated_at`. `500` is the honest status (the fault is this server's) and the
+one that behaves: the device maps it to `network`, a *handled* result it
+retries, not an exception nothing catches.
+
+**The row is not repaired, deleted or overwritten by the read path.** It is
+the last copy of something even when what it is is unreadable. A `PUT` may
+still replace it — `storedSchemaVersion` answers `0` for an unparseable row,
+deliberately, so a corrupt row can never lock her out of syncing — and that
+`PUT` archives the corrupt bytes into `library_versions` on the way past.
+
+A valid response is still served byte for byte out of the stored row, not
+re-serialized, so nothing here can quietly reshape what she stored.
 
 Rate limits are in-memory, per-process token buckets (`server/rate-limiter.js`)
 — a restart resets every bucket to full; there is no distributed store to keep
@@ -119,7 +241,8 @@ stored bytes and makes no provider call at all. One table:
 
 ```
 clips (hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL, mime TEXT NOT NULL,
-       duration_ms BIGINT NOT NULL, created_at BIGINT NOT NULL)
+       duration_ms BIGINT NOT NULL, created_at BIGINT NOT NULL,
+       byte_size BIGINT)
 ```
 
 **Why.** Before this the route was a straight proxy, so the same phrase in the
@@ -157,7 +280,65 @@ pace, not a wall: the sweep drains at one Clip per second instead of dying on
 it, and it no longer pays ElevenLabs to get there.
 
 **A failed write does not fail the request.** The bytes are already generated
-and already paid for; the caller gets them, and the failure is logged.
+and already paid for; the caller gets them, and the failure is logged. The
+same is true of a failed eviction — it happens inside `clipStore.put`, whose
+errors this route already swallows and logs.
+
+### The ceiling on it (T071)
+
+As shipped, `clips` had no eviction, no TTL and no `DELETE` anywhere in
+`server/` or `scripts/`, on the *same* managed Postgres as `libraries`.
+
+**The numbers.** `docs/scale.md` §1 models ~89 KB of audio per Phrase (two
+Clips). The deployed plan is `basic-256mb` (`render.yaml`) — 1 GB of storage:
+
+| Library | Clip bytes, live set only | Share of a 1 GB disk |
+|---:|---:|---:|
+| 100 Phrases | 8.8 MB | 1% |
+| 1,000 Phrases | 86.4 MB | 8% |
+| 5,000 Phrases | 424.7 MB | 42% |
+| 10,000 Phrases | 847.8 MB | **83%** |
+
+Those are the *live* rows. Nothing removed the dead ones: the address is a
+hash of `provider|modelId|voiceId|lang|text`, so re-pinning a voice,
+correcting a phrase, or a provider model change moves every affected Clip to
+a new address and leaves the old row forever. **One voice change on a
+5,000-Phrase library is 850 MB in a 1 GB database, from a single UI action.**
+The library JSON beside it is 1.2 MB at its modelled worst.
+
+**So a bound is needed now, not later** — the failure it prevents is not
+"audio gets slow". When the disk fills, the write that starts failing is
+`libraryStore.put` → `500` → the client's `push` returns `network` → the
+engine retries forever and the sync line says "waiting". Her phrases stop
+reaching the server while the app looks healthy, and the `pg_dump` backup
+grows and slows until it fails too. Audio is derived and regenerable; the
+phrases are not. The table that can grow without limit is the one that gets
+cut.
+
+**The bound.** 300 MB, `DEFAULT_CLIP_STORE_MAX_BYTES` in `server/db.js`,
+overridable with `CLIP_STORE_MAX_BYTES`. Chosen so that it is more than
+either device's own 200 MB cache can hold (T036) — the server is never the
+smaller cache — while leaving ~65% of the disk for `libraries`,
+`library_versions`, WAL and Postgres's own overhead. Crossing it on a `put`
+evicts down to 90% of it, the same hysteresis the device's cache uses, so one
+sweep is not one delete per write.
+
+**Oldest-first, on the `created_at` the table already carried.** Least
+recently *played* is better policy and would cost a column plus a write on
+every cache hit. On the server a wrongly evicted Clip is one regeneration; on
+the device it is a drill that cannot start offline — which is why the
+device's cache is the LRU one (`docs/scale.md` §6) and this one is not.
+
+**It cannot reach `libraries`.** Every statement the Clip store issues names
+`clips` literally, and no identifier is ever interpolated, so the set of
+tables this code can touch is closed. `server/db.test.js` asserts that over
+every query the store issues under eviction, not just the ones a test
+happened to think of.
+
+`byte_size` is why the sweep is cheap: summing a narrow integer column is a
+scan of the heap tuples. `SUM(octet_length(bytes))` would detoast every Clip
+on every cache miss, and `pg_total_relation_size` does not shrink after a
+`DELETE` until `VACUUM` — using it would make the loop empty the table.
 
 ## Concurrency and retry
 
@@ -294,7 +475,8 @@ These are deliberate stopping points, not gaps someone forgot to close:
 | Var                    | Default                                                     | Meaning                                           |
 | ----------------------- | ------------------------------------------------------------ | -------------------------------------------------- |
 | `PORT`                  | `8080`                                                        | HTTP port.                                          |
-| `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `users`, `sessions`, `clips`. |
+| `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `library_versions`, `users`, `sessions`, `clips`. |
+| `CLIP_STORE_MAX_BYTES`  | `314572800` (300 MB)                                          | Ceiling on the shared Clip store; crossing it evicts oldest-first to 90%. Raise it with the database plan, never above what leaves `libraries` room. |
 | `DIST_DIR`               | `../dist` (relative to `server/`)                             | Built PWA to serve statically.               |
 | `ELEVENLABS_API_KEY`     | unset                                                         | Speech generation returns `not-configured` if unset.|
 | `ANTHROPIC_API_KEY`      | unset                                                         | Scan reading returns `not-configured` if unset.      |
@@ -317,6 +499,19 @@ documents every variable this stack reads, with safe local-only defaults;
 `CREATE TABLE IF NOT EXISTS` on every boot (`server/db.js`) — idempotent, so
 a fresh database and one that already has the tables both end up in the same
 state with no separate migration step to remember to run.
+
+T071 added one table and one column this way, and both reach the
+already-deployed database on its next restart with no manual step:
+
+- `library_versions`, plus `CREATE INDEX IF NOT EXISTS
+  library_versions_key_idx`, from `createLibraryStore(pool).init()`. No
+  existing row is read or written.
+- `clips.byte_size`, from `createClipStore(pool).init()` — the first change
+  here to need the migration shape the next paragraph describes rather than
+  a bare `CREATE TABLE`: `ALTER TABLE clips ADD COLUMN IF NOT EXISTS
+  byte_size BIGINT` followed by `UPDATE clips SET byte_size =
+  octet_length(bytes) WHERE byte_size IS NULL`. The backfill matches every
+  pre-T071 row on the first boot and nothing on every boot after it.
 
 **How a future schema change is applied to a running deployment:** this
 server has no migration runner (`node-pg-migrate`, `Flyway`, etc.) — adding
