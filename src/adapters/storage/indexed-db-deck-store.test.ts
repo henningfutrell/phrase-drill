@@ -1,16 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { openDB } from 'idb'
 import type { Deck } from '../../domain'
 import { idbDestructiveOperations, resetFakeIdb } from './idb.test-support'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
-vi.mock('idb', async () => {
-  const fake = await import('./idb.test-support')
-  return { openDB: fake.openDB }
-})
-
-// Imported after the mock is registered, per Vitest's hoisting contract.
-const { createIndexedDbDeckStore } = await import('./indexed-db-deck-store')
-const { createIndexedDbMixStore } = await import('./indexed-db-mix-store')
+import { createIndexedDbDeckStore } from './indexed-db-deck-store'
+import { createIndexedDbMixStore } from './indexed-db-mix-store'
 
 function makeDeck(overrides: Partial<Deck> = {}): Deck {
   return {
@@ -408,8 +403,7 @@ describe('createIndexedDbDeckStore', () => {
 
     // Reach into the same underlying database's settings store directly, the
     // way a settings adapter would, and confirm the export cannot see it.
-    const idbModule = await import('idb')
-    const db = await idbModule.openDB('phrase-drill', CURRENT_SCHEMA_VERSION)
+    const db = await openDB('phrase-drill', CURRENT_SCHEMA_VERSION)
     await db.put('settings', 'super-secret-anthropic-key', 'anthropicApiKey')
 
     const library = await store.exportAll()
