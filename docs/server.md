@@ -199,12 +199,19 @@ SET data = (SELECT data FROM library_versions WHERE id = <chosen-id>),
 WHERE library_key = '<her-user-id>';
 ```
 
-Then the device merges it back down on its next sync. Note the interaction
-with `AUDIT-T068` finding 1: the client's three-way merge reads "present
-only on my side, unchanged from the baseline" as *the server deleted it*, so
-a server rollback can make the phone delete newer phrases. Restoring an old
-version is the same move as the `pg_dump` restore drill, and carries the same
-hazard until that finding is fixed.
+Then the device merges it back down on its next sync. **This is safe as of
+T070** — it was not, and the warning that used to stand here said so.
+`AUDIT-T068` finding 1 was that the client's three-way merge read "present
+only on my side, unchanged from the baseline" as *the server deleted it*, so a
+rollback made the phone delete newer phrases: the documented recovery drill
+destroyed her phrases on the phone and on the server in one round-trip.
+
+T070 closed it. A Phrase is now removed only when something RECORDS that it
+was deleted; the other side's mere absence is not such a record, precisely
+because a restored server is not guaranteed to be a descendant of the baseline
+(`src/domain/library-merge.ts`, `mergePhrases`). Rolling a version back, and
+the `pg_dump` restore drill, both carry the ordinary cost instead: a Phrase
+deleted on another device comes back until it is deleted here too — one tap.
 
 ### When the stored row itself will not parse
 
