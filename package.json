@@ -12,7 +12,9 @@
     "test:mutation": "stryker run",
     "format": "prettier --write .",
     "deploy": "scripts/deploy.sh",
-    "useradd": "node scripts/useradd.mjs"
+    "useradd": "node scripts/useradd.mjs",
+    "backup": "node scripts/backup.mjs",
+    "restore-drill": "node scripts/restore-drill.mjs"
   },
   "dependencies": {
     "idb": "^8.0.3",
