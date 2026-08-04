@@ -7,6 +7,7 @@ import {
   createIndexedDbMixStore,
   createIndexedDbSettingsStore,
   createIndexedDbSyncBaselineStore,
+  databaseTrouble,
 } from './adapters/storage'
 import { createServerSynthClient } from './adapters/audio/server-synth-client'
 import { createGenerationQueue } from './adapters/audio/generation-queue'
@@ -130,6 +131,7 @@ function showApp(): void {
       errorLog={errorLog}
       syncEngine={syncEngine}
       translator={translator}
+      databaseTrouble={databaseTrouble}
     />,
   )
 }
