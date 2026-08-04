@@ -61,6 +61,13 @@ export function createLibraryStore(pool) {
  * database leak yields nothing usable). `server/session-auth.js` is the only
  * caller; it owns hashing and expiry logic, this module is SQL only, same
  * split as `createLibraryStore` above.
+ *
+ * Returns `{ init, users: { getByUsername, create }, sessions: { create,
+ * get, delete }, close }` — nested to match `createSessionAuth`'s seam
+ * (`userStore.getByUsername`, `sessionStore.create`/`get`/`delete`) name for
+ * name (T052). `server/index.js` wires `authStore.users` and
+ * `authStore.sessions` in directly; `server/auth-store-contract.test.js`
+ * pins that the names actually line up, which nothing did before.
  */
 export function createAuthStore(pool) {
   return {
@@ -84,36 +91,41 @@ export function createAuthStore(pool) {
       `)
     },
 
-    async getUserByUsername(username) {
-      const { rows } = await pool.query('SELECT id, username, password_hash AS "passwordHash", created_at AS "createdAt" FROM users WHERE username = $1', [
-        username,
-      ])
-      if (rows.length === 0) return null
-      return { id: rows[0].id, username: rows[0].username, passwordHash: rows[0].passwordHash, createdAt: Number(rows[0].createdAt) }
+    users: {
+      async getByUsername(username) {
+        const { rows } = await pool.query(
+          'SELECT id, username, password_hash AS "passwordHash", created_at AS "createdAt" FROM users WHERE username = $1',
+          [username],
+        )
+        if (rows.length === 0) return null
+        return { id: rows[0].id, username: rows[0].username, passwordHash: rows[0].passwordHash, createdAt: Number(rows[0].createdAt) }
+      },
+
+      /** Throws (Postgres's own unique-violation, code `23505`) on a duplicate username — an existing account is an error, never a silent overwrite. */
+      async create({ id, username, passwordHash, createdAt }) {
+        await pool.query('INSERT INTO users (id, username, password_hash, created_at) VALUES ($1, $2, $3, $4)', [id, username, passwordHash, createdAt])
+      },
     },
 
-    /** Throws (Postgres's own unique-violation, code `23505`) on a duplicate username — an existing account is an error, never a silent overwrite. */
-    async createUser({ id, username, passwordHash, createdAt }) {
-      await pool.query('INSERT INTO users (id, username, password_hash, created_at) VALUES ($1, $2, $3, $4)', [id, username, passwordHash, createdAt])
-    },
+    sessions: {
+      async create(tokenHash, userId, createdAt, expiresAt) {
+        await pool.query('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)', [
+          tokenHash,
+          userId,
+          createdAt,
+          expiresAt,
+        ])
+      },
 
-    async createSession(tokenHash, userId, createdAt, expiresAt) {
-      await pool.query('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)', [
-        tokenHash,
-        userId,
-        createdAt,
-        expiresAt,
-      ])
-    },
+      async get(tokenHash) {
+        const { rows } = await pool.query('SELECT user_id AS "userId", expires_at AS "expiresAt" FROM sessions WHERE token_hash = $1', [tokenHash])
+        if (rows.length === 0) return null
+        return { userId: rows[0].userId, expiresAt: Number(rows[0].expiresAt) }
+      },
 
-    async getSession(tokenHash) {
-      const { rows } = await pool.query('SELECT user_id AS "userId", expires_at AS "expiresAt" FROM sessions WHERE token_hash = $1', [tokenHash])
-      if (rows.length === 0) return null
-      return { userId: rows[0].userId, expiresAt: Number(rows[0].expiresAt) }
-    },
-
-    async deleteSession(tokenHash) {
-      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash])
+      async delete(tokenHash) {
+        await pool.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash])
+      },
     },
 
     async close() {
