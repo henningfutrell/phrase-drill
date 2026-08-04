@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApp } from './app.js'
 import { createLibraryStore, createClipStore } from './db.js'
+import { fakeLibraryPool, fakeClipPool } from './pool.test-support.js'
 import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
@@ -113,69 +114,14 @@ function fetchAnthropicTranslateOk(candidates) {
   }
 }
 
-/** In-memory stand-in for a `pg` pool, same shape `db.test.js` uses — see its own comment. */
-function fakePool() {
-  let tableCreated = false
-  const rows = new Map()
-  return {
-    async query(text, params = []) {
-      const sql = text.trim()
-      if (sql.startsWith('CREATE TABLE')) {
-        tableCreated = true
-        return { rows: [] }
-      }
-      if (sql.startsWith('SELECT')) {
-        if (!tableCreated) throw new Error('relation "libraries" does not exist')
-        const row = rows.get(params[0])
-        return { rows: row ? [{ data: row.data, updatedAt: row.updatedAt }] : [] }
-      }
-      if (sql.startsWith('INSERT')) {
-        if (!tableCreated) throw new Error('relation "libraries" does not exist')
-        const [key, data, updatedAt] = params
-        rows.set(key, { data, updatedAt })
-        return { rows: [] }
-      }
-      throw new Error(`fakePool: unrecognized query: ${sql}`)
-    },
-    async end() {},
-  }
-}
-
-/** Same idea as `fakePool`, for the `clips` table (T063). */
-function fakeClipPool() {
-  let tableCreated = false
-  const rows = new Map()
-  return {
-    async query(text, params = []) {
-      const sql = text.trim()
-      if (sql.startsWith('CREATE TABLE')) {
-        tableCreated = true
-        return { rows: [] }
-      }
-      if (!tableCreated) throw new Error('relation "clips" does not exist')
-      if (sql.startsWith('SELECT')) {
-        const row = rows.get(params[0])
-        return { rows: row ? [{ bytes: row.bytes, mime: row.mime, durationMs: row.durationMs }] : [] }
-      }
-      if (sql.startsWith('INSERT')) {
-        const [hash, bytes, mime, durationMs, createdAt] = params
-        if (!rows.has(hash)) rows.set(hash, { bytes, mime, durationMs, createdAt })
-        return { rows: [] }
-      }
-      throw new Error(`fakeClipPool: unrecognized query: ${sql}`)
-    },
-    async end() {},
-  }
-}
-
 async function newLibraryStore() {
-  const store = createLibraryStore(fakePool())
+  const store = createLibraryStore(fakeLibraryPool())
   await store.init()
   return store
 }
 
-async function newClipStore() {
-  const store = createClipStore(fakeClipPool())
+async function newClipStore(options) {
+  const store = createClipStore(fakeClipPool(), options)
   await store.init()
   return store
 }
@@ -750,6 +696,150 @@ describe('server app (integration, fake upstreams)', () => {
         body: Buffer.alloc(9 * 1024 * 1024, 1),
       })
       expect(res.status).toBe(413)
+    })
+
+    /**
+     * T071, against AUDIT-T068 finding 10: the stored library was replaced
+     * wholesale with no prior version kept, so a client bug or a
+     * half-migrated device could push an empty envelope and destroy the only
+     * off-device copy.
+     *
+     * The defence built is **recoverability, not refusal**. The server cannot
+     * tell a bug from her genuinely deleting a deck, and — decisively — the
+     * deployed client maps every status it does not recognise to `network`
+     * and retries it forever (`library-sync-client.ts`), so a new refusal
+     * status would present as a sync that says "waiting" and never
+     * completes. That is finding 2's silent death, bought with finding 10's
+     * money. So every well-formed push is still accepted, and the version it
+     * replaced is kept.
+     */
+    async function putLibrary(body, token = VALID_TOKEN) {
+      return fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    }
+
+    function library(decks, extra = {}) {
+      return {
+        format: 'phrase-drill-library',
+        schemaVersion: 6,
+        exportedAt: 1,
+        decks: decks.map((id) => ({ id, name: id, phrases: [], createdAt: 1, updatedAt: 1 })),
+        mixes: [],
+        tombstones: [],
+        ...extra,
+      }
+    }
+
+    it('keeps the replaced version when a push would destroy the stored library', async () => {
+      await boot()
+      expect((await putLibrary(library(['d1', 'd2']))).status).toBe(204)
+
+      // The bad push: a valid envelope carrying nothing. Accepted, 204.
+      expect((await putLibrary(library([], { exportedAt: 2 }))).status).toBe(204)
+
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect((await get.json()).decks).toEqual([])
+
+      // ...and what it destroyed is still on the server, recoverable.
+      const versions = await libraryStore.versions(SUB)
+      expect(versions.length).toBe(1)
+      expect(JSON.parse(versions[0].data).decks.map((d) => d.id)).toEqual(['d1', 'd2'])
+    })
+
+    it('never lets one key see or restore another key’s archived versions', async () => {
+      await boot()
+      await putLibrary(library(['d1']))
+      await putLibrary(library(['d2'], { exportedAt: 2 }))
+      await putLibrary(library(['other']), OTHER_TOKEN)
+
+      expect((await libraryStore.versions(SUB)).length).toBe(1)
+      expect(await libraryStore.versions(OTHER_SUB)).toEqual([])
+    })
+
+    /**
+     * The other half of the same rule: a defence that cannot be got past is
+     * its own failure. She deletes a deck, that push shrinks the library, and
+     * it must land — no refusal, no confirmation step she cannot reach, and
+     * the deletion must survive a re-read.
+     */
+    it('accepts a legitimate deletion and keeps it deleted', async () => {
+      await boot()
+      expect((await putLibrary(library(['keep', 'bin']))).status).toBe(204)
+
+      const afterDelete = library(['keep'], { exportedAt: 2, tombstones: [{ id: 'bin', kind: 'deck', deletedAt: 5 }] })
+      expect((await putLibrary(afterDelete)).status).toBe(204)
+
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(get.status).toBe(200)
+      expect(await get.json()).toEqual(afterDelete)
+    })
+
+    it('accepts a deletion that empties the library, however many times it is repeated', async () => {
+      await boot()
+      await putLibrary(library(['d1', 'd2']))
+      for (const exportedAt of [2, 3]) {
+        expect((await putLibrary(library([], { exportedAt }))).status).toBe(204)
+      }
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect((await get.json()).decks).toEqual([])
+    })
+
+    /**
+     * T071, against AUDIT-T068 finding 10's second half. `res.end(row.data)`
+     * streamed the stored TEXT back unvalidated; the device called
+     * `response.json()` on a 200, it threw, and the sync engine died for the
+     * whole session while the UI still said "syncing".
+     *
+     * 500 is the honest answer — the fault is the server's — and the client
+     * already maps it to `network`, which is a *handled* result it retries,
+     * not an exception. The row itself is the last copy, so it is neither
+     * deleted nor overwritten here.
+     */
+    it('answers 500 library-unreadable instead of streaming back a stored row that will not parse', async () => {
+      await boot()
+      const corrupt = '{"format":"phrase-drill-library","schemaVersion":6,"decks":['
+      await libraryStore.put(SUB, corrupt, Date.now())
+
+      const res = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(res.status).toBe(500)
+      expect(await res.json()).toEqual({ error: 'library-unreadable' })
+
+      // Still there, byte for byte — the read path never repairs, deletes or
+      // rewrites the only copy it has.
+      expect((await libraryStore.get(SUB)).data).toBe(corrupt)
+    })
+
+    it('answers 500 library-unreadable for a stored row that parses but is not a library envelope', async () => {
+      await boot()
+      await libraryStore.put(SUB, JSON.stringify({ hello: 'world' }), Date.now())
+
+      const res = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(res.status).toBe(500)
+      expect(await res.json()).toEqual({ error: 'library-unreadable' })
+    })
+
+    it('logs the unreadable row as an error, so it is visible without waiting for her to report it', async () => {
+      await boot()
+      await libraryStore.put(SUB, 'not json at all', Date.now())
+      await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+
+      expect(logger.lines.some((line) => line.includes('"level":"error"') && line.includes('unreadable'))).toBe(true)
+    })
+
+    it('still lets a client replace a corrupt stored row, and archives the corrupt bytes first', async () => {
+      await boot()
+      await libraryStore.put(SUB, 'not json at all', Date.now())
+
+      // `storedSchemaVersion` answers 0 for an unparseable row, deliberately,
+      // so a corrupt row can never lock her out of syncing (T060). The
+      // corrupt bytes are still the only record of what went wrong, so they
+      // go into the history rather than being dropped on the floor.
+      expect((await putLibrary(library(['d1']))).status).toBe(204)
+      const versions = await libraryStore.versions(SUB)
+      expect(versions[0].data).toBe('not json at all')
     })
   })
 

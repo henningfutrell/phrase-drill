@@ -1,50 +1,18 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
-import { createLibraryStore, createAuthStore, createClipStore, waitForDatabase, extractPassword, sslConfigFor } from './db.js'
-
-/**
- * A minimal stand-in for a `pg` `Pool`: real enough to exercise
- * `createLibraryStore`'s SQL (an idempotent `CREATE TABLE IF NOT EXISTS`, a
- * keyed `SELECT`, an upsert `INSERT ... ON CONFLICT`) without a live
- * Postgres. `server/app.test.js` and the live `docker compose` verification
- * are what prove the real driver and a real database agree with this
- * fake's behaviour.
- */
-function fakePool() {
-  let tableCreated = false
-  const rows = new Map()
-  const queries = []
-
-  return {
-    queries,
-    async query(text, params = []) {
-      queries.push({ text, params })
-      const sql = text.trim()
-
-      if (sql.startsWith('CREATE TABLE')) {
-        tableCreated = true
-        return { rows: [] }
-      }
-
-      if (sql.startsWith('SELECT')) {
-        if (!tableCreated) throw new Error('relation "libraries" does not exist')
-        const [key] = params
-        const row = rows.get(key)
-        return { rows: row ? [{ data: row.data, updatedAt: row.updatedAt }] : [] }
-      }
-
-      if (sql.startsWith('INSERT')) {
-        if (!tableCreated) throw new Error('relation "libraries" does not exist')
-        const [key, data, updatedAt] = params
-        rows.set(key, { data, updatedAt })
-        return { rows: [] }
-      }
-
-      throw new Error(`fakePool: unrecognized query: ${sql}`)
-    },
-    async end() {},
-  }
-}
+import {
+  createLibraryStore,
+  createAuthStore,
+  createClipStore,
+  waitForDatabase,
+  extractPassword,
+  sslConfigFor,
+  LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS,
+  LIBRARY_VERSION_MAX_COUNT,
+  LIBRARY_VERSION_MAX_BYTES,
+  DEFAULT_CLIP_STORE_MAX_BYTES,
+} from './db.js'
+import { fakeLibraryPool as fakePool, fakeClipPool } from './pool.test-support.js'
 
 describe('createLibraryStore (Postgres)', () => {
   it('creates its table idempotently, on init, before any read', async () => {
@@ -54,8 +22,11 @@ describe('createLibraryStore (Postgres)', () => {
     await store.init()
     await store.init() // a second boot against an existing schema must not throw
 
-    expect(pool.queries.filter((q) => q.text.trim().startsWith('CREATE TABLE')).length).toBe(2)
-    expect(pool.queries[0].text).toContain('IF NOT EXISTS')
+    // Two tables now: `libraries` and its version history (`library_versions`, T071).
+    const creates = pool.queries.filter((q) => q.text.trim().startsWith('CREATE TABLE'))
+    expect(creates.length).toBe(4)
+    expect(creates.every((q) => q.text.includes('IF NOT EXISTS'))).toBe(true)
+    expect(creates.some((q) => q.text.includes('library_versions'))).toBe(true)
   })
 
   it('returns null for a key with no stored library', async () => {
@@ -115,46 +86,152 @@ describe('createLibraryStore (Postgres)', () => {
 })
 
 /**
- * A minimal stand-in for a `pg` `Pool` covering `clips` (T063) — enough to
- * exercise `createClipStore`'s SQL without a live Postgres. The real driver
- * maps `bytea` to a `Buffer` in both directions, which is what this fake
- * stores and returns.
+ * T071, against AUDIT-T068 finding 10. `put` was an unconditional upsert, so
+ * the row it replaced stopped existing anywhere. This is the recovery half of
+ * the fix: the previous version is archived *by the store*, not by a route
+ * that has to remember to, so there is no code path that overwrites the only
+ * copy without keeping it.
+ *
+ * Retention is time-based on purpose. A content-aware trigger ("archive when
+ * the push shrinks") sounds better and is worse: a repeated bad push then
+ * archives its own shrunken states and prunes the good one out. A snapshot no
+ * more often than once an hour cannot be accelerated by any push pattern, so
+ * the worst case is bounded at "lose up to an hour of edits", whatever the
+ * client does.
  */
-function fakeClipPool() {
-  let tableCreated = false
-  const rows = new Map()
-  const queries = []
+describe('createLibraryStore — version history (T071)', () => {
+  const KEY = 'sub-1'
 
-  return {
-    queries,
-    async query(text, params = []) {
-      queries.push({ text, params })
-      const sql = text.trim()
-
-      if (sql.startsWith('CREATE TABLE')) {
-        tableCreated = true
-        return { rows: [] }
-      }
-      if (!tableCreated) throw new Error('relation "clips" does not exist')
-
-      if (sql.startsWith('SELECT')) {
-        const row = rows.get(params[0])
-        return { rows: row ? [{ bytes: row.bytes, mime: row.mime, durationMs: row.durationMs }] : [] }
-      }
-
-      if (sql.startsWith('INSERT')) {
-        const [hash, bytes, mime, durationMs, createdAt] = params
-        // Mirrors `ON CONFLICT (hash) DO NOTHING`: the first write for a
-        // content address wins and later ones are silently no-ops.
-        if (!rows.has(hash)) rows.set(hash, { bytes, mime, durationMs, createdAt })
-        return { rows: [] }
-      }
-
-      throw new Error(`fakeClipPool: unrecognized query: ${sql}`)
-    },
-    async end() {},
+  async function newStore() {
+    const pool = fakePool()
+    const store = createLibraryStore(pool)
+    await store.init()
+    return { pool, store }
   }
-}
+
+  it('archives nothing on the first put — there is no previous version to keep', async () => {
+    const { store } = await newStore()
+    await store.put(KEY, '{"v":1}', 1, { now: 0 })
+
+    expect(await store.versions(KEY)).toEqual([])
+  })
+
+  it('archives the replaced version, newest first, with when it was archived', async () => {
+    const { store } = await newStore()
+    await store.put(KEY, '{"v":1}', 1, { now: 0 })
+    await store.put(KEY, '{"v":2}', 2, { now: 10_000 })
+
+    const versions = await store.versions(KEY)
+    expect(versions.length).toBe(1)
+    expect(versions[0].data).toBe('{"v":1}')
+    expect(versions[0].updatedAt).toBe(1)
+    expect(versions[0].archivedAt).toBe(10_000)
+    expect(typeof versions[0].id).toBe('number')
+  })
+
+  it('does not archive again within the snapshot interval, so a flood of pushes cannot flush the history', async () => {
+    const { store } = await newStore()
+    await store.put(KEY, '{"v":0}', 0, { now: 0 })
+    for (let i = 1; i <= 200; i += 1) {
+      await store.put(KEY, `{"v":${i}}`, i, { now: i })
+    }
+
+    const versions = await store.versions(KEY)
+    expect(versions.length).toBe(1)
+    // The one kept is the state before the flood started — the thing worth recovering.
+    expect(versions[0].data).toBe('{"v":0}')
+  })
+
+  it('takes a fresh snapshot once the interval has passed', async () => {
+    const { store } = await newStore()
+    await store.put(KEY, '{"v":0}', 0, { now: 0 })
+    await store.put(KEY, '{"v":1}', 1, { now: 1 })
+    await store.put(KEY, '{"v":2}', 2, { now: LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS })
+
+    expect((await store.versions(KEY)).map((v) => v.data)).toEqual(['{"v":1}', '{"v":0}'])
+  })
+
+  it('archives nothing when the pushed bytes are identical to what is stored', async () => {
+    const { store } = await newStore()
+    await store.put(KEY, '{"v":1}', 1, { now: 0 })
+    await store.put(KEY, '{"v":1}', 2, { now: LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS * 5 })
+
+    expect(await store.versions(KEY)).toEqual([])
+  })
+
+  it('prunes to the newest LIBRARY_VERSION_MAX_COUNT versions', async () => {
+    const { store } = await newStore()
+    const total = LIBRARY_VERSION_MAX_COUNT + 5
+    for (let i = 0; i <= total; i += 1) {
+      await store.put(KEY, `{"v":${i}}`, i, { now: i * LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS })
+    }
+
+    const versions = await store.versions(KEY)
+    expect(versions.length).toBe(LIBRARY_VERSION_MAX_COUNT)
+    expect(versions[0].data).toBe(`{"v":${total - 1}}`)
+  })
+
+  it('prunes on total archived bytes too, so a large library cannot fill the disk this table shares with clips', async () => {
+    const pool = fakePool()
+    const store = createLibraryStore(pool, { versionMaxBytes: 400 })
+    await store.init()
+
+    const big = (i) => `{"v":${i},"pad":"${'x'.repeat(100)}"}`
+    for (let i = 0; i <= 12; i += 1) {
+      await store.put(KEY, big(i), i, { now: i * LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS })
+    }
+
+    const versions = await store.versions(KEY)
+    const bytes = versions.reduce((sum, v) => sum + Buffer.byteLength(v.data), 0)
+    expect(bytes).toBeLessThanOrEqual(400)
+    expect(versions.length).toBeGreaterThan(0)
+    // Byte budget bit before the count cap did.
+    expect(versions.length).toBeLessThan(LIBRARY_VERSION_MAX_COUNT)
+  })
+
+  it('never prunes the only archived version, however large it is', async () => {
+    const pool = fakePool()
+    const store = createLibraryStore(pool, { versionMaxBytes: 10 })
+    await store.init()
+
+    await store.put(KEY, `{"pad":"${'x'.repeat(1_000)}"}`, 1, { now: 0 })
+    await store.put(KEY, '{"v":2}', 2, { now: LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS })
+
+    expect((await store.versions(KEY)).length).toBe(1)
+  })
+
+  it('defaults the per-key history budget well under the database plan’s disk', async () => {
+    // 1 GB of Postgres storage on `basic-256mb` (render.yaml), shared with
+    // `clips`. 32 MB of history is ~26 copies of the largest library
+    // docs/scale.md models (1.2 MB at 10,000 Phrases) and ~250 copies of a
+    // 1,000-Phrase one — recovery depth that costs 3% of the disk.
+    expect(LIBRARY_VERSION_MAX_BYTES).toBe(32 * 1024 * 1024)
+    expect(LIBRARY_VERSION_MAX_COUNT).toBe(72)
+    expect(LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS).toBe(60 * 60 * 1000)
+  })
+
+  it('keeps each key’s history to itself', async () => {
+    const { store } = await newStore()
+    await store.put('sub-a', '{"a":1}', 1, { now: 0 })
+    await store.put('sub-a', '{"a":2}', 2, { now: 10 })
+    await store.put('sub-b', '{"b":1}', 1, { now: 0 })
+
+    expect((await store.versions('sub-a')).map((v) => v.data)).toEqual(['{"a":1}'])
+    expect(await store.versions('sub-b')).toEqual([])
+  })
+
+  it('archives before it overwrites, so a crash between the two keeps the old copy rather than losing both', async () => {
+    const { pool, store } = await newStore()
+    await store.put(KEY, '{"v":1}', 1, { now: 0 })
+    pool.queries.length = 0
+    await store.put(KEY, '{"v":2}', 2, { now: 10_000 })
+
+    const archive = pool.queries.findIndex((q) => q.text.includes('INSERT INTO library_versions'))
+    const overwrite = pool.queries.findIndex((q) => q.text.includes('INSERT INTO libraries'))
+    expect(archive).toBeGreaterThanOrEqual(0)
+    expect(archive).toBeLessThan(overwrite)
+  })
+})
 
 describe('createClipStore (Postgres, T063)', () => {
   const BYTES = Buffer.from([0xff, 0xfb, 0x90, 0x00])
@@ -213,6 +290,107 @@ describe('createClipStore (Postgres, T063)', () => {
     await createClipStore(pool).close()
 
     expect(end).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * T071, against AUDIT-T068 finding 12. `clips` had no eviction, no TTL and no
+ * `DELETE` anywhere in the codebase, on the same 1 GB managed Postgres as
+ * `libraries`. Audio is derived and regenerable; her phrases are not, so the
+ * table that can grow must be the one that gets cut — and it must be provably
+ * unable to cut the other one.
+ */
+describe('createClipStore — the growth bound (T071)', () => {
+  const clip = (hash, size, createdAt) => ({
+    hash,
+    bytes: Buffer.alloc(size, 1),
+    mime: 'audio/mpeg',
+    durationMs: 250,
+    createdAt,
+  })
+
+  it('adds byte_size idempotently and backfills rows written before it existed', async () => {
+    const pool = fakeClipPool()
+    const store = createClipStore(pool)
+
+    await store.init()
+    await store.init()
+
+    // The deployed database already has `clips` (T063) with no `byte_size`.
+    // The change has to reach it on a redeploy with no manual step, which is
+    // `ADD COLUMN IF NOT EXISTS` plus a backfill that matches nothing the
+    // second time — docs/server.md "Schema: creation and change".
+    const alters = pool.queries.filter((q) => q.text.includes('ALTER TABLE clips'))
+    expect(alters.length).toBe(2)
+    expect(alters[0].text).toContain('ADD COLUMN IF NOT EXISTS')
+    expect(pool.queries.some((q) => q.text.includes('SET byte_size = octet_length(bytes)'))).toBe(true)
+  })
+
+  it('stores nothing extra and evicts nothing while under the ceiling', async () => {
+    const pool = fakeClipPool()
+    const store = createClipStore(pool, { maxBytes: 1_000 })
+    await store.init()
+
+    await store.put(clip('a', 100, 1))
+    await store.put(clip('b', 100, 2))
+
+    expect(await store.get('a')).not.toBeNull()
+    expect(await store.get('b')).not.toBeNull()
+    expect(pool.queries.some((q) => q.text.trim().startsWith('DELETE'))).toBe(false)
+  })
+
+  it('evicts oldest-first down to 90% of the ceiling once a put crosses it', async () => {
+    const pool = fakeClipPool()
+    const store = createClipStore(pool, { maxBytes: 1_000 })
+    await store.init()
+
+    for (let i = 0; i < 11; i += 1) await store.put(clip(`clip-${i}`, 100, i))
+
+    expect(await store.totalBytes()).toBeLessThanOrEqual(900)
+    // Oldest-first, on the `created_at` the table already carried. Least
+    // recently *played* would be better policy and costs a write on every
+    // cache hit plus a column; on the server a wrongly evicted clip is one
+    // regeneration, not an offline drill that cannot start, so it does not
+    // earn that. The device's own cache is the LRU one (docs/scale.md §6).
+    expect(await store.get('clip-0')).toBeNull()
+    expect(await store.get('clip-10')).not.toBeNull()
+  })
+
+  it('keeps evicting across more rows than one sweep reads', async () => {
+    const pool = fakeClipPool()
+    const store = createClipStore(pool, { maxBytes: 1_000, evictBatchSize: 3 })
+    await store.init()
+
+    for (let i = 0; i < 40; i += 1) await store.put(clip(`clip-${i}`, 100, i))
+
+    expect(await store.totalBytes()).toBeLessThanOrEqual(900)
+    expect(await store.get(`clip-39`)).not.toBeNull()
+  })
+
+  it('never issues a statement naming any table but clips', async () => {
+    const pool = fakeClipPool()
+    const store = createClipStore(pool, { maxBytes: 200 })
+    await store.init()
+    for (let i = 0; i < 10; i += 1) await store.put(clip(`clip-${i}`, 100, i))
+    await store.get('clip-9')
+
+    // The one guarantee that matters: her phrases are in `libraries` and
+    // `library_versions` on this same instance, and nothing this store can be
+    // driven to do reaches them. No identifier here is ever interpolated, so
+    // the set of tables it can name is closed and this assertion is total.
+    for (const { text } of pool.queries) {
+      expect(text).not.toMatch(/librar/i)
+      expect(text).not.toMatch(/\busers\b|\bsessions\b/i)
+    }
+    expect(pool.queries.some((q) => q.text.trim().startsWith('DELETE FROM clips'))).toBe(true)
+  })
+
+  it('defaults the ceiling to a number that leaves the library room on the deployed plan', async () => {
+    // `basic-256mb` (render.yaml) is 1 GB of storage. docs/scale.md §1 models
+    // ~89 KB per Phrase (2 Clips), so 300 MB is ~3,400 Phrases of audio —
+    // more than either device can hold (200 MB ceiling, T036) — and leaves
+    // ~65% of the disk for `libraries`, `library_versions`, WAL and overhead.
+    expect(DEFAULT_CLIP_STORE_MAX_BYTES).toBe(300 * 1024 * 1024)
   })
 })
 
