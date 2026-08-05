@@ -27,22 +27,65 @@ type FakeAudioElement = AudioElementLike & {
   emit(type: string): void
   playCalls: number
   pauseCalls: number
+  /** Records each call in order, e.g. `['play', 'pause', 'revoke']`, so tests can assert ordering. */
+  callLog: string[]
+  /** Simulates the browser deciding the real, decoded length of the current source. */
+  loadMetadata(durationSeconds: number): void
 }
 
-/** A fake `<audio>` element — no real media pipeline in jsdom, per AGENTS.md. */
+/**
+ * A fake `<audio>` element — no real media pipeline in jsdom, per AGENTS.md.
+ * Models the two real-element behaviours the adapter's bugs hid behind an
+ * inert fake: reassigning `src` while a `play()` is still pending aborts
+ * that pending promise (the resource-selection algorithm restarting, per the
+ * HTML media spec), and `duration`/`loadedmetadata` exist and reset on a new
+ * source until the fake is told otherwise via `loadMetadata()`.
+ */
 function fakeAudioElement(overrides: { play?: () => Promise<void>; pause?: () => void } = {}): FakeAudioElement {
   const listeners: Record<string, Array<() => void>> = {}
+  let srcValue = ''
+  let pendingPlayReject: ((error: Error) => void) | null = null
+  let durationValue = NaN
+  const callLog: string[] = []
   const el: FakeAudioElement = {
-    src: '',
+    get src() {
+      return srcValue
+    },
+    set src(value: string) {
+      if (pendingPlayReject) {
+        const reject = pendingPlayReject
+        pendingPlayReject = null
+        const abort = new Error('The operation was aborted.')
+        abort.name = 'AbortError'
+        reject(abort)
+      }
+      srcValue = value
+      durationValue = NaN // a fresh source has no decoded metadata yet
+    },
+    get duration() {
+      return durationValue
+    },
     playCalls: 0,
     pauseCalls: 0,
     listeners,
+    callLog,
     play: () => {
       el.playCalls += 1
-      return overrides.play ? overrides.play() : Promise.resolve()
+      callLog.push('play')
+      if (overrides.play) return overrides.play()
+      return new Promise<void>((resolve, reject) => {
+        pendingPlayReject = reject
+        queueMicrotask(() => {
+          if (pendingPlayReject === reject) {
+            pendingPlayReject = null
+            resolve()
+          }
+        })
+      })
     },
     pause: () => {
       el.pauseCalls += 1
+      callLog.push('pause')
       overrides.pause?.()
     },
     addEventListener(type: string, listener: () => void) {
@@ -54,6 +97,10 @@ function fakeAudioElement(overrides: { play?: () => Promise<void>; pause?: () =>
     },
     emit(type: string) {
       for (const l of [...(listeners[type] ?? [])]) l()
+    },
+    loadMetadata(durationSeconds: number) {
+      durationValue = durationSeconds
+      el.emit('loadedmetadata')
     },
   }
   return el
@@ -549,8 +596,138 @@ describe('createClipPlayer', () => {
       player.cancel()
       await done
 
-      expect(element.pauseCalls).toBe(1)
+      // Two pause() calls, and both are load-bearing: cancel()'s own
+      // (safe-when-idle, covers the case nothing was playing) plus finish()'s
+      // (the actual stop-playback fix — see the pacing/lifecycle describe
+      // block below). Pausing an already-paused element is harmless.
+      expect(element.pauseCalls).toBe(2)
       expect(revokeObjectURL).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('pacing and lifecycle defects (the reported "plays everything at random times" bug)', () => {
+    it('pauses the element when the duration+slack backstop wins the race against ended — a live bug: nothing today stops playback there', async () => {
+      const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+      const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 10 }) })
+      const element = fakeAudioElement()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], slackMs: 10 })
+
+      const done = player.speak('Bonjour', 'fr-FR')
+      await waitUntil(() => element.playCalls > 0)
+      // ended never fires; only the backstop timeout resolves this.
+      await done
+
+      expect(element.pauseCalls).toBeGreaterThanOrEqual(1)
+    })
+
+    it('pauses the element before revoking its blob URL, not after — the source must not be yanked while still in use', async () => {
+      const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+      const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 10 }) })
+      const order: string[] = []
+      const element = fakeAudioElement({ pause: () => order.push('pause') })
+      revokeObjectURL.mockImplementation(() => order.push('revoke'))
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], slackMs: 10 })
+
+      const done = player.speak('Bonjour', 'fr-FR')
+      await waitUntil(() => element.playCalls > 0)
+      await done
+
+      expect(order.indexOf('pause')).toBeGreaterThanOrEqual(0)
+      expect(order.indexOf('revoke')).toBeGreaterThan(order.indexOf('pause'))
+    })
+
+    it('paces itself off the real decoded duration (loadedmetadata), not the fabricated bytes-based estimate', async () => {
+      // The server's durationMs is bytes÷16 assuming 128kbps, never checked
+      // against a real ElevenLabs call. Here it is deliberately wrong — far
+      // too short — the way a misjudged bitrate would make it wrong on a
+      // real clip. The real, decoded duration (via loadedmetadata) must win.
+      const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+      const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 5 }) }) // bogus: 5ms
+      const element = fakeAudioElement()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], slackMs: 20 })
+
+      const done = player.speak('Bonjour', 'fr-FR')
+      await waitUntil(() => element.playCalls > 0)
+      element.loadMetadata(0.08) // real duration: 80ms — the true length ElevenLabs actually produced
+
+      let settled = false
+      void done.then(() => (settled = true))
+      // Past the bogus estimate's own backstop (5 + 20 = 25ms) — if the
+      // adapter were still trusting durationMs, this would already be
+      // resolved and the clip would have been cut off mid-word.
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      expect(settled).toBe(false)
+
+      // ended never fires — only the real-duration backstop (80 + 20 = 100ms
+      // from when loadedmetadata fired) resolves this.
+      await done
+      expect(settled).toBe(true)
+    })
+
+    it('pads the fallback backstop well beyond the raw estimate when loadedmetadata never fires — a tight backstop is the bug being fixed', async () => {
+      const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+      const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 50 }) })
+      const element = fakeAudioElement()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE], slackMs: 20 })
+
+      const done = player.speak('Bonjour', 'fr-FR')
+      await waitUntil(() => element.playCalls > 0)
+      // loadedmetadata never fires — a broken/unusual element.
+
+      let settled = false
+      void done.then(() => (settled = true))
+      // Past the naive durationMs+slack (50+20=70ms) that today's code uses
+      // as the ONLY backstop — proving the fallback is padded rather than
+      // firing exactly there.
+      await new Promise((resolve) => setTimeout(resolve, 90))
+      expect(settled).toBe(false)
+
+      await done
+      expect(settled).toBe(true)
+    })
+
+    it('cancels an attempt still in the async cache lookup — cancel() must not be a silent no-op before the element is ever touched', async () => {
+      const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+      const cache = fakeClipCache({ [hash]: fakeClip({ hash, durationMs: 1000 }) })
+      const element = fakeAudioElement()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE] })
+
+      const done = player.speak('Bonjour', 'fr-FR')
+      // Cancel synchronously, before the cache lookups (real IndexedDB round
+      // trips in production) have had any chance to resolve — the window
+      // `stopCurrent = finish` used to leave uncovered.
+      player.cancel()
+      await done
+
+      expect(element.playCalls).toBe(0)
+      expect(createObjectURL).not.toHaveBeenCalled()
+    })
+
+    it('leaves no listener, timer, or URL from a superseded speak() alive when a new one starts without an explicit cancel()', async () => {
+      const hashFirst = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Un' })
+      const hashSecond = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Deux' })
+      const cache = fakeClipCache({
+        [hashFirst]: fakeClip({ hash: hashFirst, durationMs: 60_000 }),
+        [hashSecond]: fakeClip({ hash: hashSecond, durationMs: 60_000 }),
+      })
+      const element = fakeAudioElement()
+      const player = createClipPlayer({ element, clipCache: cache, voices: [VOICE] })
+
+      const first = player.speak('Un', 'fr-FR')
+      await waitUntil(() => element.playCalls > 0)
+
+      // A second speak() starts without cancel() ever being called — e.g.
+      // the drill advancing a step on its own. The first attempt's listener
+      // must not survive to catch a later, unrelated `ended`.
+      const second = player.speak('Deux', 'fr-FR')
+      await first // superseding must resolve the superseded speak(), not hang it
+      await waitUntil(() => element.playCalls > 1)
+
+      element.emit('ended') // must resolve ONLY the second attempt
+      await second
+
+      expect(revokeObjectURL).toHaveBeenCalledTimes(2)
+      expect(element.playCalls).toBe(2)
     })
   })
 })
