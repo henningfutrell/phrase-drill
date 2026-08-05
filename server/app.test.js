@@ -75,6 +75,22 @@ function fetchThatFailsWith(status) {
 }
 
 /**
+ * A well-framed 200 whose body is too short to be a real clip — the shape
+ * defect 2 (F6 audit) has zero defense against today: no minimum-size floor,
+ * no checksum, no MP3 validity check anywhere between the provider response
+ * and `clipStore.put`, which is `ON CONFLICT (hash) DO NOTHING` (`server/db.js`)
+ * and so serves whatever landed first, forever.
+ */
+function fetchElevenLabsTruncated(byteLength) {
+  const impl = async () => {
+    impl.calls += 1
+    return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(byteLength) }
+  }
+  impl.calls = 0
+  return impl
+}
+
+/**
  * The fake ElevenLabs upstream, counting its own calls. `calls` is the whole
  * point of T063: the shared Clip store exists so that the same phrase in the
  * same voice is paid for once, on any device, ever — and the only way to
@@ -314,6 +330,29 @@ describe('server app (integration, fake upstreams)', () => {
       expect(res.status).toBe(402)
       expect(await res.json()).toEqual({ error: 'quota' })
       expect(res.headers.get('retry-after')).toBe(null)
+    })
+
+    // Defect 2 (F6 audit): a short body must not be cached as a complete
+    // clip. Proven by the second request below still reaching the provider
+    // — nothing was ever stored under the hash for the caller to replay.
+    it('rejects an implausibly short clip body with 422, and does not cache it', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsTruncated(40) })
+
+      const first = await fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: ttsBody(),
+      })
+      expect(first.status).toBe(422)
+      expect(await first.json()).toEqual({ error: 'unreadable' })
+
+      const second = await fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: ttsBody(),
+      })
+      expect(second.status).toBe(422)
+      expect(elevenLabsUpstream.calls).toBe(2)
     })
 
     it('enforces the per-key rate limit, and says how long to wait', async () => {

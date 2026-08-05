@@ -3,11 +3,26 @@ import { withRetry } from '../retry.js'
 const API_URL = 'https://api.elevenlabs.io/v1/text-to-speech'
 
 /**
- * MP3 bytes per millisecond at ElevenLabs' default output format
- * (128 kbps = 16,000 bytes/s = 16 bytes/ms) — the same estimate the device
- * adapter used to make; it moves here with the call itself.
+ * The output format requested from ElevenLabs, and the divisor the duration
+ * estimate below assumes — kept side by side on purpose, so the two can never
+ * drift apart silently (F6 audit, defect 1).
+ *
+ * `output_format=mp3_44100_128` is 128 kbps CBR MP3: 128,000 bits/s ÷ 8 =
+ * 16,000 bytes/s = 16 bytes/ms. This used to be *unrequested* — `callOnce`
+ * sent no `output_format` at all, and 16 bytes/ms only happened to be right
+ * because it is ElevenLabs' documented default when the parameter is
+ * omitted. A tier change, an account setting, or an API revision moving that
+ * default would have silently made every clip's duration wrong, with nothing
+ * to detect it. Asking for it by name makes the bitrate the estimate assumes
+ * the bitrate that was actually requested — a contract, not a coincidence.
+ *
+ * **Not part of the Clip content address.** `computeClipHash`
+ * (`../clip-hash.js`) is `provider|modelId|voiceId|lang|text` — the wire
+ * format requested for one call is not the content being addressed, and
+ * folding it in would orphan every clip already stored under the old hash.
  */
-const MP3_BYTES_PER_MS_AT_128KBPS = 16
+const OUTPUT_FORMAT = 'mp3_44100_128'
+const MP3_BYTES_PER_MS_AT_128KBPS = 16 // must match OUTPUT_FORMAT above
 
 /**
  * The only module that holds `ELEVENLABS_API_KEY` or names ElevenLabs'
@@ -27,7 +42,11 @@ export function createElevenLabsProvider({ apiKey, fetchImpl = fetch, queue, ret
         withRetry(() => callOnce({ apiKey, fetchImpl, text, voiceId, modelId }), {
           retries,
           baseMs: backoffMs,
-          isRetryable: (err) => err.kind === 'quota',
+          // 'network' covers both a transport failure reaching ElevenLabs and
+          // a failure reading its response body (F6 audit, defect 3) — both
+          // are transient by nature, unlike 'not-configured' (a bad key) or
+          // an unrecognized non-ok status, neither of which a retry can fix.
+          isRetryable: (err) => err.kind === 'quota' || err.kind === 'network',
         }),
       )
     },
@@ -37,7 +56,7 @@ export function createElevenLabsProvider({ apiKey, fetchImpl = fetch, queue, ret
 async function callOnce({ apiKey, fetchImpl, text, voiceId, modelId }) {
   let response
   try {
-    response = await fetchImpl(`${API_URL}/${voiceId}`, {
+    response = await fetchImpl(`${API_URL}/${voiceId}?output_format=${OUTPUT_FORMAT}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'xi-api-key': apiKey },
       body: JSON.stringify({ text, model_id: modelId }),
@@ -56,7 +75,19 @@ async function callOnce({ apiKey, fetchImpl, text, voiceId, modelId }) {
     throw providerError('network', `ElevenLabs responded ${response.status}`)
   }
 
-  const bytes = Buffer.from(await response.arrayBuffer())
+  // The read, not just the request, must be inside error handling (F6 audit,
+  // defect 3): a mid-stream truncation surfaces here, after a response that
+  // looked entirely fine at the HTTP level. Left outside, it used to reject
+  // with no `.kind`, fall through `statusForProviderError`'s `default: 502`,
+  // and never retry — though it is exactly the transient failure `withRetry`
+  // exists for. Same 'network' kind as a transport failure above, so it gets
+  // the same, now-retryable, treatment.
+  let bytes
+  try {
+    bytes = Buffer.from(await response.arrayBuffer())
+  } catch {
+    throw providerError('network', 'network error reading ElevenLabs response body')
+  }
   return { bytes, durationMs: Math.round(bytes.byteLength / MP3_BYTES_PER_MS_AT_128KBPS) }
 }
 
