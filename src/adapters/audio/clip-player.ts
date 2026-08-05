@@ -11,10 +11,25 @@ import { createSystemClock } from './system-clock'
  */
 export interface AudioElementLike {
   src: string
+  /**
+   * The real, decoded length of the current source in seconds — `NaN` (or
+   * any non-finite value) until the browser has parsed enough of it to
+   * know. Read once `loadedmetadata` fires; see `speak()`'s pacing doc
+   * comment for why this replaces `clip.durationMs` as the primary signal.
+   * Optional so a structural fake that never models it (elsewhere in this
+   * codebase, standing in for the real `<audio>` element in unrelated
+   * tests) still satisfies this interface — `speak()` treats an absent
+   * `duration` the same as a non-finite one and falls back to the estimate.
+   */
+  readonly duration?: number
   play(): Promise<void>
   pause(): void
-  addEventListener(type: 'ended', listener: () => void, options?: { once?: boolean }): void
-  removeEventListener(type: 'ended', listener: () => void): void
+  addEventListener(
+    type: 'ended' | 'loadedmetadata',
+    listener: () => void,
+    options?: { once?: boolean },
+  ): void
+  removeEventListener(type: 'ended' | 'loadedmetadata', listener: () => void): void
 }
 
 /**
@@ -40,6 +55,22 @@ export const UNLOCK_SOURCE_FOR_TEST = SILENT_UNLOCK_SOURCE
 
 /** Added to `clip.durationMs` before the `ended`-race times out (T019 §4 ob.3). */
 const DEFAULT_SLACK_MS = 750
+
+/**
+ * How much further the *pre-metadata* backstop is padded beyond
+ * `clip.durationMs + slackMs`, as a multiple of `slackMs`, when
+ * `loadedmetadata` never arrives at all (see `speak()`). `clip.durationMs`
+ * is `server/providers/elevenlabs-client.js`'s `bytes ÷ 16` guess at
+ * 128kbps — never checked against a real ElevenLabs response — so treating
+ * it as trustworthy pacing was the root cause of clips being cut off
+ * mid-word. Once real metadata arrives this padding is dropped entirely in
+ * favour of the true, decoded duration; this multiplier only matters for
+ * the rare case a browser never fires `loadedmetadata` for a source it is
+ * in fact playing. A backstop that fires early is the bug being fixed here
+ * — firing a few seconds late in that rare case costs nothing a Drill
+ * user notices; firing early costs the end of every word.
+ */
+const FALLBACK_BACKSTOP_SLACK_MULTIPLIER = 4
 
 /**
  * How long `unlock()` waits for `element.play()` before giving up on it
@@ -304,13 +335,38 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
     },
 
     async speak(text: string, lang: Language): Promise<void> {
+      // Tear down whatever this shared element is still doing for a
+      // previous speak() before starting a new one — a fresh call must
+      // never inherit another attempt's listener, timer, or blob URL (the
+      // "stale ended listener cross-fires on a later, unrelated clip"
+      // defect). `stopCurrent` is the single hook both this and `cancel()`
+      // use, at every stage of an attempt's life — see below.
+      stopCurrent?.()
+
+      // Cancellable from THIS line, not from after the awaits below. Those
+      // awaits are real IndexedDB round trips (`findCachedClipHash`,
+      // `clipCache.get`); a Skip/Stop landing in that window used to cancel
+      // nothing, because `stopCurrent = finish` was assigned only after
+      // they settled. `stopCurrent` now points at this closure for the
+      // entire gap, and gets replaced by the real `finish` once there is
+      // something to finish.
+      let cancelledEarly = false
+      stopCurrent = () => {
+        cancelledEarly = true
+        stopCurrent = null
+      }
+
       // Resolved per side, not per Phrase: each of the French and the
       // English plays in the best voice IT has audio in. The two can differ
       // in the rare half-generated case, and audio in two voices is a better
       // answer than silence in one.
       const hash = await findCachedClipHash((h) => clipCache.has(h), voices, lang, text)
       const clip = hash ? await clipCache.get(hash) : undefined
+
+      if (cancelledEarly) return // cancel() fired, or a newer speak() superseded this one, during the lookup
+
       if (!clip) {
+        stopCurrent = null
         onMissingClip?.({ text, lang })
         // Never the phrase text — that is her data, not this log's (redact.ts
         // only strips known secrets, not free text). `lang` is enough for a
@@ -326,20 +382,51 @@ export function createClipPlayer(deps: ClipPlayerDeps): ClipPlayer {
       const url = URL.createObjectURL(new Blob([clip.bytes], { type: clip.mime }))
       await new Promise<void>((resolve) => {
         let settled = false
+        let timer: ReturnType<typeof setTimeout>
+
         const finish = (): void => {
           if (settled) return
           settled = true
           element.removeEventListener('ended', onEnded)
+          element.removeEventListener('loadedmetadata', onLoadedMetadata)
           clearTimeout(timer)
           if (stopCurrent === finish) stopCurrent = null
+          // Stop the element BEFORE revoking its source. `finish()` used to
+          // do neither in the backstop-timeout case — it cleared the timer
+          // and moved the Drill on while the element kept playing, which is
+          // the reported "plays everything at random times… audio is out of
+          // sync" symptom. Revoking is what actually frees the resource, so
+          // it still happens — just never before the element has been told
+          // to stop reading from it.
+          element.pause()
           URL.revokeObjectURL(url)
           resolve()
         }
         const onEnded = (): void => finish()
 
+        // `loadedmetadata` gives the real, decoded length once the browser
+        // has it — the ground truth `clip.durationMs` was never checked
+        // against (see `FALLBACK_BACKSTOP_SLACK_MULTIPLIER`'s doc comment).
+        // Once it arrives, replace whatever backstop is pending with a
+        // tight one built from that truth instead of the estimate. Ignored
+        // if the reported duration is unusable (e.g. `Infinity` for some
+        // streamed sources) — the estimate-based backstop stays armed.
+        const onLoadedMetadata = (): void => {
+          const duration = element.duration
+          if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
+            clearTimeout(timer)
+            timer = setTimeout(finish, duration * 1000 + slackMs)
+          }
+        }
+
         stopCurrent = finish
         element.addEventListener('ended', onEnded, { once: true })
-        const timer = setTimeout(finish, clip.durationMs + slackMs)
+        element.addEventListener('loadedmetadata', onLoadedMetadata, { once: true })
+        // Provisional backstop, live only until `loadedmetadata` (almost
+        // always near-immediate) replaces it above. Padded well beyond the
+        // estimate rather than trusting it outright — see
+        // `FALLBACK_BACKSTOP_SLACK_MULTIPLIER`.
+        timer = setTimeout(finish, clip.durationMs + slackMs * FALLBACK_BACKSTOP_SLACK_MULTIPLIER)
         element.src = url
         element.play().then(
           () => {
