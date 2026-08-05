@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { computeDrillReadiness } from './drill-readiness'
-import type { ClipCache } from '../storage/clip-cache'
+import { computeClipHash, type ClipCache } from '../storage/clip-cache'
 import type { GenerationQueue } from './generation-queue'
 import type { Voice } from '../../domain'
 import type { Phrase } from '../../domain'
@@ -137,5 +137,57 @@ describe('computeDrillReadiness', () => {
 
     expect(online.online).toBe(true)
     expect(offline.online).toBe(false)
+  })
+
+  /**
+   * The defect this exists to close: a clip a running drill still needs can
+   * be evicted mid-run by the very generation sweep this function kicks off.
+   * `computeDrillReadiness` already knows exactly which clip hashes the run
+   * will need — this asserts it hands that working set to the cache so it can
+   * be spared for the run's duration.
+   */
+  describe('protecting the running drill\'s working set', () => {
+    it('protects the pinned-voice clip hashes of every ready Phrase', async () => {
+      const clipCache = fakeClipCache(['p1'])
+      clipCache.has = vi.fn().mockResolvedValue(true)
+      clipCache.protect = vi.fn()
+      const generationQueue = fakeQueue()
+
+      await computeDrillReadiness(PHRASES, { clipCache, generationQueue, voice: VOICE })
+
+      const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
+      const enHash = await computeClipHash({ ...VOICE, lang: 'en-US', text: 'Hello' })
+      expect(clipCache.protect).toHaveBeenCalledTimes(1)
+      expect(clipCache.protect).toHaveBeenCalledWith(new Set([frHash, enHash]))
+    })
+
+    it('protects nothing when no Phrase is ready — releasing whatever a previous drill protected', async () => {
+      const clipCache = fakeClipCache([])
+      clipCache.protect = vi.fn()
+      const generationQueue = fakeQueue()
+
+      await computeDrillReadiness(PHRASES, { clipCache, generationQueue, voice: VOICE })
+
+      expect(clipCache.protect).toHaveBeenCalledWith(new Set())
+    })
+
+    it('protects nothing when no voice is pinned', async () => {
+      const clipCache = fakeClipCache(['p1'])
+      clipCache.protect = vi.fn()
+      const generationQueue = fakeQueue()
+
+      await computeDrillReadiness(PHRASES, { clipCache, generationQueue, voice: null })
+
+      expect(clipCache.protect).toHaveBeenCalledWith(new Set())
+    })
+
+    it('does not throw when the cache offers no protect() — an older fake, or a cache that opts out', async () => {
+      const clipCache = fakeClipCache(['p1'])
+      const generationQueue = fakeQueue()
+
+      await expect(
+        computeDrillReadiness(PHRASES, { clipCache, generationQueue, voice: VOICE }),
+      ).resolves.toBeDefined()
+    })
   })
 })

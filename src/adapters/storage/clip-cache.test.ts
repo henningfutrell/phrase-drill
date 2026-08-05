@@ -320,6 +320,74 @@ describe('createIndexedDbClipCache', () => {
       expect(await cache.readyPhraseIds(phrases, [VOICE])).toEqual(new Set(['p2']))
     })
 
+    /**
+     * The defect this exists to close: `computeDrillReadiness` enqueues
+     * generation for the whole unready remainder of the library the moment a
+     * drill starts, and keeps running for the length of the drill. Every
+     * `put()` from that sweep can evict LRU-first, and `has()` — the
+     * readiness question — deliberately does not refresh `lastUsedAt`. So a
+     * Phrase the running drill has not reached yet can carry a stale
+     * timestamp and be evicted while the drill that needs it is still going.
+     * `protect()` is the fix: the running drill's own working set is spared.
+     */
+    describe('protect()', () => {
+      it('spares a protected hash from LRU eviction even though it is the oldest', async () => {
+        const cache = createIndexedDbClipCache({ maxBytes: 1000, now: ticking() })
+        await cache.put(sizedClip('a', 400))
+        await cache.put(sizedClip('b', 400))
+        cache.protect?.(['a'])
+
+        await cache.put(sizedClip('c', 400))
+
+        expect(await cache.has('a')).toBe(true)
+        expect(await cache.has('b')).toBe(false)
+        expect(await cache.has('c')).toBe(true)
+        expect((await cache.usage()).bytes).toBeLessThanOrEqual(1000)
+      })
+
+      it('still makes progress, evicting into the protected set, when it alone exceeds the ceiling', async () => {
+        const cache = createIndexedDbClipCache({ maxBytes: 1000, now: ticking() })
+        await cache.put(sizedClip('a', 400)) // oldest
+        await cache.put(sizedClip('b', 400))
+        await cache.put(sizedClip('x', 200)) // never protected
+        cache.protect?.(['a', 'b'])
+
+        // A Mix large enough to fill the cache on its own must not deadlock
+        // eviction or make this put() throw — protection is best-effort, and
+        // it must still lose to the ceiling rather than break it. The
+        // unprotected 'x' goes first (pass 1); only once that is not enough
+        // does eviction reach into the protected set, oldest-first (pass 2).
+        await cache.put(sizedClip('c', 400))
+
+        expect((await cache.usage()).bytes).toBeLessThanOrEqual(900)
+        expect(await cache.has('x')).toBe(false) // unprotected: spent before the working set
+        expect(await cache.has('a')).toBe(false) // protected, but oldest — gives way once 'x' alone isn't enough
+        expect(await cache.has('b')).toBe(true) // protected, and younger — still spared
+        expect(await cache.has('c')).toBe(true) // the clip just written is never evicted
+      })
+
+      it('replaces the previously protected set rather than accumulating it', async () => {
+        const cache = createIndexedDbClipCache({ maxBytes: 1000, now: ticking() })
+        await cache.put(sizedClip('b', 300)) // oldest — ends up the ACTIVE protected set
+        await cache.put(sizedClip('a', 300)) // protected by drill 1, then superseded
+        await cache.put(sizedClip('x', 300)) // never protected
+
+        cache.protect?.(['a']) // drill 1's working set
+        cache.protect?.(['b']) // drill 2 starts and supersedes it — 'a' is freed, 'b' is now protected
+
+        await cache.put(sizedClip('c', 300)) // one eviction reaches target (900)
+
+        // Distinguishes a real replace from two other wrong implementations:
+        // - a no-op `protect()` would evict 'b' (the true LRU-oldest) instead.
+        // - an accumulating `protect()` (never replacing) would still treat
+        //   'a' as protected and evict 'x' instead.
+        expect(await cache.has('a')).toBe(false) // freed by the second protect() call, and oldest of what's free
+        expect(await cache.has('b')).toBe(true) // the currently active protected set
+        expect(await cache.has('x')).toBe(true) // never protected, but not needed to reach target
+        expect(await cache.has('c')).toBe(true)
+      })
+    })
+
     it('counts clips cached before the bound existed, instead of reporting an empty cache', async () => {
       // A schema-v5 database: the shape on her phone before this change — a
       // `clips` store with real audio in it and no size index beside it. Her
