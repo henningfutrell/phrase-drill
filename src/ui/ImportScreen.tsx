@@ -61,13 +61,25 @@ export function ImportScreen({
   const [draftSheet, setDraftSheet] = useState<DraftSheet>(undefined)
   const takePhotoInput = useRef<HTMLInputElement>(null)
   const chooseLibraryInput = useRef<HTMLInputElement>(null)
+  // Bumped whenever a read is started or cancelled, so a superseded read's
+  // resolution or rejection — arriving after she's already moved on — is
+  // recognized as stale and ignored rather than resurrecting or erroring on
+  // work she abandoned.
+  const readGeneration = useRef(0)
 
   function startRead(file: File) {
     const controller = new AbortController()
+    const generation = ++readGeneration.current
     setStep({ kind: 'reading', controller })
     scanReader.read(file, controller.signal).then(
-      (drafts) => setStep(drafts.length === 0 ? { kind: 'empty' } : { kind: 'review', drafts: [...drafts] }),
-      (error: ScanError) => setStep({ kind: 'failed', error }),
+      (drafts) => {
+        if (readGeneration.current !== generation) return
+        setStep(drafts.length === 0 ? { kind: 'empty' } : { kind: 'review', drafts: [...drafts] })
+      },
+      (error: ScanError) => {
+        if (readGeneration.current !== generation) return
+        setStep({ kind: 'failed', error })
+      },
     )
   }
 
@@ -79,6 +91,7 @@ export function ImportScreen({
 
   function cancelReading() {
     if (step.kind === 'reading') step.controller.abort()
+    readGeneration.current++
     setStep({ kind: 'capture' })
   }
 
