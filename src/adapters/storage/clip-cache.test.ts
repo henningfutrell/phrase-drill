@@ -386,6 +386,37 @@ describe('createIndexedDbClipCache', () => {
         expect(await cache.has('x')).toBe(true) // never protected, but not needed to reach target
         expect(await cache.has('c')).toBe(true)
       })
+
+      /**
+       * A parallel audit of this file proved `has()`-then-`get()` is a
+       * check-then-act race in general: `has('x')` can answer true and then a
+       * concurrent `put()` for something else can cross the ceiling and evict
+       * the untouched 'x' before `get('x')` runs — the same gap
+       * `clip-player.ts` has one layer up (out of this file's scope; tracked
+       * separately). Inside THIS file the closure is `protect()`, not a
+       * change to `has()`/`get()` themselves: for the one caller that matters
+       * — the running drill's own working set — `computeDrillReadiness`
+       * protects exactly the hashes it is about to ask `has()` and later
+       * `get()` about, so the race has nothing to land in. This test is the
+       * proof for that closure, not a new production change.
+       */
+      it('keeps get() answering for a protected hash after has() reports it, even when another put crosses the ceiling', async () => {
+        const cache = createIndexedDbClipCache({ maxBytes: 1000, now: ticking() })
+        await cache.put(sizedClip('a', 400))
+        cache.protect?.(['a'])
+
+        expect(await cache.has('a')).toBe(true)
+
+        // Two more puts, unrelated to 'a', cross the ceiling — the shape of
+        // the readiness sweep's own generation traffic running while a drill
+        // she is mid-playback on is still going.
+        await cache.put(sizedClip('b', 400))
+        await cache.put(sizedClip('c', 400))
+
+        const stillThere = await cache.get('a')
+        expect(stillThere).toBeDefined()
+        expect(stillThere?.hash).toBe('a')
+      })
     })
 
     it('counts clips cached before the bound existed, instead of reporting an empty cache', async () => {
