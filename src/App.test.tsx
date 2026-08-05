@@ -1,7 +1,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import App from './App'
+import App, { voiceKey } from './App'
 import type {
   Deck,
   DeckStore,
@@ -2480,6 +2480,54 @@ describe('App — a database that will not open says so (T072)', () => {
 })
 
 /**
+ * Defect 2: `databaseTrouble.subscribe` can fire `setWriteFailure` at any
+ * moment, including mid-Drill — and the notice used to render `position:
+ * fixed; top: 0` over every screen unconditionally, including the Drill,
+ * which is hands-free and read at arm's length (AGENTS.md, DrillScreen doc
+ * comment). A banner she cannot act on without touching the phone, dropped
+ * over a screen she is not looking at closely, is worse than deferring it —
+ * and the write failure itself does not touch a Drill already running off an
+ * in-memory Phrase snapshot. The warning is never dropped, only held until
+ * she is back on a screen where reading it costs her nothing she is
+ * mid-sentence on.
+ */
+describe('App — a write-failure notice waits out a running Drill', () => {
+  function notice(): HTMLElement | null {
+    return container.querySelector('[data-testid="write-failure"]')
+  }
+
+  it('does not overlay a running Drill, but shows once she stops it', async () => {
+    const trouble = createFakeDatabaseTrouble()
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    const clipCache = createFakeClipCache(new Set(['p1']))
+    await renderApp(
+      store,
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      clipCache,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      trouble,
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-start"]')!))
+    expect(container.querySelector('[data-testid="drill-running"]')).not.toBeNull()
+
+    await act(async () => trouble.report('terminated'))
+
+    expect(notice()).toBeNull()
+    expect(container.querySelector('[data-testid="drill-running"]')).not.toBeNull()
+
+    await act(async () => click(container.querySelector('[data-testid="drill-stop"]')!))
+
+    expect(notice()).not.toBeNull()
+  })
+})
+
+/**
  * A save she makes while a merge is landing (T075).
  *
  * T074 closed this race INSIDE the sync round-trip. One level up it is still
@@ -2678,5 +2726,37 @@ describe('App — a save made while a merge is landing (T075)', () => {
 
     expect(phone.store.decks.get('d1')?.name).toBe('À la maison')
     expect(storedPhrases(phone.store)).toEqual(['Bonjour', 'Bonne nuit'])
+  })
+})
+
+/**
+ * Defect 4: the `clipPlayer` memo's doc comment claims `settings.voice` is
+ * stable for a drill's duration. `reloadSettings()` (reachable mid-Drill
+ * from the `.catch()` of `recordExport` and `handleChooseVoice`'s
+ * `setVoice`) replaces the whole `settings` object unconditionally, so a
+ * background write failure that changes nothing about which voice is
+ * pinned still hands the memo a new-identity `Voice` object and rebuilds
+ * `clipPlayer` anyway. `voiceKey` is what the memo now keys on instead of
+ * `settings.voice` itself, so an equal-content reload is a no-op for it —
+ * making the comment's claim actually hold for the case that broke it.
+ */
+describe('voiceKey — a stable identity for the pinned Voice', () => {
+  it('is the same for two objects naming the same provider/model/voice', () => {
+    const a: Voice = { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }
+    const b: Voice = { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }
+    expect(a).not.toBe(b) // distinct objects, e.g. two separate settingsStore.load() reads
+    expect(voiceKey(a)).toBe(voiceKey(b))
+  })
+
+  it('differs when any part of the Voice differs', () => {
+    const base: Voice = { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }
+    expect(voiceKey(base)).not.toBe(voiceKey({ ...base, provider: 'openai' }))
+    expect(voiceKey(base)).not.toBe(voiceKey({ ...base, modelId: 'm2' }))
+    expect(voiceKey(base)).not.toBe(voiceKey({ ...base, voiceId: 'v2' }))
+  })
+
+  it('is null exactly when no voice is pinned', () => {
+    expect(voiceKey(null)).toBeNull()
+    expect(voiceKey({ provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' })).not.toBeNull()
   })
 })

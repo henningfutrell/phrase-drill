@@ -668,12 +668,16 @@ button:disabled {
 /*
  * The one alert in the app (T069): a write this phone refused.
  *
- * Fixed to the top rather than placed in the flow, because the screen under it
- * may be a Drill running full-bleed, and this is the single message she must
- * not be able to walk past. It borrows the `--danger` edge from the overdue
- * Backup card — the same visual language for the same class of fact, her work
- * not being safe — and nothing from --accent, which stays reserved for the
- * live beat and the primary action.
+ * Fixed to the top rather than placed in the flow, so it sits over whichever
+ * screen is underneath without shifting that screen's own layout — this is
+ * the single message she must not be able to walk past. Never over a running
+ * Drill, though (App.tsx: held back while `drillTarget` is set) — that
+ * screen is hands-free and read at arm's length, and a banner competing with
+ * the cadence for attention she isn't giving the phone is worse than waiting
+ * for Stop. It borrows the `--danger` edge from the overdue Backup card — the
+ * same visual language for the same class of fact, her work not being safe —
+ * and nothing from --accent, which stays reserved for the live beat and the
+ * primary action.
  */
 .write-failure {
   position: fixed;

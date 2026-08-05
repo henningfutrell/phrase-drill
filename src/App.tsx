@@ -13,6 +13,7 @@ import type {
   ScanReader,
   SpeechPort,
   Translator,
+  Voice,
 } from './domain'
 import {
   addPhrase,
@@ -97,6 +98,21 @@ const LIBRARY_UNREADABLE_NOTICE: { message: string; detail: string } = {
 const NOOP_SPEECH: SpeechPort = {
   async speak() {},
   cancel() {},
+}
+
+/**
+ * A stable identity for a pinned Voice — same provider/model/voice id, same
+ * key, regardless of which object it came off of. `settingsStore.load()`
+ * returns a fresh `Settings` object on every call, so two reads of the same
+ * stored voice are never `===`; keying the `clipPlayer` memo (below) off
+ * this instead of `settings.voice` itself is what keeps a background reload
+ * of an unchanged voice from rebuilding it. Exported only so the unit test
+ * can pin this directly — App has no seam to observe the memo itself.
+ */
+// A plain pure function, not a component; exported only for the test above.
+// eslint-disable-next-line react-refresh/only-export-components
+export function voiceKey(voice: Voice | null): string | null {
+  return voice ? `${voice.provider}|${voice.modelId}|${voice.voiceId}` : null
 }
 
 /**
@@ -264,13 +280,22 @@ function App({
   const wakeLock = useMemo(() => createWakeLockPort(), [])
   // One ClockPort for the app's lifetime — also stateless.
   const systemClock = useMemo(() => createSystemClock(), [])
-  // Rebuilt only when the pinned voice actually changes (`settings.voice`
-  // is only ever replaced, never mutated), so the same `<audio>` element
-  // keeps serving unlock() and every real Clip across Drills run under the
-  // same voice (T023's unlock-persists assumption — unverified on real iOS
-  // Safari, confirmed only in T013). `audioElement` itself is the one
-  // `index.html` attaches ahead of time (T006) — this hook never constructs
-  // its own.
+  // Rebuilt only when the pinned voice actually changes — keyed on
+  // `voiceKey(settings.voice)`, not `settings.voice` itself, so the same
+  // `<audio>` element keeps serving unlock() and every real Clip across
+  // Drills run under the same voice (T023's unlock-persists assumption —
+  // unverified on real iOS Safari, confirmed only in T013), including
+  // across a `reloadSettings()` that replaces the `settings` object
+  // (`persistLocally`'s failure path; `recordExport` and
+  // `handleChooseVoice`'s own `.catch()`) without changing which voice is
+  // actually pinned. Keying on the object itself used to rebuild on every
+  // such reload, mid-Drill included — harmless (a running Drill's
+  // `instrumentPorts` already captured the old `speech`/`clock` by value,
+  // so the new element sits idle), but the claim of stability was false
+  // for exactly the case that matters, so it is now actually true.
+  // `audioElement` itself is the one `index.html` attaches ahead of time
+  // (T006) — this hook never constructs its own.
+  const pinnedVoiceKey = voiceKey(settings.voice)
   const clipPlayer = useMemo(
     () =>
       settings.voice
@@ -288,7 +313,9 @@ function App({
             onSilentFailure: (message) => logSilentClipFailure(errorLog, message),
           })
         : null,
-    [settings.voice, clipCache, errorLog, audioElement, systemClock],
+    // Keyed on pinnedVoiceKey, not settings.voice, deliberately (see above).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pinnedVoiceKey, clipCache, errorLog, audioElement, systemClock],
   )
 
   const [sync, setSync] = useState<SyncSnapshot>(() => syncEngine.snapshot())
@@ -856,7 +883,20 @@ function App({
 
   return (
     <>
-      {writeFailure !== undefined && (
+      {/*
+       * Held back while a Drill is running (T069 refined). `databaseTrouble`
+       * and every failed write can fire at any moment, but the Drill screen
+       * is hands-free and read at arm's length (AGENTS.md) — a banner she
+       * cannot act on without picking the phone up, dropped over a screen
+       * she isn't looking closely at, competes with the cadence for nothing
+       * she can do about it mid-Rep. The failure itself never touches a
+       * Drill already running: it plays from an in-memory Phrase snapshot,
+       * untouched by a write to the deck/settings stores. `writeFailure`
+       * stays set, so the notice is never lost — it renders the moment she
+       * is back on a screen where reading it costs her nothing she is
+       * mid-sentence on (Stop, or the Drill ending on its own).
+       */}
+      {writeFailure !== undefined && drillTarget === undefined && (
         <WriteFailureNotice
           message={writeFailure.message}
           detail={writeFailure.detail}
