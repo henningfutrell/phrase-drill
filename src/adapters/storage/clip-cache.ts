@@ -363,8 +363,29 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
   }
 
   /**
-   * The two rows of one cached Clip, written — and written again once, after
-   * making room, when the device says it is full (T085).
+   * The two rows of one cached Clip, written together on ONE transaction —
+   * the mirror of `evictTo` (T078): `db.put(...)` is `idb`'s convenience
+   * form, and each call auto-commits its own transaction, so writing the
+   * audio and its index row as two separate `db.put`s left the same gap T078
+   * closed on the way out, on the way in instead. Interrupted between them —
+   * the tab killed, the phone reclaiming the app mid-generation — the audio
+   * lands with no row describing it: `has()` and `readyPhraseIds` answer from
+   * the index alone, so real, playable audio reports as not ready, is
+   * silently excluded from the drill or silently regenerated, and is never
+   * charged against the 200 MB ceiling either. It only self-heals at the next
+   * launch's `reconcileIndex`.
+   */
+  async function putClipAndMeta(db: IDBPDatabase, clip: Clip, meta: ClipMeta): Promise<void> {
+    const tx = db.transaction([CLIPS_STORE, CLIP_META_STORE], 'readwrite')
+    await runTransaction(tx, async () => {
+      await tx.objectStore(CLIPS_STORE).put(clip)
+      await tx.objectStore(CLIP_META_STORE).put(meta)
+    })
+  }
+
+  /**
+   * Written — and written again once, after making room, when the device
+   * says it is full (T085).
    *
    * A `QuotaExceededError` is the origin being full, not this cache being
    * over its own ceiling, so `evictDownToTarget` does not fire: `totalBytes`
@@ -384,6 +405,18 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
    * refusal is not about our bytes, and evicting her whole cache to keep
    * asking would be paying an unbounded price for a fixed answer. The throw
    * reaches `put`'s caller with the index untouched.
+   *
+   * **The retry is a second transaction, not a call inside the first
+   * (T085/T078 combined).** `evictTo` opens its own `db.transaction([CLIPS_STORE,
+   * CLIP_META_STORE], ...)` per Clip it removes, and a transaction cannot be
+   * asked to make room for itself — nesting one inside `putClipAndMeta`'s
+   * transaction is not an operation IndexedDB has. So a refusal aborts the
+   * write's transaction cleanly (nothing of this Clip commits), eviction runs
+   * to completion in its own transactions exactly as it does on the launch
+   * sweep, and the retry opens a fresh transaction over both stores. Every
+   * transaction this function touches still spans both stores or neither —
+   * the property this fix exists to establish — it is just not one
+   * transaction end to end.
    */
   async function writeClip(
     db: IDBPDatabase,
@@ -392,13 +425,11 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
     meta: ClipMeta,
   ): Promise<void> {
     try {
-      await db.put(CLIPS_STORE, clip)
-      await db.put(CLIP_META_STORE, meta)
+      await putClipAndMeta(db, clip, meta)
     } catch (error) {
       if (!isQuotaExceeded(error)) throw error
       await evictTo(index, Math.floor(totalBytes * EVICT_TO_FRACTION), clip.hash)
-      await db.put(CLIPS_STORE, clip)
-      await db.put(CLIP_META_STORE, meta)
+      await putClipAndMeta(db, clip, meta)
     }
   }
 
