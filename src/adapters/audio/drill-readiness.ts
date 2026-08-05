@@ -1,5 +1,5 @@
 import type { Phrase, Voice } from '../../domain'
-import type { ClipCache } from '../storage/clip-cache'
+import { findCachedClipHash, type ClipCache } from '../storage/clip-cache'
 import type { GenerationQueue } from './generation-queue'
 import { knownVoices } from './voice-catalogue'
 
@@ -56,6 +56,9 @@ export async function computeDrillReadiness(
   if (!deps.voice) {
     // Nothing to ask the cache about, and nothing to queue: a Phrase can't
     // be content-addressed without a voice, and no default is invented.
+    // Still releases whatever an earlier drill protected (T016) — a run that
+    // cannot start protects nothing.
+    deps.clipCache.protect?.(new Set())
     return {
       ready: [],
       skippedCount: phrases.length,
@@ -68,13 +71,26 @@ export async function computeDrillReadiness(
   // Every voice a Clip could be in, pinned first (T067). Asking only about
   // the pinned voice is what used to report a fully-generated library as
   // entirely unready the moment she changed her mind, and enqueue all of it.
-  const readyIds = await deps.clipCache.readyPhraseIds(phrases, knownVoices(deps.voice))
+  const voices = knownVoices(deps.voice)
+  const readyIds = await deps.clipCache.readyPhraseIds(phrases, voices)
   const ready = phrases.filter((phrase) => readyIds.has(phrase.id))
   const unready = phrases.filter((phrase) => !readyIds.has(phrase.id))
 
   if (isOnline) {
     for (const phrase of unready) deps.generationQueue.enqueue(phrase)
   }
+
+  // T016 — the defect this sweep itself creates: it queues generation for
+  // every unready Phrase for the length of the run, and every generated
+  // Clip's `put()` can evict LRU-first. `has()` (just asked, above) does not
+  // count as play, so a ready Phrase the run has not reached yet can carry a
+  // stale `lastUsedAt` and be evicted out from under a drill that still needs
+  // it. This is the one place that knows the run's exact working set —
+  // exactly the Phrases in `ready`, in the voice each one actually has a
+  // Clip in — so it hands that set to the cache rather than adding a
+  // parameter `App.tsx` would have to thread through screens that never
+  // otherwise touch the cache.
+  await protectWorkingSet(ready, voices, deps.clipCache)
 
   return {
     ready,
@@ -83,6 +99,27 @@ export async function computeDrillReadiness(
     reason: ready.length === 0 ? 'none-ready' : undefined,
     online: isOnline,
   }
+}
+
+/**
+ * Resolves each ready Phrase's actual cached hash (fr and en, in whichever
+ * offered voice it is really in) and hands the set to `clipCache.protect()`.
+ * A no-op when the cache does not offer `protect()` — optional on the port
+ * so older fakes and any cache that chooses not to protect stay valid.
+ */
+async function protectWorkingSet(ready: readonly Phrase[], voices: readonly Voice[], clipCache: ClipCache): Promise<void> {
+  if (!clipCache.protect) return
+  const has = (hash: string): Promise<boolean> => clipCache.has(hash)
+  const hashes = new Set<string>()
+  for (const phrase of ready) {
+    const [french, english] = await Promise.all([
+      findCachedClipHash(has, voices, 'fr-FR', phrase.french),
+      findCachedClipHash(has, voices, 'en-US', phrase.english),
+    ])
+    if (french) hashes.add(french)
+    if (english) hashes.add(english)
+  }
+  clipCache.protect(hashes)
 }
 
 function defaultIsOnline(): boolean {

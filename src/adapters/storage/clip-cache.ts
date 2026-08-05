@@ -78,6 +78,31 @@ export interface ClipCache {
   put(clip: Clip): Promise<void>
   has(hash: string): Promise<boolean>
   /**
+   * Marks `hashes` as the current run's working set — spared from eviction
+   * for as long as they hold that status (T016, the defect where a clip a
+   * running drill still needs could be evicted mid-run: `has()` does not
+   * count as play, so a Phrase the drill has not reached yet can carry a
+   * stale `lastUsedAt` and lose to LRU while the drill that needs it runs).
+   *
+   * **Replaces the previous call's set; never adds to it.** One active
+   * working set at a time, not a growing collection of every set ever
+   * protected — the natural call site is `computeDrillReadiness`, which runs
+   * once per drill start, so "the next drill starts" is the boundary that
+   * retires the previous one. That is also what keeps this from leaking: it
+   * is runtime-only (an in-memory `Set`, never persisted — see the
+   * IndexedDB implementation's own note on why), so the worst case of a
+   * drill that never starts another is one working set held for the rest of
+   * the session, not an unbounded one.
+   *
+   * **Best-effort, not absolute.** A protected hash still loses to the
+   * ceiling if evicting everything else was not enough — see the IndexedDB
+   * implementation's `evictTo` for why that is the only safe choice.
+   *
+   * Optional: a `ClipCache` that never calls this is simply unprotected, the
+   * behaviour every caller had before this method existed.
+   */
+  protect?(hashes: Iterable<string>): void
+  /**
    * Which of these Phrases already have both an FR and an EN clip cached in
    * ANY of `voices` — "can be drilled right now, without generating
    * anything". One call over the whole set, the question the drill-start
@@ -214,6 +239,12 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
   // the first key is always the least recently played.
   let indexPromise: Promise<Map<string, ClipMeta>> | undefined
   let totalBytes = 0
+  /**
+   * The current run's working set (T016) — see `protect()`'s doc comment on
+   * the port for the lifecycle. Never persisted: it describes what a run in
+   * *this* session needs, and a fresh session has no run in progress yet.
+   */
+  let protectedHashes = new Set<string>()
 
   /**
    * The open database handle, opened once — **and given up again both when
@@ -423,6 +454,17 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
    * mid-sweep would then roll back work that was correct and complete. Per
    * Clip, an interrupted sweep leaves a consistent smaller cache and the next
    * one carries on.
+   *
+   * **Two passes, because `protectedHashes` (T016) is best-effort, not a
+   * guarantee.** Pass one skips the running drill's working set exactly as it
+   * skips `protectedHash`; pass two drops that exemption and evicts from it
+   * too, oldest first, same as everything else. A Mix broad enough to make
+   * the working set alone exceed `target` would otherwise leave `put()`
+   * unable to make room — deadlocked against its own ceiling, or forced to
+   * throw and drop her audio outright. Losing the least-recently-played
+   * member of the set she is mid-drill on is the worse of two bad options,
+   * but the alternative is worse still: a cache that stops accepting new
+   * audio, silently, for the rest of the session.
    */
   async function evictTo(
     index: Map<string, ClipMeta>,
@@ -432,11 +474,7 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
     if (totalBytes <= target) return
     const db = await getDatabase()
 
-    for (const hash of [...index.keys()]) {
-      if (totalBytes <= target) break
-      if (hash === protectedHash) continue
-      const meta = index.get(hash)
-      if (!meta) continue
+    async function evictOne(hash: string, meta: ClipMeta): Promise<void> {
       const tx = db.transaction([CLIPS_STORE, CLIP_META_STORE], 'readwrite')
       await runTransaction(tx, async () => {
         await tx.objectStore(CLIPS_STORE).delete(hash)
@@ -444,6 +482,24 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       })
       index.delete(hash)
       totalBytes -= meta.bytes
+    }
+
+    // Pass 1: everything except the just-written clip and the working set.
+    for (const hash of [...index.keys()]) {
+      if (totalBytes <= target) return
+      if (hash === protectedHash || protectedHashes.has(hash)) continue
+      const meta = index.get(hash)
+      if (!meta) continue
+      await evictOne(hash, meta)
+    }
+
+    // Pass 2: the working set gives way too — never the just-written clip.
+    for (const hash of [...index.keys()]) {
+      if (totalBytes <= target) return
+      if (hash === protectedHash) continue
+      const meta = index.get(hash)
+      if (!meta) continue
+      await evictOne(hash, meta)
     }
   }
 
@@ -484,10 +540,26 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       await evictDownToTarget(index, clip.hash)
     },
 
+    protect(hashes: Iterable<string>): void {
+      // Replaces, never merges — see the port's doc comment for why an
+      // accumulating set is the leak that eventually defeats this entirely.
+      protectedHashes = new Set(hashes)
+    },
+
     async has(hash: string): Promise<boolean> {
       // Answered from the index, not the audio: this is the readiness sweep's
       // question, and reading the Clip to answer it deserializes an
       // ArrayBuffer nobody is going to play.
+      //
+      // **Still deliberately not a touch (T016).** `protect()` is a more
+      // precise fix than refreshing `lastUsedAt` here would have been:
+      // refreshing on `has()` would reset the age of every Phrase in the
+      // WHOLE library on every readiness sweep — including the thousands she
+      // has no intention of drilling today — degrading LRU back toward
+      // "evict whatever is oldest by wall-clock generation time" exactly as
+      // the original doc comment on the class warns. `protect()` marks only
+      // the Phrases this run will actually use, which is narrower and correct
+      // where a blanket touch-on-read would only have been narrower.
       return (await getIndex()).has(hash)
     },
 
