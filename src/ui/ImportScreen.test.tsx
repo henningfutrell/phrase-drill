@@ -28,9 +28,40 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function fakeScanReader(): { reader: ScanReader; read: ReturnType<typeof vi.fn> } {
-  const read = vi.fn<ScanReader['read']>()
-  return { reader: { read }, read }
+/**
+ * By default this fake hands back a promise that only settles when the test
+ * explicitly calls `resolveRead`/`rejectRead` — deliberately decoupled from
+ * when `read()` was called, so a test can drive a settlement that happens
+ * *after* some other UI event (a cancel) has already occurred. It also
+ * records the `AbortSignal` it was given so a test can assert whether
+ * `cancelReading` actually aborted it. A fake that only ever resolves before
+ * the events a test drives cannot express a stale-callback bug at any
+ * coverage level — this is what makes that bug expressible.
+ *
+ * Individual tests may still override `read` via `mockReturnValue` /
+ * `mockResolvedValue` / `mockRejectedValue` when they don't care about
+ * settlement timing or the signal.
+ */
+function fakeScanReader(): {
+  reader: ScanReader
+  read: ReturnType<typeof vi.fn>
+  resolveRead(drafts: DraftPhrase[]): void
+  rejectRead(error: ScanError): void
+  signalAborted(): boolean
+} {
+  const { promise, resolve, reject } = deferred<DraftPhrase[]>()
+  let signal: AbortSignal | undefined
+  const read = vi.fn<ScanReader['read']>((_image, s) => {
+    signal = s
+    return promise
+  })
+  return {
+    reader: { read },
+    read,
+    resolveRead: resolve,
+    rejectRead: reject,
+    signalAborted: () => signal?.aborted ?? false,
+  }
 }
 
 function file(name = 'photo.jpg'): File {
@@ -126,6 +157,43 @@ describe('ImportScreen — reading', () => {
     click(container.querySelector('[data-testid="scan-cancel"]'))
 
     expect(container.querySelector('[data-testid="take-photo"]')).not.toBeNull()
+  })
+
+  it('aborts the signal handed to scanReader.read when Cancel is tapped', () => {
+    const { reader, signalAborted } = fakeScanReader()
+    render(<ImportScreen decks={[]} scanReader={reader} onSave={vi.fn()} onCancel={vi.fn()} />)
+
+    chooseFile(container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement, file())
+    expect(signalAborted()).toBe(false)
+    click(container.querySelector('[data-testid="scan-cancel"]'))
+
+    expect(signalAborted()).toBe(true)
+  })
+
+  it('ignores a read that resolves after Cancel was tapped — no reappearing drafts she already discarded', async () => {
+    const { reader, resolveRead } = fakeScanReader()
+    render(<ImportScreen decks={[]} scanReader={reader} onSave={vi.fn()} onCancel={vi.fn()} />)
+
+    chooseFile(container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement, file())
+    click(container.querySelector('[data-testid="scan-cancel"]'))
+    resolveRead([{ french: 'Bonjour', english: 'Hello' }])
+    await flush()
+
+    expect(container.querySelector('[data-testid="take-photo"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="draft-row-0"]')).toBeNull()
+  })
+
+  it('ignores a read that rejects after Cancel was tapped, without surfacing an error banner for abandoned work', async () => {
+    const { reader, rejectRead } = fakeScanReader()
+    render(<ImportScreen decks={[]} scanReader={reader} onSave={vi.fn()} onCancel={vi.fn()} />)
+
+    chooseFile(container.querySelector('[data-testid="take-photo-input"]') as HTMLInputElement, file())
+    click(container.querySelector('[data-testid="scan-cancel"]'))
+    rejectRead({ kind: 'network', detail: 'offline' })
+    await flush()
+
+    expect(container.querySelector('[data-testid="take-photo"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="scan-failed"]')).toBeNull()
   })
 })
 
