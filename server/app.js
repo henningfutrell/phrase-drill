@@ -13,6 +13,28 @@ const TRANSLATE_MAX_TEXT_CHARS = 500
 const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
+ * The floor a synthesized clip's body must clear before it is trusted enough
+ * to cache (F6 audit, defect 2). There was no floor at all: no minimum size,
+ * no checksum, no MP3 validity check anywhere between what the provider
+ * returned and what `clipStore.put` wrote — and `clipStore.put` is
+ * `ON CONFLICT (hash) DO NOTHING` (`server/db.js`), so the first bytes ever
+ * stored under a hash are served forever. A response that is well-framed at
+ * the HTTP level but short on audio — a mid-stream cut, a flaky proxy, a bad
+ * client-library version — got cached as a complete clip, permanently, and
+ * every future play of that phrase came back truncated.
+ *
+ * 1,000 bytes is ~62 ms of audio at the pinned 128 kbps output format
+ * (`elevenlabs-client.js`'s `MP3_BYTES_PER_MS_AT_128KBPS`) — far short of any
+ * phrase actually worth asking for (even "Merci" spoken as fast as humanly
+ * possible runs several hundred milliseconds), but far above what a bare
+ * framing artifact or a connection cut moments in could produce. Deliberately
+ * loose: a false rejection costs her one phrase to regenerate, a missed
+ * truncation costs a permanently botched one served to every device forever
+ * — the two costs are not symmetric, so the floor errs toward under-rejecting.
+ */
+const MIN_PLAUSIBLE_CLIP_BYTES = 1_000
+
+/**
  * The highest `schemaVersion` this build will accept in a push (T082).
  *
  * **Keep this equal to `src/adapters/storage/migrations.ts`'s
@@ -241,6 +263,15 @@ export function createApp({
 
     try {
       const result = await elevenLabs.synthesize({ text, voiceId, modelId })
+      if (result.bytes.byteLength < MIN_PLAUSIBLE_CLIP_BYTES) {
+        // Thrown, not just logged: it must reach the outer catch below so
+        // this response is neither cached (the `clipStore.put` a few lines
+        // down never runs) nor served as if it were complete.
+        throw providerLikeError(
+          'unreadable',
+          `ElevenLabs returned an implausibly short body (${result.bytes.byteLength} bytes) for this text`,
+        )
+      }
       const clip = { bytes: result.bytes, mime: 'audio/mpeg', durationMs: result.durationMs }
       // A failed write must not fail the request: these bytes have already
       // been generated and paid for, and the caller wants the audio far more
@@ -537,4 +568,16 @@ function statusForProviderError(err) {
 
 function describeError(err) {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Builds an error with the same `.kind` shape the provider clients throw
+ * (`server/providers/*.js`), so a defect caught here — the short-clip floor
+ * above — is reported through the same `statusForProviderError` path as a
+ * defect the provider itself detected, rather than inventing a second one.
+ */
+function providerLikeError(kind, message) {
+  const err = new Error(message)
+  err.kind = kind
+  return err
 }
