@@ -33,6 +33,23 @@ describe('createElevenLabsProvider', () => {
     expect(init.headers['xi-api-key']).toBe('sk-secret')
   })
 
+  // Defect 1 (F6 audit): the duration estimate assumes 128 kbps MP3 only
+  // because that happens to be ElevenLabs' undocumented default when
+  // `output_format` is omitted from the request. Pin it explicitly so the
+  // bitrate the estimate assumes is the bitrate that was actually requested.
+  it('requests output_format explicitly, pinned to the bitrate the duration estimate assumes', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => new ArrayBuffer(1600),
+    })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue() })
+    await provider.synthesize({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' })
+
+    const [url] = fetchImpl.mock.calls[0]
+    expect(url).toContain('output_format=mp3_44100_128')
+  })
+
   it('estimates duration from byte length at 16 bytes/ms', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,
@@ -79,6 +96,41 @@ describe('createElevenLabsProvider', () => {
     const throwingFetch = vi.fn().mockRejectedValue(new Error('offline'))
     const provider2 = createElevenLabsProvider({ apiKey: 'k', fetchImpl: throwingFetch, queue: queue(), retries: 0 })
     await expect(provider2.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({ kind: 'network' })
+  })
+
+  // Defect 3 (F6 audit): a mid-stream truncation used to reject *outside*
+  // `callOnce`'s try/catch, with no `.kind`, so it fell through
+  // `statusForProviderError`'s `default: 502` and was never retried — though
+  // it is exactly the transient failure `withRetry` exists for.
+  it('classifies a failure reading the response body as network, not an unclassified error', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => {
+        throw new Error('premature close')
+      },
+    })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+    await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
+      kind: 'network',
+    })
+  })
+
+  it('retries a failure reading the response body, and succeeds if a later attempt reads fine', async () => {
+    let calls = 0
+    const fetchImpl = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => {
+        calls++
+        if (calls === 1) throw new Error('premature close')
+        return new ArrayBuffer(1600)
+      },
+    }))
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 1, backoffMs: 1 })
+    const result = await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })
+    expect(result.bytes.byteLength).toBe(1600)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
 
   it('runs calls through the given bounded queue, capping concurrency', async () => {
