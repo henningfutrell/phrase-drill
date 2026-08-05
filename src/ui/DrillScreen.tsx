@@ -61,6 +61,24 @@ interface LiveStep {
  * this screen must show (docs/design.md §3.1) are reconstructed by
  * intercepting the calls the player already makes through `StepPorts`,
  * rather than by changing the domain.
+ *
+ * The player replays the in-flight Step on resume: `pause()` aborts it and
+ * breaks the run loop without calling `advanceStep()`
+ * (`drill-player.ts:85-92,182-189`), and `resume()` re-enters at that same,
+ * unchanged position — so `speak()`/`wait()` is called a second time for a
+ * Step this screen already counted. A bare counter (`stepCounter += 1` on
+ * every call) took that replay for a new Step, running one ahead of the
+ * real cadence position for the rest of the Rep.
+ *
+ * The replay can't be caught by comparing the actual `Step` the domain is
+ * on: `StepPorts` never hands one across — `speak(text, lang)` and
+ * `wait(ms, signal)` carry only the fields needed to execute it, not the
+ * object itself, so there is nothing here to hold a reference to. What is
+ * available is `step.kind`, and `buildCadence` (`cadence.ts`) is a fixed,
+ * strictly alternating FR/pause/FR/pause/EN/pause/FR/pause — no two
+ * adjacent Steps in one Rep ever share a kind. So two `note()` calls in a
+ * row reporting the *same* kind, within the same Rep, can only be this
+ * replay; the cadence itself never produces that sequence.
  */
 function instrumentPorts(
   speech: SpeechPort,
@@ -70,15 +88,26 @@ function instrumentPorts(
 ): { speech: SpeechPort; clock: ClockPort } {
   let lastRepIndex = -1
   let stepCounter = 0
+  let lastKind: Step['kind'] | null = null
 
   function note(step: Step): void {
     const repIndex = getRepIndex()
     if (repIndex !== lastRepIndex) {
       lastRepIndex = repIndex
       stepCounter = 0
+      lastKind = null
     }
-    const stepIndex = stepCounter
-    stepCounter += 1
+    let stepIndex: number
+    if (step.kind === lastKind) {
+      // Two same-kind Steps in a row within one Rep never happens in the
+      // real cadence (see doc comment) — this is resume replaying the Step
+      // already counted last call. Reuse its position.
+      stepIndex = stepCounter - 1
+    } else {
+      stepIndex = stepCounter
+      stepCounter += 1
+      lastKind = step.kind
+    }
     onStep({
       beatIndex: Math.floor(stepIndex / 2),
       utterance: step.kind === 'utterance' ? { text: step.text, lang: step.lang } : undefined,
@@ -167,6 +196,15 @@ export function DrillScreen({
 }: DrillScreenProps) {
   const [phase, setPhase] = useState<Phase>({ kind: 'checking' })
   const playerRef = useRef<DrillPlayer | null>(null)
+  // Mirrors `starting` below, checked synchronously (T001 hardening). React
+  // state is only current as of the last render, so two taps landing in the
+  // same synchronous tick both read `starting` as `false` from the same
+  // render's closure — a ref is written and read outside render, so the
+  // second tap sees the first's write immediately. Not a fix for any
+  // observed symptom: a real tap is a discrete DOM event React flushes
+  // synchronously, so a phone cannot deliver two in one tick. Belt-and-
+  // braces because it costs nothing.
+  const startingRef = useRef(false)
   const [status, setStatus] = useState<DrillStatus>('stopped')
   const [repIndex, setRepIndex] = useState(0)
   const [repCount, setRepCount] = useState(0)
@@ -227,10 +265,10 @@ export function DrillScreen({
 
   async function handleStart(readyPhrases: readonly Phrase[], skippedCount: number, online: boolean) {
     // Guards against a second tap re-entering this method while the first
-    // is still awaiting unlock() (T001) — belt-and-braces alongside the
-    // button's own `disabled` below, since `starting` only takes effect
-    // after the next render.
-    if (starting) return
+    // is still awaiting unlock() (T001) — the ref is the real guard (see its
+    // doc comment); `starting`/`disabled` below is the visible half.
+    if (startingRef.current) return
+    startingRef.current = true
     setStarting(true)
     try {
       // Unlock first, inside this tap — see the `unlock` prop doc comment.
@@ -255,6 +293,12 @@ export function DrillScreen({
         },
       )
       const player = createDrillPlayer(readyPhrases, ports, { random })
+      // Not normally reachable — the guard above and the Start button only
+      // rendering in the 'start' phase mean `playerRef.current` is null here
+      // in ordinary use. Defensive: stop an old player rather than orphan it
+      // (leaving it running, silently consuming the ports) if that guard is
+      // ever wrong.
+      playerRef.current?.stop()
       playerRef.current = player
       setStatus('playing')
       setRepIndex(0)
@@ -264,6 +308,7 @@ export function DrillScreen({
       await player.start()
       syncFromPlayer()
     } finally {
+      startingRef.current = false
       setStarting(false)
     }
   }

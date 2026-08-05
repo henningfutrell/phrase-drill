@@ -305,6 +305,40 @@ describe('DrillScreen — the one-tap unlock', () => {
     expect(unlock).toHaveBeenCalledTimes(2)
   })
 
+  /**
+   * Defect 3: `starting` is React state, read from the render closure. Two
+   * taps dispatched in the same synchronous tick both run against the same
+   * closure — `starting` is still `false` for both — and `disabled` on the
+   * button only takes effect after the next render, which hasn't happened
+   * yet either. A real phone can't deliver two taps inside one task (React
+   * flushes a discrete event synchronously), so this isn't what produced any
+   * reported symptom — it's hardened anyway, with a ref checked
+   * synchronously, because it costs nothing.
+   */
+  it('does not call unlock twice for two taps landing in the same tick', async () => {
+    const unlock = vi.fn(() => Promise.resolve({ ok: true as const }))
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={unlock}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    const button = testid('drill-start') as HTMLButtonElement
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      await flushMicrotasks()
+    })
+
+    expect(unlock).toHaveBeenCalledTimes(1)
+  })
+
   it('proceeds into the Drill when unlock resolves ok — late, but bounded — after standing in for a stalled play() (T006)', async () => {
     // `unlock` here models what `clip-player.ts`'s own bounded timeout does
     // for real (see clip-player.test.ts): a `play()` that never settles is
@@ -510,6 +544,60 @@ describe('DrillScreen — running a Drill', () => {
     })
 
     expect(onExit).toHaveBeenCalled()
+  })
+})
+
+describe('DrillScreen — the beat row survives a pause/resume replay', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  /**
+   * Defect 1: `drill-player.ts` re-plays the in-flight cadence Step on
+   * resume (pause aborts and breaks the loop without calling
+   * `advanceStep()`); `resume()` re-enters at the unchanged position. The
+   * old `instrumentPorts` counted that replay as a brand-new Step, so its
+   * home-grown `stepCounter` ran one ahead of the real cadence position for
+   * the rest of the Rep — here, the pause after "Bonjour" (real cadence
+   * index 1, which floors to beat 0) rendered as beat 1.
+   */
+  it('does not double-count a Step replayed by resume after a Pause', async () => {
+    const speech = controllableSpeech()
+    const clock = fakeClock()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={speech}
+        clock={clock}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    expect(testid('drill-beat-0')?.getAttribute('data-state')).toBe('live')
+
+    // Pause mid-utterance, then Resume — the domain player replays the same
+    // "Bonjour" Step (drill-player.ts:85-92,182-189).
+    await click(testid('drill-pause-resume'))
+    await click(testid('drill-pause-resume'))
+    expect(speech.calls).toHaveLength(2) // the replay really happened
+
+    // Still the first utterance's beat — nothing has advanced yet.
+    expect(testid('drill-beat-0')?.getAttribute('data-state')).toBe('live')
+    expect(testid('drill-beat-1')?.getAttribute('data-state')).toBe('upcoming')
+
+    // Let the replayed utterance finish — the player genuinely advances to
+    // its next Step, the pause after "Bonjour" (real cadence index 1, which
+    // still floors to beat 0).
+    await act(async () => {
+      speech.resolveCurrent()
+      await flushMicrotasks()
+    })
+
+    expect(testid('drill-beat-0')?.getAttribute('data-state')).toBe('live')
+    expect(testid('drill-beat-1')?.getAttribute('data-state')).toBe('upcoming')
   })
 })
 
