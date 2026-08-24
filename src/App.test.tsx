@@ -26,6 +26,7 @@ import { createSyncedLibrary } from './adapters/sync/synced-library'
 import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
 import type { DatabaseTrouble, DatabaseTroubleSource } from './adapters/storage'
 import type { AudioElementLike } from './adapters/audio/clip-player'
+import type { RouteHoldElementLike } from './adapters/audio/route-hold'
 
 vi.mock('./adapters/share/web-share', () => ({
   shareBackupFile: vi.fn().mockResolvedValue('shared'),
@@ -415,6 +416,24 @@ function neverSyncs(): LibrarySyncClient {
 }
 
 /** Stands in for the DOM `<audio>` element `main.tsx` reads from `index.html` (T006). */
+function fakeRouteHoldElement(): RouteHoldElementLike {
+  const listeners: Array<() => void> = []
+  return {
+    src: '',
+    loop: false,
+    currentTime: 0,
+    play: () => Promise.resolve(),
+    pause: () => {},
+    addEventListener(_type, listener) {
+      listeners.push(listener)
+    },
+    removeEventListener(_type, listener) {
+      const index = listeners.indexOf(listener)
+      if (index >= 0) listeners.splice(index, 1)
+    },
+  }
+}
+
 function fakeAudioElement(): AudioElementLike {
   const listeners: Record<string, Array<() => void>> = {}
   return {
@@ -444,6 +463,7 @@ async function renderApp(
   syncEngine: SyncEngine = createTestSyncEngine(store, settingsStore, librarySyncClient),
   databaseTrouble: DatabaseTroubleSource = createFakeDatabaseTrouble(),
   audioElement: AudioElementLike = fakeAudioElement(),
+  routeHoldElement: RouteHoldElementLike = fakeRouteHoldElement(),
 ) {
   await act(async () => {
     root.render(
@@ -460,6 +480,7 @@ async function renderApp(
         translator={translator}
         databaseTrouble={databaseTrouble}
         audioElement={audioElement}
+        routeHoldElement={routeHoldElement}
       />,
     )
   })
