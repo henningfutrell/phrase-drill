@@ -43,6 +43,13 @@ const BITS_PER_SAMPLE = 16
 const HOLD_FRAMES = SAMPLE_RATE
 
 /**
+ * The source's exact length in seconds, derived rather than written as `1`:
+ * `onTimeUpdate` needs it to credit a loop wrap, and a magic literal there
+ * would go stale the moment the rate or the frame count moved.
+ */
+export const ROUTE_HOLD_SOURCE_SECONDS = HOLD_FRAMES / SAMPLE_RATE
+
+/**
  * Frames per half cycle of the +/-1 square wave: 4410, i.e. 5 Hz. NOT
  * per-sample. Alternating every sample at 44.1 kHz is a 22.05 kHz square
  * sitting on Nyquist — the resampler and the SBC encoder annihilate it and it
@@ -232,9 +239,23 @@ export function createRouteHold({ element, onSilentFailure }: RouteHoldDeps): Ro
 
   function onTimeUpdate(): void {
     const now = element.currentTime
-    // Forward deltas only. A loop wrap takes currentTime from ~1 back to ~0,
-    // and that is the loop doing its job, not a second of playback undone.
-    if (now > lastMediaTime) advancedMs += (now - lastMediaTime) * 1000
+    if (now > lastMediaTime) {
+      advancedMs += (now - lastMediaTime) * 1000
+    } else if (now < lastMediaTime) {
+      // A loop wrap. `'timeupdate'` fires roughly four times a second against
+      // a one-second source, so a wrap falls between two samples on every
+      // single cycle: what actually played is the tail of the old cycle plus
+      // the head of the new one. Crediting nothing here — as this did when it
+      // shipped — loses about 250 ms per wrap, once per second of wall clock,
+      // and makes a perfectly healthy hold report `played` at three quarters
+      // of `held`. That number is the only evidence that iOS played the
+      // second element at all, so an under-read is a confident falsehood.
+      const credit = ROUTE_HOLD_SOURCE_SECONDS - lastMediaTime + now
+      // A seek should never happen — nothing writes `currentTime` — so a
+      // credit outside one source length is nonsense, not playback. Discard
+      // it rather than let it inflate the one number being measured.
+      if (credit > 0 && credit <= ROUTE_HOLD_SOURCE_SECONDS) advancedMs += credit * 1000
+    }
     lastMediaTime = now
   }
 
