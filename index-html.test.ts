@@ -39,3 +39,29 @@ describe('index.html — the shared unlock <audio> element (T006)', () => {
     expect(tag![0]).toMatch(/\bplaysinline\b/)
   })
 })
+
+/**
+ * The Route hold's own `<audio>` element (T004). Markup for the same reason
+ * the unlock element is — and for one more: it is the reason a second React
+ * root rendered over this container cannot produce a second hold. There is
+ * one element on the page, so there is one route being held, whatever
+ * happens to the tree above it.
+ */
+describe('index.html — the Route hold <audio> element (T004)', () => {
+  const rootDir = path.dirname(fileURLToPath(import.meta.url))
+  const html = readFileSync(path.join(rootDir, 'index.html'), 'utf-8')
+  const tag = html.match(/<audio\b[^>]*\bid="route-hold-audio"[^>]*>/)
+
+  it('is present in the document markup, not constructed at runtime', () => {
+    expect(tag).not.toBeNull()
+  })
+
+  it('is marked preload="auto" and playsinline, same as the unlock element', () => {
+    expect(tag![0]).toMatch(/\bpreload="auto"/)
+    expect(tag![0]).toMatch(/\bplaysinline\b/)
+  })
+
+  it('is a second, distinct element — the hold must never share the Clip element', () => {
+    expect(html.match(/<audio\b[^>]*\bid="[^"]+"/g)).toHaveLength(2)
+  })
+})

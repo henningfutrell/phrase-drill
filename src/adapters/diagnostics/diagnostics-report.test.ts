@@ -4,6 +4,7 @@ import { LIBRARY_FORMAT } from '../../domain'
 import type { ClipCache, Settings, SettingsStore } from '../storage'
 import type { Voice } from '../../domain'
 import { collectDiagnostics, formatDiagnosticsReport } from './diagnostics-report'
+import type { RouteHoldSummary } from './diagnostics-report'
 import type { ErrorLog, LogEntry } from './error-log'
 
 function fakeDeckStore(decks: readonly Deck[]): DeckStore {
@@ -71,6 +72,15 @@ function fakeErrorLog(entries: readonly LogEntry[]): ErrorLog {
   }
 }
 
+/** A report from a device where the Drill screen was never opened. */
+const NEVER_HELD: RouteHoldSummary = {
+  starts: 0,
+  playResolved: null,
+  totalHeldMs: 0,
+  advancedMs: 0,
+  watchdogFired: false,
+}
+
 const VOICE: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
 const DECKS: Deck[] = [
@@ -93,6 +103,7 @@ describe('collectDiagnostics', () => {
       errorLog: fakeErrorLog([]),
       getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
       getStorageEstimate: async () => ({ supported: false }),
+      getRouteHold: () => NEVER_HELD,
     })
 
     expect(snapshot.phrasesTotal).toBe(2)
@@ -108,6 +119,7 @@ describe('collectDiagnostics', () => {
       errorLog: fakeErrorLog([]),
       getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
       getStorageEstimate: async () => ({ supported: false }),
+      getRouteHold: () => NEVER_HELD,
     })
 
     expect(snapshot.clipsReady).toBe(0)
@@ -122,6 +134,7 @@ describe('collectDiagnostics', () => {
       errorLog: fakeErrorLog([]),
       getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
       getStorageEstimate: async () => ({ supported: false }),
+      getRouteHold: () => NEVER_HELD,
     })
 
     expect(snapshot.lastSyncAt).toBe(1_700_000_000_000)
@@ -143,6 +156,7 @@ describe('collectDiagnostics', () => {
       recentErrorsLimit: 3,
       getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
       getStorageEstimate: async () => ({ supported: false }),
+      getRouteHold: () => NEVER_HELD,
     })
 
     expect(snapshot.recentErrors.map((e) => e.message)).toEqual(['entry-7', 'entry-8', 'entry-9'])
@@ -158,6 +172,7 @@ describe('formatDiagnosticsReport', () => {
       clipsReady: 1,
       storage: { supported: false },
       lastSyncAt: null,
+      routeHold: NEVER_HELD,
       recentErrors: [],
     })
 
@@ -175,6 +190,7 @@ describe('formatDiagnosticsReport', () => {
       clipsReady: 0,
       storage: { supported: false },
       lastSyncAt: null,
+      routeHold: NEVER_HELD,
       recentErrors: [],
     })
 
@@ -189,6 +205,7 @@ describe('formatDiagnosticsReport', () => {
       clipsReady: 0,
       storage: { supported: true, usageBytes: 1_048_576, quotaBytes: 10_485_760 },
       lastSyncAt: null,
+      routeHold: NEVER_HELD,
       recentErrors: [],
     })
 
@@ -204,6 +221,7 @@ describe('formatDiagnosticsReport', () => {
       clipsReady: 0,
       storage: { supported: false },
       lastSyncAt: null,
+      routeHold: NEVER_HELD,
       recentErrors: [],
     })
 
@@ -218,6 +236,7 @@ describe('formatDiagnosticsReport', () => {
       clipsReady: 0,
       storage: { supported: false },
       lastSyncAt: null,
+      routeHold: NEVER_HELD,
       recentErrors: [],
     })
 
@@ -232,6 +251,7 @@ describe('formatDiagnosticsReport', () => {
       clipsReady: 0,
       storage: { supported: false },
       lastSyncAt: null,
+      routeHold: NEVER_HELD,
       recentErrors: [{ id: 1, timestamp: 1_700_000_000_000, source: 'window.onerror', message: 'TypeError: boom' }],
     })
 
@@ -247,9 +267,109 @@ describe('formatDiagnosticsReport', () => {
       clipsReady: 0,
       storage: { supported: false },
       lastSyncAt: null,
+      routeHold: NEVER_HELD,
       recentErrors: [],
     })
 
     expect(text.toLowerCase()).toMatch(/none|no errors/)
+  })
+})
+
+/**
+ * The Route hold line (T004). The hold is an experiment — whether a second
+ * looping `<audio>` element keeps an iOS Safari A2DP route alive across a
+ * Pause cannot be answered from source. These two numbers, read off her
+ * Diagnostics screen after one drive, are the answer: `held` is wall clock
+ * between hold and release, `played` is media clock. Equal means it worked.
+ */
+describe('formatDiagnosticsReport — the Route hold line', () => {
+  function report(routeHold: RouteHoldSummary): string {
+    return formatDiagnosticsReport({
+      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
+      voice: null,
+      phrasesTotal: 0,
+      clipsReady: 0,
+      storage: { supported: false },
+      lastSyncAt: null,
+      routeHold,
+      recentErrors: [],
+    })
+  }
+
+  it('says plainly that no Drill has been run, rather than printing zeroes', () => {
+    expect(report(NEVER_HELD)).toContain('Route hold: never held.')
+  })
+
+  it('states held and played side by side, which is the whole measurement', () => {
+    expect(
+      report({
+        starts: 1,
+        playResolved: true,
+        totalHeldMs: 612_000,
+        advancedMs: 611_400,
+        watchdogFired: false,
+      }),
+    ).toContain('Route hold: 1 start, held 612s, played 611s, no error.')
+  })
+
+  it('names the DOMException when play() was refused — NotAllowedError and NotSupportedError need opposite fixes', () => {
+    expect(
+      report({
+        starts: 1,
+        playResolved: false,
+        lastError: { name: 'NotAllowedError', message: 'The request is not allowed by the user agent.' },
+        totalHeldMs: 612_000,
+        advancedMs: 0,
+        watchdogFired: false,
+      }),
+    ).toContain(
+      'Route hold: 1 start, held 612s, played 0s, NotAllowedError: The request is not allowed by the user agent.',
+    )
+  })
+
+  it('reports a hold the watchdog had to end — a Drill screen discarded mid-run', () => {
+    expect(
+      report({
+        starts: 3,
+        playResolved: true,
+        totalHeldMs: 4_801_000,
+        advancedMs: 4_798_000,
+        watchdogFired: true,
+      }),
+    ).toContain('Route hold: 3 starts, held 4801s, played 4798s, stopped by watchdog.')
+  })
+
+  it('reads between Clips ready and storage — both are playback facts', () => {
+    const lines = report(NEVER_HELD).split('\n')
+    const clips = lines.findIndex((line) => line.startsWith('Clips ready:'))
+    const hold = lines.findIndex((line) => line.startsWith('Route hold:'))
+    const storage = lines.findIndex((line) => line.startsWith('Storage:'))
+
+    expect(hold).toBe(clips + 1)
+    expect(storage).toBe(hold + 1)
+  })
+})
+
+describe('collectDiagnostics — the Route hold summary', () => {
+  it('carries the hold summary through as the port reported it, adding nothing', async () => {
+    const held: RouteHoldSummary = {
+      starts: 2,
+      playResolved: true,
+      totalHeldMs: 1000,
+      advancedMs: 998,
+      watchdogFired: false,
+    }
+
+    const snapshot = await collectDiagnostics({
+      deckStore: fakeDeckStore([]),
+      settingsStore: fakeSettingsStore(),
+      clipCache: fakeClipCache(new Set()),
+      errorLog: fakeErrorLog([]),
+      getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
+      getStorageEstimate: async () => ({ supported: false }),
+      getRouteHold: () => held,
+    })
+
+    expect(snapshot.routeHold).toEqual(held)
   })
 })

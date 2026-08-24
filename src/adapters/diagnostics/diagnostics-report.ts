@@ -11,6 +11,27 @@ import type { StorageEstimateResult } from './storage-estimate'
 const DEFAULT_RECENT_ERRORS_LIMIT = 10
 
 /**
+ * What the Route hold (T004, `adapters/audio/route-hold.ts`) reports about
+ * itself, declared here as plain data rather than imported from that adapter.
+ * `App.tsx` maps the port's `stats()` onto it, keeping one adapter's types
+ * out of another's — the same discipline `DrillScreenProps` keeps with
+ * `DrillReadinessResult`.
+ *
+ * The pair that matters is `totalHeldMs` against `advancedMs`: wall clock
+ * against media clock. Close together means a second `<audio>` element really
+ * did play for the whole Drill and the route was held; far apart means iOS
+ * stopped it and the hold is a no-op that says so.
+ */
+export interface RouteHoldSummary {
+  readonly starts: number
+  readonly playResolved: boolean | null
+  readonly lastError?: { readonly name: string; readonly message: string }
+  readonly totalHeldMs: number
+  readonly advancedMs: number
+  readonly watchdogFired: boolean
+}
+
+/**
  * Everything Diagnostics shows, gathered in one place. No phrase content —
  * only what T039 asks the report to answer: the pinned voice, Clips ready
  * vs total Phrases, storage, last sync, and the last N captured errors.
@@ -22,6 +43,7 @@ export interface DiagnosticsSnapshot {
   readonly voice: Voice | null
   readonly phrasesTotal: number
   readonly clipsReady: number
+  readonly routeHold: RouteHoldSummary
   readonly storage: StorageEstimateResult
   readonly lastSyncAt: number | null
   readonly recentErrors: readonly LogEntry[]
@@ -34,6 +56,7 @@ export interface CollectDiagnosticsDeps {
   readonly errorLog: ErrorLog
   readonly recentErrorsLimit?: number
   readonly getBuildInfo: () => BuildInfo
+  readonly getRouteHold: () => RouteHoldSummary
   readonly getStorageEstimate: () => Promise<StorageEstimateResult>
 }
 
@@ -44,7 +67,7 @@ export interface CollectDiagnosticsDeps {
  * guess (mirrors `computeDrillReadiness`'s treatment of "no voice").
  */
 export async function collectDiagnostics(deps: CollectDiagnosticsDeps): Promise<DiagnosticsSnapshot> {
-  const { deckStore, settingsStore, clipCache, errorLog, getBuildInfo, getStorageEstimate } = deps
+  const { deckStore, settingsStore, clipCache, errorLog, getBuildInfo, getRouteHold, getStorageEstimate } = deps
   const recentErrorsLimit = deps.recentErrorsLimit ?? DEFAULT_RECENT_ERRORS_LIMIT
 
   const [decks, settings, entries, storage] = await Promise.all([
@@ -67,6 +90,7 @@ export async function collectDiagnostics(deps: CollectDiagnosticsDeps): Promise<
     voice: settings.voice,
     phrasesTotal: phrases.length,
     clipsReady,
+    routeHold: getRouteHold(),
     storage,
     lastSyncAt: settings.lastSyncAt,
     recentErrors: entries.slice(-recentErrorsLimit),
@@ -84,6 +108,18 @@ function formatStorage(storage: StorageEstimateResult): string {
 
 function formatVoice(voice: Voice | null): string {
   return voice ? `Voice: pinned (${voice.provider}).` : 'Voice: none pinned.'
+}
+
+function formatRouteHold(hold: RouteHoldSummary): string {
+  if (hold.starts === 0) return 'Route hold: never held.'
+  const held = Math.round(hold.totalHeldMs / 1000)
+  const played = Math.round(hold.advancedMs / 1000)
+  const detail = hold.lastError
+    ? `${hold.lastError.name}: ${hold.lastError.message || '(no message)'}`
+    : hold.watchdogFired
+      ? 'stopped by watchdog'
+      : 'no error'
+  return `Route hold: ${hold.starts} start${hold.starts === 1 ? '' : 's'}, held ${held}s, played ${played}s, ${detail}.`
 }
 
 function formatLastSync(lastSyncAt: number | null): string {
@@ -106,6 +142,7 @@ export function formatDiagnosticsReport(snapshot: DiagnosticsSnapshot): string {
     `Build: ${snapshot.build.sha} (${snapshot.build.builtAt})`,
     formatVoice(snapshot.voice),
     `Clips ready: ${snapshot.clipsReady} of ${snapshot.phrasesTotal} Phrases`,
+    formatRouteHold(snapshot.routeHold),
     formatStorage(snapshot.storage),
     formatLastSync(snapshot.lastSyncAt),
     formatRecentErrors(snapshot.recentErrors),

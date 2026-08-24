@@ -722,3 +722,220 @@ describe('DrillScreen — a failed unlock names the real cause', () => {
     expect(detail?.textContent).toContain('The operation is not supported.')
   })
 })
+
+/**
+ * The Route hold (T004): a second `<audio>` element looping an inaudible
+ * source so the phone's Bluetooth output route never goes idle across a
+ * Pause. This screen owns its lifetime — it brackets the Drill from outside
+ * and the domain never learns of it.
+ */
+describe('DrillScreen — the Route hold', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+  })
+
+  it('starts the hold inside the Start tap, after unlock() is called and without awaiting it', async () => {
+    // Ordering, not merely presence. Both play() calls have to be *initiated*
+    // in the gesture — an `await` between them loses it on iOS — and the
+    // shared Clip element must claim the gesture first, because if iOS
+    // honours only one play() per tap, silent audio is worse than choppy.
+    const order: string[] = []
+    let finishUnlock: ((outcome: { ok: true }) => void) | undefined
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => {
+          order.push('unlock')
+          return new Promise((resolve) => {
+            finishUnlock = resolve
+          })
+        }}
+        holdAudioRoute={() => order.push('hold')}
+        releaseAudioRoute={() => order.push('release')}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    // unlock() has not resolved yet, and the hold has already started.
+    expect(order).toEqual(['unlock', 'hold'])
+
+    await act(async () => {
+      finishUnlock?.({ ok: true })
+      await flushMicrotasks()
+    })
+
+    expect(order).toEqual(['unlock', 'hold'])
+  })
+
+  it('releases the hold when the Drill stops', async () => {
+    const holdAudioRoute = vi.fn()
+    const releaseAudioRoute = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        holdAudioRoute={holdAudioRoute}
+        releaseAudioRoute={releaseAudioRoute}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    expect(holdAudioRoute).toHaveBeenCalledTimes(1)
+    expect(releaseAudioRoute).not.toHaveBeenCalled()
+
+    await click(testid('drill-stop'))
+    expect(releaseAudioRoute).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases the hold when unlock refuses, so a failed Start leaves nothing playing', async () => {
+    const releaseAudioRoute = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() =>
+          Promise.resolve({ ok: false as const, name: 'NotAllowedError', message: 'refused' })
+        }
+        holdAudioRoute={() => {}}
+        releaseAudioRoute={releaseAudioRoute}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    expect(testid('drill-unlock-error')).not.toBeNull()
+    expect(releaseAudioRoute).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases the hold if the screen is discarded mid-Drill', async () => {
+    // Not reachable from any control here — the running phase renders
+    // Skip/Pause/Stop only. It is reachable from a 401 on any /api call,
+    // which re-renders the root to the login screen underneath this tree.
+    const releaseAudioRoute = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        holdAudioRoute={() => {}}
+        releaseAudioRoute={releaseAudioRoute}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    expect(releaseAudioRoute).not.toHaveBeenCalled()
+
+    const discarded = container
+    await act(async () => {
+      root.unmount()
+    })
+    discarded.remove()
+
+    expect(releaseAudioRoute).toHaveBeenCalledTimes(1)
+
+    // Leave a live root behind for the shared afterEach to unmount.
+    render(<div />)
+  })
+
+  it('does not release the hold on an unrelated re-render — the prop is a fresh arrow every time', async () => {
+    // App.tsx wires this the way it wires acquireWakeLock: a new closure on
+    // every render. An unmount effect keyed on that identity would tear the
+    // hold down mid-Drill on any App state change.
+    const releaseAudioRoute = vi.fn()
+    const screen = (): ReactElement => (
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        holdAudioRoute={() => {}}
+        releaseAudioRoute={() => releaseAudioRoute()}
+        onExit={() => {}}
+      />
+    )
+    render(screen())
+    await settle()
+    await click(testid('drill-start'))
+
+    await act(async () => {
+      root.render(screen())
+      await flushMicrotasks()
+    })
+
+    expect(releaseAudioRoute).not.toHaveBeenCalled()
+  })
+
+  it('releases the hold when the app is backgrounded, and takes it again on Resume', async () => {
+    // Deliberately unlike the Wake Lock, which this screen does NOT release
+    // on this path: iOS has suspended the element anyway, so a hold that
+    // claims to be held here would be a lie in the Diagnostic report — and
+    // releasing bounds an orphaned tree to "until she next backgrounds".
+    const holdAudioRoute = vi.fn()
+    const releaseAudioRoute = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        holdAudioRoute={holdAudioRoute}
+        releaseAudioRoute={releaseAudioRoute}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    expect(holdAudioRoute).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushMicrotasks()
+    })
+
+    expect(releaseAudioRoute).toHaveBeenCalledTimes(1)
+
+    await click(testid('drill-pause-resume'))
+
+    expect(holdAudioRoute).toHaveBeenCalledTimes(2)
+  })
+
+  it('never crashes when no Route hold is supplied', async () => {
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    await click(testid('drill-stop'))
+    // no throw is the assertion
+  })
+})

@@ -50,6 +50,7 @@ import { FALLBACK_PREVIEW_PHRASE, knownVoices, VOICE_CATALOGUE } from './adapter
 import { createClipPlayer, type AudioElementLike } from './adapters/audio/clip-player'
 import { computeDrillReadiness } from './adapters/audio/drill-readiness'
 import { createSystemClock } from './adapters/audio/system-clock'
+import { createRouteHold, type RouteHoldElementLike } from './adapters/audio/route-hold'
 import { createWakeLockPort } from './adapters/device/wake-lock'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
@@ -124,6 +125,15 @@ export function voiceKey(voice: Voice | null): string | null {
  */
 function logSilentClipFailure(errorLog: ErrorLog, message: string): void {
   void errorLog.record({ timestamp: Date.now(), source: 'adapter', message: `clip-player: ${message}` })
+}
+
+/**
+ * The same channel for the Route hold (T004), tagged so a report reads
+ * "route-hold: …" and never gets confused with a Clip that failed to play.
+ * Module scope for the same `react-hooks/purity` reason as above.
+ */
+function logRouteHoldFailure(errorLog: ErrorLog, message: string): void {
+  void errorLog.record({ timestamp: Date.now(), source: 'adapter', message: `route-hold: ${message}` })
 }
 
 /**
@@ -214,6 +224,7 @@ function App({
   translator,
   databaseTrouble,
   audioElement,
+  routeHoldElement,
 }: {
   deckStore: DeckStore
   mixStore: MixStore
@@ -235,6 +246,13 @@ function App({
    * iOS Safari anti-pattern this composition root must not reintroduce.
    */
   audioElement: AudioElementLike
+  /**
+   * The Route hold's own element (T004) — a second one, never `audioElement`.
+   * Also declared in `index.html` and read by `main.tsx`, and for one reason
+   * beyond the gesture: one element on the page means one hold, whatever
+   * happens to the React tree above it.
+   */
+  routeHoldElement: RouteHoldElementLike
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [mixes, setMixes] = useState<Mix[]>([])
@@ -278,6 +296,17 @@ function App({
     [deckStore, settingsStore],
   )
   const wakeLock = useMemo(() => createWakeLockPort(), [])
+  // The Route hold (T004), App-scoped rather than DrillScreen-scoped so its
+  // held-vs-played numbers survive a Drill screen remount and are still there
+  // when she opens Diagnostics hours after the drive.
+  const routeHold = useMemo(
+    () =>
+      createRouteHold({
+        element: routeHoldElement,
+        onSilentFailure: (message) => logRouteHoldFailure(errorLog, message),
+      }),
+    [routeHoldElement, errorLog],
+  )
   // One ClockPort for the app's lifetime — also stateless.
   const systemClock = useMemo(() => createSystemClock(), [])
   // Rebuilt only when the pinned voice actually changes — keyed on
@@ -799,6 +828,7 @@ function App({
       errorLog,
       getBuildInfo,
       getStorageEstimate: () => getStorageEstimate(),
+      getRouteHold: () => routeHold.stats(),
     }).then((snapshot) => setDiagnosticsReport(formatDiagnosticsReport(snapshot)))
   }
 
@@ -1019,6 +1049,8 @@ function App({
           }}
           acquireWakeLock={() => wakeLock.acquire()}
           releaseWakeLock={() => wakeLock.release()}
+          holdAudioRoute={() => routeHold.hold()}
+          releaseAudioRoute={() => routeHold.release()}
           onExit={() => setDrillTarget(undefined)}
           onOpenSettings={handleOpenSettings}
         />
