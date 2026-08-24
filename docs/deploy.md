@@ -10,6 +10,12 @@ repo root (a "Blueprint"). `docker-compose.yml` is **local dev only** —
 Render does not read or run it. See `docs/server.md` for the local
 `docker compose up` path.
 
+**The service is `https://phrase-drill.onrender.com`.** Render's default
+hostname from `render.yaml`'s `name: phrase-drill`. Measured 2026-08-24:
+`curl -s https://phrase-drill.onrender.com/api/health` returns
+`{"status":"ok"}`; `phrase-drill-app.onrender.com` and
+`phrase-drill-web.onrender.com` both 404, so the name is unambiguous.
+
 ## Hard requirement: never the free Postgres tier
 
 Render's free Postgres plan expires 30 days after creation and has **no
@@ -82,7 +88,7 @@ do not cover.
 
 ## Verify it worked
 
-- **Health:** `curl https://<your-service>.onrender.com/api/health` returns
+- **Health:** `curl https://phrase-drill.onrender.com/api/health` returns
   `{"status":"ok"}`.
 - **Login:** load the app in Safari on the phone, log in with the account
   just created. A wrong password should be rejected; the right one should
@@ -100,15 +106,26 @@ do not cover.
 Everything above runs once. This is what happens every other time: a fix
 lands on `main` and needs to reach her phone.
 
-**How it reaches her.** `render.yaml` declares `autoDeploy: true` — a push
-to `main` on GitHub triggers a Render deploy with no manual step. Read the
-comment above that line in `render.yaml`; it is the source of truth for the
-one caveat that matters: **Render only applies a Blueprint change (this one
-included) on the next Blueprint sync** (dashboard → Blueprint → Sync) **and
-does not retro-apply it to a service that already exists.** If the service
-was created before `autoDeploy: true` was added, a Blueprint sync — once —
-is what turns auto-deploy on for it. After that sync, every push to `main`
-deploys on its own; no further syncs are needed for ordinary changes.
+**How it reaches her — and it does not reach her reliably.** `render.yaml`
+declares `autoDeploy: true`, but **declaring it in the file does not turn it
+on for a service that already exists.** Render applies a Blueprint change
+only on the next Blueprint sync (dashboard → Blueprint → Sync), and no sync
+has ever been done, so this service still runs on whatever the dashboard's
+own auto-deploy setting says — a value that cannot be read from this repo.
+Read the comment above that line in `render.yaml`; it predicted exactly this.
+
+**Measured, 2026-08-24.** `origin/main` was pushed to `533e8ea` at 19:30 UTC.
+Fifty minutes later the service was still serving the pre-push build:
+`/assets/index-BE2GGMfB.js`, carrying build sha `72063ff` with zero
+occurrences of `533e8ea` and no `Route hold` string; a local `npm run build`
+of `533e8ea` produces `index-dNuddkml.js`, a different bundle. Polled every
+2 min for a further 24 min — unchanged.
+
+**The corollary is the useful part: `72063ff` *is* live, and it was merged
+earlier.** So the service does deploy sometimes. What it is bound to is a
+dashboard setting, not `render.yaml`. "Auto-deploy is broken" is the wrong
+summary; "auto-deploy is bound to something this repo cannot read, and one
+Blueprint sync is what binds it to `render.yaml`" is the right one.
 
 **How to confirm it deployed.** Open the app on the phone → Settings →
 Diagnostics. The `Build:` line shows the deployed commit's short sha and a
@@ -135,6 +152,32 @@ there); nothing further to do on the phone side.
    hasn't been used to click through that flow, so treat the exact button
    placement as the documented path, not a confirmed one — but the deploy
    log tab is where to confirm either way whether it worked.
+
+## How to tell what is actually deployed
+
+Two commands, from any machine, no dashboard and no phone:
+
+```sh
+curl -s https://phrase-drill.onrender.com/ | grep -o '/assets/index-[A-Za-z0-9._-]*\.js'
+curl -s https://phrase-drill.onrender.com/assets/<that file> | grep -o '<expected-sha>\|<previous-sha>'
+```
+
+The first prints the served bundle's hashed filename; the second prints
+whichever short sha is embedded in it (`build-sha.ts` stamps
+`RENDER_GIT_COMMIT` truncated to 7 characters — never a local
+`git rev-parse`, on any Render build). Compare against
+`/usr/bin/git rev-parse --short origin/main`. A grep for a string only the
+new code contains works as a second, independent check — e.g. `Route hold`
+for `533e8ea`.
+
+`npm run build` locally also names the bundle a given commit produces, so a
+served filename that differs from the local one is by itself proof the deploy
+did not land.
+
+**Use this before asking her anything.** The Diagnostics path below reads the
+same stamp, but it costs a round trip through a non-technical user in another
+country. That cost was paid twice — on 2026-08-04 and again on 2026-08-24 —
+because this check did not exist.
 
 ## Postgres SSL — why this shouldn't come up, and what to check if it does
 
