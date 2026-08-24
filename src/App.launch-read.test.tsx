@@ -12,8 +12,27 @@ import { CURRENT_SCHEMA_VERSION } from './adapters/storage/migrations'
 import { createSyncEngine, type SyncEngine, type SyncSnapshot } from './adapters/sync/sync-engine'
 import { createSyncedLibrary } from './adapters/sync/synced-library'
 import type { AudioElementLike } from './adapters/audio/clip-player'
+import type { RouteHoldElementLike } from './adapters/audio/route-hold'
 
 /** Stands in for the DOM `<audio>` element `main.tsx` reads from `index.html` (T006). */
+function fakeRouteHoldElement(): RouteHoldElementLike {
+  const listeners: Array<() => void> = []
+  return {
+    src: '',
+    loop: false,
+    currentTime: 0,
+    play: () => Promise.resolve(),
+    pause: () => {},
+    addEventListener(_type, listener) {
+      listeners.push(listener)
+    },
+    removeEventListener(_type, listener) {
+      const index = listeners.indexOf(listener)
+      if (index >= 0) listeners.splice(index, 1)
+    },
+  }
+}
+
 function fakeAudioElement(): AudioElementLike {
   const listeners: Record<string, Array<() => void>> = {}
   return {
@@ -236,6 +255,7 @@ function render(deckStore: DeckStore, settingsStore: SettingsStore, syncEngine: 
         translator={noopTranslate}
         databaseTrouble={noopTrouble}
         audioElement={fakeAudioElement()}
+        routeHoldElement={fakeRouteHoldElement()}
       />,
     )
   })

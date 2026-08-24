@@ -80,7 +80,11 @@ describe('createRouteHoldWav — the keepalive source, byte by byte', () => {
   })
 })
 
-interface FakeRouteHoldElement extends RouteHoldElementLike {
+// `currentTime` is read-only on the port — the hold observes the media clock,
+// it never seeks. A fake has to drive it, so it is widened here and nowhere
+// else.
+interface FakeRouteHoldElement extends Omit<RouteHoldElementLike, 'currentTime'> {
+  currentTime: number
   playCalls: number
   pauseCalls: number
   /** Every write to a property the Route hold must never touch. */

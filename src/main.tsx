@@ -41,6 +41,17 @@ if (!(audioElementCandidate instanceof HTMLAudioElement)) {
 // not carry into it — only the declared type of a binding does.
 const audioElement: HTMLAudioElement = audioElementCandidate
 
+// The Route hold's own element (T004), read the same way and for the same
+// reasons — with one more: reading the single element index.html declares,
+// rather than constructing one per render, is what stops `showLogin()`'s
+// second `createRoot` on this container from leaving a second, unreachable
+// hold playing on their phone's audio output.
+const routeHoldElementCandidate = document.getElementById('route-hold-audio')
+if (!(routeHoldElementCandidate instanceof HTMLAudioElement)) {
+  throw new Error('route-hold-audio element not found')
+}
+const routeHoldElement: HTMLAudioElement = routeHoldElementCandidate
+
 const deckStore = createIndexedDbDeckStore()
 const mixStore = createIndexedDbMixStore()
 const settingsStore = createIndexedDbSettingsStore()
@@ -148,6 +159,7 @@ function showApp(): void {
       translator={translator}
       databaseTrouble={databaseTrouble}
       audioElement={audioElement}
+      routeHoldElement={routeHoldElement}
     />,
   )
 }
