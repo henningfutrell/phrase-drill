@@ -151,6 +151,20 @@ export interface DrillScreenProps {
   readonly unlock: () => Promise<UnlockOutcome>
   readonly acquireWakeLock?: () => Promise<void>
   readonly releaseWakeLock?: () => Promise<void>
+  /**
+   * Starts the Route hold (T004): a second `<audio>` element looping an
+   * inaudible source so the phone's Bluetooth output route does not go idle
+   * across a Pause. Synchronous on purpose, and deliberately NOT the
+   * `() => Promise<void>` shape of the Wake Lock pair above — it has to run
+   * inside the Start tap, and an awaitable start invites the one `await`
+   * that loses the gesture on iOS.
+   *
+   * Kept out of `unlock` on purpose too: `unlock`'s failure is rendered to
+   * her verbatim as "Audio didn't start", and a hold that failed while the
+   * Clip element unlocked fine would tell her audio didn't start when it did.
+   */
+  readonly holdAudioRoute?: () => void
+  readonly releaseAudioRoute?: () => void
   /** Back to whatever screen launched this Drill (Deck detail or Mix). */
   readonly onExit: () => void
   /** Only used for the 'no-voice' blocked reason. */
@@ -191,6 +205,8 @@ export function DrillScreen({
   unlock,
   acquireWakeLock,
   releaseWakeLock,
+  holdAudioRoute,
+  releaseAudioRoute,
   onExit,
   onOpenSettings,
 }: DrillScreenProps) {
@@ -247,6 +263,23 @@ export function DrillScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // The Drill screen going away mid-run. Not reachable from any control on
+  // this screen — the running phase renders Skip/Pause/Stop only — but a 401
+  // on any /api call re-renders the root to the login screen (main.tsx's
+  // `onUnauthorized`), and that must not leave the Route hold playing for the
+  // rest of the app's life. Keyed on nothing and read through a ref: the prop
+  // is a fresh arrow on every App render (App.tsx wires it the way it wires
+  // acquireWakeLock), so an effect keyed on it would release the hold
+  // mid-Drill on any unrelated re-render. Necessary but not sufficient —
+  // React does not unmount a tree displaced by a second `createRoot` on the
+  // same container, so this cleanup may never run at all. The hold's own
+  // watchdog is the load-bearing half of that mitigation.
+  const releaseAudioRouteRef = useRef(releaseAudioRoute)
+  useEffect(() => {
+    releaseAudioRouteRef.current = releaseAudioRoute
+  })
+  useEffect(() => () => releaseAudioRouteRef.current?.(), [])
+
   /** Pulls status/position off the player after any control call, and exits
    * cleanly the moment the Drill has actually stopped (manual Stop, a Skip
    * past the last Rep, or simply running out of Reps). */
@@ -259,9 +292,10 @@ export function DrillScreen({
     if (player.status === 'stopped') {
       playerRef.current = null
       void releaseWakeLock?.()
+      releaseAudioRoute?.()
       onExit()
     }
-  }, [onExit, releaseWakeLock])
+  }, [onExit, releaseWakeLock, releaseAudioRoute])
 
   async function handleStart(readyPhrases: readonly Phrase[], skippedCount: number, online: boolean) {
     // Guards against a second tap re-entering this method while the first
@@ -272,8 +306,17 @@ export function DrillScreen({
     setStarting(true)
     try {
       // Unlock first, inside this tap — see the `unlock` prop doc comment.
-      const outcome = await unlock()
+      // Called, not awaited, so the Route hold's own play() still lands in
+      // this gesture: unlock() reaches `element.src = …; element.play()`
+      // synchronously (clip-player.ts `attemptUnlock`), so the shared Clip
+      // element claims the gesture first and the hold second — the order
+      // that matters if iOS honours only one play() per tap, since silent
+      // audio is worse than choppy audio.
+      const unlocking = unlock()
+      holdAudioRoute?.()
+      const outcome = await unlocking
       if (!outcome.ok) {
+        releaseAudioRoute?.()
         setPhase({ kind: 'start', ready: readyPhrases, skippedCount, online, unlockFailure: outcome })
         return
       }
@@ -321,6 +364,12 @@ export function DrillScreen({
   async function handleResume(): Promise<void> {
     setInterrupted(false)
     void acquireWakeLock?.()
+    // Synchronously, inside this tap, for the reason the Start tap does it:
+    // iOS suspends media on screen lock, so after an interruption the hold is
+    // dead for the rest of the Drill unless a gesture restarts it. Never on a
+    // timer — starting a second element mid-Drill is itself a candidate
+    // route reconfiguration, so it only ever happens where she asked for it.
+    holdAudioRoute?.()
     setStatus('playing')
     await playerRef.current?.resume()
     syncFromPlayer()
@@ -349,11 +398,18 @@ export function DrillScreen({
         setStatus(playerRef.current.status)
         setRepIndex(playerRef.current.position)
         setInterrupted(true)
+        // Deliberately unlike the Wake Lock, which is NOT released here.
+        // iOS has suspended the element anyway, so a hold still claiming to
+        // be held would make the Diagnostic report's held-vs-played numbers
+        // a lie — and because an orphaned tree's listeners are still
+        // attached, this is what bounds an unreleasable hold to "until she
+        // next backgrounds the app". Resume takes it again.
+        releaseAudioRoute?.()
       }
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
     return () => document.removeEventListener('visibilitychange', onVisibilityChange)
-  }, [phase.kind])
+  }, [phase.kind, releaseAudioRoute])
 
   if (phase.kind === 'checking') {
     return <main className="drill-screen" data-testid="drill-checking" />

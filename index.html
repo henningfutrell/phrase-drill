@@ -67,6 +67,19 @@
       `main.tsx`, which reads it from here and hands it down as a port.
     -->
     <audio id="unlock-audio" preload="auto" playsinline></audio>
+    <!--
+      The Route hold's own element (T004) — a second one, never the one above.
+      It loops an inaudible source for the whole of a Drill so the phone's
+      Bluetooth output route does not go idle across the 1.5-5 s Pause between
+      Clips, during which the element above is paused and its source revoked.
+      Here, not built at runtime, for the gesture reason the comment above
+      gives and for one more: there is exactly one of these on the page, so a
+      second React root rendered over `#root` (main.tsx's `showLogin`) cannot
+      produce a second hold on her phone's audio output. Its `src` is assigned
+      once at composition by `route-hold.ts`, never inside the tap; the tap
+      only calls play(). See `src/adapters/audio/route-hold.ts`.
+    -->
+    <audio id="route-hold-audio" preload="auto" playsinline></audio>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
