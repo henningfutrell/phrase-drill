@@ -296,25 +296,37 @@ describe('formatDiagnosticsReport — the Route hold line', () => {
     })
   }
 
+  /** The one line, asserted whole — `toContain` cannot see a trailing typo. */
+  function holdLine(routeHold: RouteHoldSummary): string {
+    const line = report(routeHold)
+      .split('\n')
+      .find((candidate) => candidate.startsWith('Route hold:'))
+    expect(line).toBeDefined()
+    return line ?? ''
+  }
+
   it('says plainly that no Drill has been run, rather than printing zeroes', () => {
-    expect(report(NEVER_HELD)).toContain('Route hold: never held.')
+    expect(holdLine(NEVER_HELD)).toBe('Route hold: never held.')
   })
 
   it('states held and played side by side, which is the whole measurement', () => {
     expect(
-      report({
+      holdLine({
         starts: 1,
         playResolved: true,
         totalHeldMs: 612_000,
         advancedMs: 611_400,
         watchdogFired: false,
       }),
-    ).toContain('Route hold: 1 start, held 612s, played 611s, no error.')
+    ).toBe('Route hold: 1 start, held 612s, played 611s, no error.')
   })
 
   it('names the DOMException when play() was refused — NotAllowedError and NotSupportedError need opposite fixes', () => {
+    // A DOMException `message` is a sentence and ends in its own full stop.
+    // Appending another gave the shipped line a doubled period, and this
+    // line is pasted verbatim into a message by a non-technical user.
     expect(
-      report({
+      holdLine({
         starts: 1,
         playResolved: false,
         lastError: { name: 'NotAllowedError', message: 'The request is not allowed by the user agent.' },
@@ -322,21 +334,56 @@ describe('formatDiagnosticsReport — the Route hold line', () => {
         advancedMs: 0,
         watchdogFired: false,
       }),
-    ).toContain(
+    ).toBe(
       'Route hold: 1 start, held 612s, played 0s, NotAllowedError: The request is not allowed by the user agent.',
     )
   })
 
+  it('still says something when the DOMException carried no message at all', () => {
+    expect(
+      holdLine({
+        starts: 1,
+        playResolved: false,
+        lastError: { name: 'NotSupportedError', message: '' },
+        totalHeldMs: 30_000,
+        advancedMs: 0,
+        watchdogFired: false,
+      }),
+    ).toBe('Route hold: 1 start, held 30s, played 0s, NotSupportedError: (no message).')
+  })
+
   it('reports a hold the watchdog had to end — a Drill screen discarded mid-run', () => {
     expect(
-      report({
+      holdLine({
         starts: 3,
         playResolved: true,
         totalHeldMs: 4_801_000,
         advancedMs: 4_798_000,
         watchdogFired: true,
       }),
-    ).toContain('Route hold: 3 starts, held 4801s, played 4798s, stopped by watchdog.')
+    ).toBe('Route hold: 3 starts, held 4801s, played 4798s, stopped by watchdog.')
+  })
+
+  it('ends every rendered state in exactly one full stop, like its neighbours in this file', () => {
+    const states: RouteHoldSummary[] = [
+      NEVER_HELD,
+      { starts: 1, playResolved: true, totalHeldMs: 612_000, advancedMs: 611_400, watchdogFired: false },
+      {
+        starts: 1,
+        playResolved: false,
+        lastError: { name: 'NotAllowedError', message: 'The request is not allowed by the user agent.' },
+        totalHeldMs: 612_000,
+        advancedMs: 0,
+        watchdogFired: false,
+      },
+      { starts: 3, playResolved: true, totalHeldMs: 4_801_000, advancedMs: 4_798_000, watchdogFired: true },
+    ]
+
+    for (const state of states) {
+      const line = holdLine(state)
+      expect(line.endsWith('.')).toBe(true)
+      expect(line.endsWith('..')).toBe(false)
+    }
   })
 
   it('reads between Clips ready and storage — both are playback facts', () => {
