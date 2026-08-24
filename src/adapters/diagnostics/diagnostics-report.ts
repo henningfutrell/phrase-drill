@@ -119,7 +119,13 @@ function formatRouteHold(hold: RouteHoldSummary): string {
     : hold.watchdogFired
       ? 'stopped by watchdog'
       : 'no error'
-  return `Route hold: ${hold.starts} start${hold.starts === 1 ? '' : 's'}, held ${held}s, played ${played}s, ${detail}.`
+  const line = `Route hold: ${hold.starts} start${hold.starts === 1 ? '' : 's'}, held ${held}s, played ${played}s, ${detail}`
+  // A DOMException message is a sentence and usually brings its own full
+  // stop, so appending one unconditionally gives `... user agent..`. Every
+  // other line in this report ends in exactly one; she reads this by eye and
+  // pastes it into a message, so the punctuation is the whole tell that the
+  // line is finished rather than truncated.
+  return line.endsWith('.') ? line : `${line}.`
 }
 
 function formatLastSync(lastSyncAt: number | null): string {

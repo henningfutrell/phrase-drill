@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  ROUTE_HOLD_SOURCE_SECONDS,
   ROUTE_HOLD_WATCHDOG_MS,
   createRouteHold,
   createRouteHoldWav,
@@ -50,6 +51,18 @@ describe('createRouteHoldWav — the keepalive source, byte by byte', () => {
 
   it('is exactly one second long — 44100 mono 16-bit frames behind a 44-byte header', () => {
     expect(bytes.length).toBe(44 + 44100 * 2)
+  })
+
+  it('publishes its own length, and that length agrees with the bytes it produced', () => {
+    // The wrap credit in `onTimeUpdate` needs the source length exactly. A
+    // magic `1` there would go stale the moment the rate or the frame count
+    // moved; this pins the exported constant to the actual data chunk.
+    const dataBytes = view.getUint32(40, true)
+    const bytesPerFrame = (view.getUint16(34, true) / 8) * view.getUint16(22, true)
+    expect(ROUTE_HOLD_SOURCE_SECONDS).toBeCloseTo(
+      dataBytes / bytesPerFrame / view.getUint32(24, true),
+      9,
+    )
   })
 
   it('is never digitally silent: every frame is +1 or -1, and no frame is 0', () => {
@@ -178,6 +191,32 @@ describe('createRouteHold — holding the output route', () => {
     expect(element.pauseCalls).toBe(1)
   })
 
+  it('sets loop on the element, because a one-second source that does not repeat holds nothing', async () => {
+    // Split out of the combined test above on purpose: dropping `loop` and
+    // dropping `pause()` both failed that one test, so neither red named
+    // which property had gone.
+    const element = fakeElement()
+    const hold = createRouteHold({ element })
+
+    hold.hold()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(element.loop).toBe(true)
+  })
+
+  it('pauses the element on release, so a stopped Drill stops holding the route', async () => {
+    const element = fakeElement()
+    const hold = createRouteHold({ element })
+
+    hold.hold()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(element.pauseCalls).toBe(0)
+
+    hold.release()
+
+    expect(element.pauseCalls).toBe(1)
+  })
+
   it('never writes muted and never writes volume — the amplitude lives in the samples', async () => {
     const element = fakeElement()
     const hold = createRouteHold({ element })
@@ -241,25 +280,75 @@ describe('createRouteHold — holding the output route', () => {
     expect(hold.stats().totalHeldMs).toBeGreaterThanOrEqual(10_000)
   })
 
-  it('accumulates forward currentTime deltas, and ignores the backward jump of a loop wrap', async () => {
+  it('credits the loop wrap, so a wrap does not silently delete a quarter of every second', () => {
+    // `'timeupdate'` fires roughly four times a second and the source is
+    // exactly one second long, so a wrap lands between two samples on every
+    // single cycle. Crediting only forward deltas throws away the tail of
+    // the old cycle plus the head of the new one — about 250 ms per wrap,
+    // once per second of wall clock — and reports a perfectly healthy hold
+    // as having played 75 % of the time it was held. The Route hold line is
+    // the only instrument that distinguishes "iOS played it" from "iOS
+    // refused it", so a systematic 25 % under-read is a confident falsehood.
     const element = fakeElement()
     const hold = createRouteHold({ element })
 
     hold.hold()
-    await vi.advanceTimersByTimeAsync(0)
 
     element.currentTime = 0.25
     element.emitTimeUpdate()
     element.currentTime = 0.75
     element.emitTimeUpdate()
-    // The 1 s source wrapped: currentTime falls back to the head. That is not
-    // −750 ms of playback, it is the loop doing its job.
+    // The 1 s source wrapped: currentTime falls back to the head. Real
+    // playback between the two samples is the 0.25 s left of the old cycle
+    // plus the 0.1 s already played of the new one.
     element.currentTime = 0.1
     element.emitTimeUpdate()
     element.currentTime = 0.6
     element.emitTimeUpdate()
 
-    expect(hold.stats().advancedMs).toBeCloseTo(1250, 6)
+    expect(hold.stats().advancedMs).toBeCloseTo(1600, 6)
+  })
+
+  it('reports advancedMs within one timeupdate of heldMs across ten minutes of wraps — the steady state she will read', async () => {
+    // Tolerance is one `'timeupdate'` interval (250 ms at Safari's ~4/s):
+    // when the report is read, at most one un-sampled interval of playback
+    // can still be outstanding. Anything larger is a systematic error, not
+    // sampling. 250 ms of 600 000 is 0.04 %, so this fails loudly on the
+    // 25 %-per-wrap under-read it exists to pin.
+    const element = fakeElement()
+    const hold = createRouteHold({ element })
+
+    hold.hold()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let second = 0; second < 600; second += 1) {
+      for (const time of [0.25, 0.5, 0.75, 0]) {
+        element.currentTime = time
+        element.emitTimeUpdate()
+      }
+      await vi.advanceTimersByTimeAsync(1000)
+    }
+
+    const { advancedMs, totalHeldMs } = hold.stats()
+    expect(totalHeldMs).toBeGreaterThanOrEqual(600_000)
+    expect(Math.abs(advancedMs - totalHeldMs)).toBeLessThanOrEqual(250)
+  })
+
+  it('never credits more than one source length for a single backward jump, however nonsensical', () => {
+    // currentTime should never leave [0, 1) on a looping 1 s source. If it
+    // does, the wrap credit must not be able to invent playback.
+    const element = fakeElement()
+    const hold = createRouteHold({ element })
+
+    hold.hold()
+    element.currentTime = 900
+    element.emitTimeUpdate()
+    const afterForwardJump = hold.stats().advancedMs
+    element.currentTime = 0
+    element.emitTimeUpdate()
+
+    expect(hold.stats().advancedMs - afterForwardJump).toBeLessThanOrEqual(
+      ROUTE_HOLD_SOURCE_SECONDS * 1000,
+    )
   })
 
   it('reports a rejecting play() exactly once, carrying the DOMException name', async () => {

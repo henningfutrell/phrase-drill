@@ -922,6 +922,60 @@ describe('DrillScreen — the Route hold', () => {
     expect(holdAudioRoute).toHaveBeenCalledTimes(2)
   })
 
+  it('releases the hold the moment the app is backgrounded', async () => {
+    // Split from the combined hidden/Resume test: deleting the release on
+    // hidden and deleting the re-hold on Resume both failed that one test,
+    // so neither red named which half had gone.
+    const releaseAudioRoute = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        holdAudioRoute={() => {}}
+        releaseAudioRoute={releaseAudioRoute}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    expect(releaseAudioRoute).not.toHaveBeenCalled()
+
+    await act(async () => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushMicrotasks()
+    })
+
+    expect(releaseAudioRoute).toHaveBeenCalledTimes(1)
+  })
+
+  it('takes the hold again on Resume — after an iOS suspend the old hold is dead', async () => {
+    const holdAudioRoute = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        holdAudioRoute={holdAudioRoute}
+        releaseAudioRoute={() => {}}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    expect(holdAudioRoute).toHaveBeenCalledTimes(1)
+
+    await click(testid('drill-pause-resume'))
+    await click(testid('drill-pause-resume'))
+
+    expect(holdAudioRoute).toHaveBeenCalledTimes(2)
+  })
+
   it('never crashes when no Route hold is supplied', async () => {
     render(
       <DrillScreen
