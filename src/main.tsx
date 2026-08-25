@@ -19,6 +19,7 @@ import { createSyncedLibrary } from './adapters/sync/synced-library'
 import { createSessionAuth, AuthRequiredError } from './adapters/auth/session-auth'
 import { LoginScreen } from './ui/LoginScreen'
 import { createIndexedDbErrorLog, installErrorCapture, withAdapterErrorLogging } from './adapters/diagnostics'
+import { createRootRenderer } from './root-renderer'
 import './styles.css'
 
 const rootElement = document.getElementById('root')
@@ -76,8 +77,16 @@ installErrorCapture(errorLog)
 // app (App.tsx switches screens by state, never a URL).
 const auth = createSessionAuth({ onUnauthorized: () => showLogin() })
 
+// A single root for the app's life (see root-renderer.ts): a 401 from any
+// /api/* call routes through `showLogin()` to here, and a second
+// `createRoot` on this container would leave the previous tree mounted
+// forever with its effect cleanups unrun.
+const renderTree = createRootRenderer(rootElement, (container) =>
+  createRoot(container as HTMLElement),
+)
+
 function renderRoot(children: ReactNode): void {
-  createRoot(rootElement as HTMLElement).render(<StrictMode>{children}</StrictMode>)
+  renderTree(<StrictMode>{children}</StrictMode>)
 }
 
 function showLogin(): void {
