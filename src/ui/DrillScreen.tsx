@@ -165,6 +165,24 @@ export interface DrillScreenProps {
    */
   readonly holdAudioRoute?: () => void
   readonly releaseAudioRoute?: () => void
+  /**
+   * Generation suspension (docs/glossary.md): stops the Clip-generation
+   * queue issuing anything for the whole of a Drill — the Start tap until
+   * the run stops, a Pause included. Four concurrent HTTPS fetches, the MP3
+   * bodies behind them, and the IndexedDB writes that follow all compete
+   * with the audio the user is listening to on a phone on cellular — and none of
+   * that work is for the Drill that is playing, since only `ready` Phrases
+   * enter one.
+   *
+   * The queue's `suspend()` is an idempotent boolean and never a counter,
+   * because this screen takes suspension from two places — the Start tap,
+   * synchronously, and the effect that watches the running phase — and
+   * releases it from one. Two takes against one release is what makes every
+   * release path load-bearing, including the unlock failure that never
+   * reaches the running phase at all.
+   */
+  readonly suspendGeneration?: () => void
+  readonly resumeGeneration?: () => void
   /** Back to whatever screen launched this Drill (Deck detail or Mix). */
   readonly onExit: () => void
   /** Only used for the 'no-voice' blocked reason. */
@@ -207,6 +225,8 @@ export function DrillScreen({
   releaseWakeLock,
   holdAudioRoute,
   releaseAudioRoute,
+  suspendGeneration,
+  resumeGeneration,
   onExit,
   onOpenSettings,
 }: DrillScreenProps) {
@@ -270,15 +290,35 @@ export function DrillScreen({
   // rest of the app's life. Keyed on nothing and read through a ref: the prop
   // is a fresh arrow on every App render (App.tsx wires it the way it wires
   // acquireWakeLock), so an effect keyed on it would release the hold
-  // mid-Drill on any unrelated re-render. Necessary but not sufficient —
-  // React does not unmount a tree displaced by a second `createRoot` on the
-  // same container, so this cleanup may never run at all. The hold's own
-  // watchdog is the load-bearing half of that mitigation.
+  // mid-Drill on any unrelated re-render. Since T002 this cleanup does run:
+  // `root-renderer.ts` memoizes one React root per container, so `showLogin()`
+  // genuinely unmounts this tree instead of displacing it. That makes the
+  // hold's own watchdog the belt rather than the braces — kept, not relied on.
   const releaseAudioRouteRef = useRef(releaseAudioRoute)
+  // Generation suspension's pair, held the same way and for the same reason
+  // (see their prop doc): App.tsx wires them as fresh arrows too, so the
+  // effect below can key on `phase.kind` and nothing else.
+  const suspendGenerationRef = useRef(suspendGeneration)
+  const resumeGenerationRef = useRef(resumeGeneration)
   useEffect(() => {
     releaseAudioRouteRef.current = releaseAudioRoute
+    suspendGenerationRef.current = suspendGeneration
+    resumeGenerationRef.current = resumeGeneration
   })
   useEffect(() => () => releaseAudioRouteRef.current?.(), [])
+
+  // Generation suspension for the whole of the running phase — the second of
+  // its two takes, and the only one that registers a release. Keyed on
+  // `phase.kind` alone: App re-renders during a Drill (the sync engine's
+  // snapshot subscription, a write failure, settings), and keying on the
+  // callbacks' identities would fire cleanup → resume() → body → suspend()
+  // on every one of those, letting the parked Clips into the network
+  // mid-Drill.
+  useEffect(() => {
+    if (phase.kind !== 'running') return
+    suspendGenerationRef.current?.()
+    return () => resumeGenerationRef.current?.()
+  }, [phase.kind])
 
   /** Pulls status/position off the player after any control call, and exits
    * cleanly the moment the Drill has actually stopped (manual Stop, a Skip
@@ -314,9 +354,24 @@ export function DrillScreen({
       // audio is worse than choppy audio.
       const unlocking = unlock()
       holdAudioRoute?.()
+      // Generation suspension's first take, inside the tap. The running-phase
+      // effect above cannot do this job alone: `setPhase` below is scheduled
+      // rather than flushed, and `player.start()` runs straight through to
+      // the first `speak()` in the same synchronous stretch, so the effect
+      // lands a scheduler task after the Drill is already making sound. A
+      // boolean write that touches no DOM, so it cannot cost the gesture the
+      // two play() calls above depend on.
+      suspendGeneration?.()
       const outcome = await unlocking
       if (!outcome.ok) {
         releaseAudioRoute?.()
+        // The only release on this path, and it has to be explicit: `phase`
+        // goes 'start' → 'start', so the running-phase effect never mounts
+        // and no cleanup is ever registered — unmounting the screen would
+        // release nothing. The queue is App-lifetime (main.tsx `showApp`),
+        // so without this line one refused unlock stops their library filling
+        // for as long as the app stays loaded.
+        resumeGeneration?.()
         setPhase({ kind: 'start', ready: readyPhrases, skippedCount, online, unlockFailure: outcome })
         return
       }
@@ -357,6 +412,12 @@ export function DrillScreen({
   }
 
   function handlePause(): void {
+    // Deliberately does NOT resume generation: `phase.kind` stays 'running',
+    // so the running-phase effect keeps its take. That is broader than the
+    // stated requirement — "no new request while a Drill is playing" — and
+    // it is a decision rather than a consequence: the user is mid-Drill and about
+    // to carry on, and generating through a Pause wakes the very Bluetooth
+    // route the Route hold exists to keep warm.
     playerRef.current?.pause()
     syncFromPlayer()
   }
@@ -405,6 +466,13 @@ export function DrillScreen({
         // attached, this is what bounds an unreleasable hold to "until the user
         // next backgrounds the app". Resume takes it again.
         releaseAudioRoute?.()
+        // Generation suspension is deliberately NOT released here, unlike
+        // the hold on the line above. iOS has suspended everything anyway,
+        // and generation is the one thing left that could wake the radio
+        // while the Drill is frozen. Stated rather than left to be found:
+        // a Drill left backgrounded holds suspension until the user comes back
+        // and stops it or plays it out. No watchdog — a timer resuming here
+        // would resume mid-Drill, which is exactly what handlePause refuses.
       }
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
