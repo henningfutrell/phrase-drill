@@ -1055,7 +1055,7 @@ describe('App wired to the Drill screen', () => {
     expect(playCalls).toBeGreaterThan(0)
   })
 
-  it('suspends Clip generation for the whole of the Drill it starts, and resumes it when she stops (T004)', async () => {
+  it('suspends Clip generation for the whole of the Drill it starts, and resumes it when she stops', async () => {
     // The composition root's half of Generation suspension. Without it the
     // change is a complete, correct DrillScreen wired to nothing: the queue
     // App owns keeps fetching MP3s through the run and nothing in

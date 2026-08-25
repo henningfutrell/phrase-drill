@@ -995,7 +995,7 @@ describe('DrillScreen — the Route hold', () => {
 })
 
 /**
- * Generation suspension (T004): while a Drill is playing, the Clip-generation
+ * Generation suspension: while a Drill is playing, the Clip-generation
  * queue issues nothing. The traffic it would otherwise be making — four
  * concurrent HTTPS fetches, the MP3 bodies behind them, the digests and the
  * IndexedDB writes that follow — competes with the audio she is listening to
