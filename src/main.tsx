@@ -43,10 +43,10 @@ if (!(audioElementCandidate instanceof HTMLAudioElement)) {
 const audioElement: HTMLAudioElement = audioElementCandidate
 
 // The Route hold's own element (T004), read the same way and for the same
-// reasons — with one more: reading the single element index.html declares,
-// rather than constructing one per render, is what stops `showLogin()`'s
-// second `createRoot` on this container from leaving a second, unreachable
-// hold playing on her phone's audio output.
+// reasons — with one more: an element declared once in index.html is the
+// only version of it there can ever be, so no code path can end up holding
+// a second, unreachable one playing on her phone's audio output while the
+// element this app knows about claims to be released.
 const routeHoldElementCandidate = document.getElementById('route-hold-audio')
 if (!(routeHoldElementCandidate instanceof HTMLAudioElement)) {
   throw new Error('route-hold-audio element not found')

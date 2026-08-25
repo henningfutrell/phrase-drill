@@ -1051,6 +1051,8 @@ function App({
           releaseWakeLock={() => wakeLock.release()}
           holdAudioRoute={() => routeHold.hold()}
           releaseAudioRoute={() => routeHold.release()}
+          suspendGeneration={() => generationQueue.suspend()}
+          resumeGeneration={() => generationQueue.resume()}
           onExit={() => setDrillTarget(undefined)}
           onOpenSettings={handleOpenSettings}
         />
