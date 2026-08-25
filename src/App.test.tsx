@@ -218,6 +218,8 @@ function createFakeGenerationQueue(): GenerationQueue & { enqueued: Array<{ id: 
       return undefined
     },
     async whenIdle() {},
+    suspend() {},
+    resume() {},
   }
 }
 

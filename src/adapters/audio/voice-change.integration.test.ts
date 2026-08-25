@@ -85,7 +85,7 @@ describe('changing the pinned voice (T067)', () => {
     await settingsStore.setVoice(VOICE_B)
     const readiness = await computeDrillReadiness(PHRASES, {
       clipCache,
-      generationQueue: { enqueue, statusFor: vi.fn(), whenIdle: async () => {} },
+      generationQueue: { enqueue, statusFor: vi.fn(), whenIdle: async () => {}, suspend: vi.fn(), resume: vi.fn() },
       voice: (await settingsStore.load()).voice,
       isOnline: () => true,
     })

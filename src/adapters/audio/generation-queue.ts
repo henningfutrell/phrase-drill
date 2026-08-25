@@ -95,8 +95,38 @@ export interface GenerationQueue {
    * has finished" that does not mean "N microtask turns have passed" — that
    * was a real race (T056), failing about one run in twelve, and adding
    * concurrency and backoff here would only have widened it.
+   *
+   * **It does not resolve while the queue is suspended** and anything is
+   * parked. That is not a stall dressed up as one: parked work is genuinely
+   * still outstanding, and a latch that ended it at the gate would report a
+   * suspended queue as a finished one.
    */
   whenIdle(): Promise<void>
+  /**
+   * Generation suspension: stop issuing work for the whole of a Drill, and
+   * pick it up again afterwards.
+   *
+   * The span is the Drill — from the Start tap to the run ending, a Pause
+   * included. What is being protected is the audio the user is listening to. Four
+   * concurrent HTTPS fetches, the MP3 bodies behind them, the
+   * `crypto.subtle` digests, and the IndexedDB writes that follow all
+   * compete with playback on a phone on cellular, on the same IndexedDB
+   * connection the `ClipPlayer` reads the next Clip from.
+   *
+   * Nothing is dropped or aborted: a suspended Clip parks before its
+   * request, spending no retry attempt and no rate-limit wait, and carries on
+   * from there on `resume()`. The residual is at most `maxConcurrent`
+   * requests already in flight when suspension landed.
+   *
+   * Both are **idempotent boolean writes, never a counter**. Suspension is
+   * taken from two places — the Start tap, and the effect that watches the
+   * running phase — and released from one. A counter would reach two, come
+   * back to one, and leave the queue suspended for the life of the app.
+   * `suspend()` while suspended and `resume()` while running are both
+   * no-ops.
+   */
+  suspend(): void
+  resume(): void
 }
 
 /**
@@ -128,6 +158,12 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
    * by whichever request last learned it is being paced. */
   let resumeAt = 0
 
+  /** Generation suspension, a boolean and not a counter — see the port's
+   * `suspend()` doc for why. `resumeWaiters` holds one resolver per parked
+   * caller; `resume()` drains it once. */
+  let suspended = false
+  let resumeWaiters: Array<() => void> = []
+
   function setStatus(phraseId: string, status: GenerationStatus): void {
     statuses.set(phraseId, status)
     deps.onStatusChange?.(phraseId, status)
@@ -136,6 +172,34 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   async function waitOutRateLimit(): Promise<void> {
     const remaining = resumeAt - now()
     if (remaining > 0) await sleep(remaining)
+  }
+
+  /** Parks until the queue is not suspended. Reads `suspended` and pushes its
+   * resolver in one synchronous stretch, so no `resume()` can land between
+   * the read and the push and be missed. `for`, not `if`: a woken caller
+   * re-reads, because the screen can re-suspend in the same turn it
+   * released. */
+  async function whenNotSuspended(): Promise<void> {
+    for (;;) {
+      if (!suspended) return
+      await new Promise<void>((resolve) => resumeWaiters.push(resolve))
+    }
+  }
+
+  /** The gate at the head of every attempt: suspension, then the rate limit,
+   * then suspension again.
+   *
+   * Two separate takes rather than one loop that re-reads both. `sleep` and
+   * `now` are independent seams, and a test may inject `sleep` alone; a gate
+   * that re-read `resumeAt` after each sleep would spin on immediately
+   * resolved promises for the whole real-time retry window, and would not
+   * terminate at all against a frozen `now`. `waitOutRateLimit` therefore
+   * stays exactly one sleep per iteration, and the trailing take catches a
+   * suspension that arrived during it. */
+  async function waitUntilAllowed(): Promise<void> {
+    await whenNotSuspended()
+    await waitOutRateLimit()
+    await whenNotSuspended()
   }
 
   /** One Clip, from the first request to a settled outcome. Holds a
@@ -147,7 +211,7 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
     let rateLimitWaits = 0
 
     for (;;) {
-      await waitOutRateLimit()
+      await waitUntilAllowed()
       try {
         const result = await deps.synthClient.synthesize(text, lang, {
           provider: voice.provider,
@@ -181,6 +245,14 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   }
 
   async function generateOne(text: string, lang: Language, voice: Voice): Promise<GenerationStatus> {
+    // Before the hash, not just before the request. `computeClipHash` and
+    // `clipCache.has` sit outside the concurrency slot and are therefore
+    // unbounded: a cold 1,000-Phrase library would put 2,000
+    // `crypto.subtle` digests and 2,000 IndexedDB reads on the connection
+    // the ClipPlayer reads the next Clip from, none of which a gate at
+    // `requestClip` stops. The only cost is that a cached Clip's `ready`
+    // fast-path waits for the resume too.
+    await whenNotSuspended()
     const hash = await computeClipHash({
       provider: voice.provider,
       modelId: voice.modelId,
@@ -227,6 +299,20 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
     },
 
     whenIdle: idle.whenIdle,
+
+    suspend() {
+      suspended = true
+    },
+
+    resume() {
+      suspended = false
+      // Swap the list out before resolving: a woken caller that finds itself
+      // suspended again re-parks onto the fresh list, and must not be
+      // drained a second time by this same call.
+      const woken = resumeWaiters
+      resumeWaiters = []
+      for (const resolve of woken) resolve()
+    },
   }
 }
 

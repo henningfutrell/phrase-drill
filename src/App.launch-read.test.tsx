@@ -194,6 +194,8 @@ const noopQueue: GenerationQueue = {
     return undefined
   },
   async whenIdle() {},
+  suspend() {},
+  resume() {},
 }
 const noopClipCache: BoundedClipCache = {
   async get() {
