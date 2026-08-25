@@ -203,14 +203,24 @@ function createFakeSynthClient(): SynthClient & { synthesize: ReturnType<typeof 
   return { synthesize }
 }
 
-/** A GenerationQueue fake that only records what it was asked to enqueue —
- * the real queue is exercised in src/adapters/audio; App's wiring is what
- * these tests care about. `enqueue` never resolves, by design: it proves the
- * Phrase save itself is never gated on generation completing. */
-function createFakeGenerationQueue(): GenerationQueue & { enqueued: Array<{ id: string; french: string; english: string }> } {
+/** A GenerationQueue fake that only records what it was asked to do — the
+ * real queue is exercised in src/adapters/audio; App's wiring is what these
+ * tests care about. `enqueue` never resolves, by design: it proves the
+ * Phrase save itself is never gated on generation completing.
+ *
+ * `suspensions` records Generation suspension in order rather than counting
+ * it: the span is taken twice per Drill (the Start tap and the running-phase
+ * effect) and released once, so only the sequence says whether the
+ * composition root wired both ends of it. */
+function createFakeGenerationQueue(): GenerationQueue & {
+  enqueued: Array<{ id: string; french: string; english: string }>
+  suspensions: Array<'suspend' | 'resume'>
+} {
   const enqueued: Array<{ id: string; french: string; english: string }> = []
+  const suspensions: Array<'suspend' | 'resume'> = []
   return {
     enqueued,
+    suspensions,
     enqueue(phrase) {
       enqueued.push({ id: phrase.id, french: phrase.french, english: phrase.english })
     },
@@ -218,8 +228,12 @@ function createFakeGenerationQueue(): GenerationQueue & { enqueued: Array<{ id: 
       return undefined
     },
     async whenIdle() {},
-    suspend() {},
-    resume() {},
+    suspend() {
+      suspensions.push('suspend')
+    },
+    resume() {
+      suspensions.push('resume')
+    },
   }
 }
 
@@ -1039,6 +1053,36 @@ describe('App wired to the Drill screen', () => {
     await act(async () => click(container.querySelector('[data-testid="drill-start"]')!))
 
     expect(playCalls).toBeGreaterThan(0)
+  })
+
+  it('suspends Clip generation for the whole of the Drill it starts, and resumes it when the user stops (T004)', async () => {
+    // The composition root's half of Generation suspension. Without it the
+    // change is a complete, correct DrillScreen wired to nothing: the queue
+    // App owns keeps fetching MP3s through the run and nothing in
+    // DrillScreen.test.tsx can see it.
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    const clipCache = createFakeClipCache(new Set(['p1']))
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(
+      store,
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      generationQueue,
+      clipCache,
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-start"]')!))
+
+    // Twice: the Start tap's take and the running-phase effect's. The queue's
+    // suspend() is an idempotent boolean, so the second is a no-op.
+    expect(generationQueue.suspensions).toEqual(['suspend', 'suspend'])
+
+    await act(async () => click(container.querySelector('[data-testid="drill-stop"]')!))
+
+    expect(generationQueue.suspensions).toEqual(['suspend', 'suspend', 'resume'])
   })
 })
 
