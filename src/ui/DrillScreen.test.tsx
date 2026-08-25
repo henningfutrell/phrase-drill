@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DrillScreen, type DrillReadinessResult } from './DrillScreen'
-import type { Phrase } from '../domain'
+import type { Phrase, SpeechPort } from '../domain'
 import {
   controllableSpeech,
   fakeClock,
@@ -991,5 +991,259 @@ describe('DrillScreen — the Route hold', () => {
     await click(testid('drill-start'))
     await click(testid('drill-stop'))
     // no throw is the assertion
+  })
+})
+
+/**
+ * Generation suspension (T004): while a Drill is playing, the Clip-generation
+ * queue issues nothing. The traffic it would otherwise be making — four
+ * concurrent HTTPS fetches, the MP3 bodies behind them, the digests and the
+ * IndexedDB writes that follow — competes with the audio she is listening to
+ * on cellular, and it is not even work for the Drill that is playing: only
+ * `ready` Phrases enter a Drill.
+ *
+ * Suspension is taken twice — synchronously in the Start tap, and again by
+ * the effect that watches the running phase — and released once, by that
+ * effect's cleanup. `GenerationQueue.suspend()` is an idempotent boolean, so
+ * the second take costs nothing; the asymmetry is why every release path
+ * needs its own test below.
+ */
+describe('DrillScreen — Generation suspension', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+  })
+
+  it('suspends generation inside the Start tap, before unlock() has resolved', async () => {
+    // The tap's own take, not the running-phase effect's. `setPhase({kind:
+    // 'running'})` is scheduled rather than flushed, so an effect-only take
+    // lands a scheduler task after the Drill has begun making sound.
+    const order: string[] = []
+    // The executor form, not `Promise.withResolvers`: this project's
+    // `lib` target predates it, so the latter does not compile here.
+    let finishUnlock: ((outcome: { ok: true }) => void) | undefined
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => {
+          order.push('unlock')
+          return new Promise((resolve) => {
+            finishUnlock = resolve
+          })
+        }}
+        suspendGeneration={() => order.push('suspend')}
+        resumeGeneration={() => order.push('resume')}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    // unlock() has not resolved yet, and generation is already quiet.
+    expect(order).toEqual(['unlock', 'suspend'])
+
+    await act(async () => {
+      finishUnlock?.({ ok: true })
+      await flushMicrotasks()
+    })
+  })
+
+  it('suspends generation before the first Utterance is spoken', async () => {
+    // Split from the tap-ordering test on purpose: this one is about React's
+    // flush order rather than the tap's. `player.start()` runs straight
+    // through to `speech.speak()` with no yield point, so a take that lived
+    // only in the running-phase effect would arrive after the first line.
+    const order: string[] = []
+    const speech = controllableSpeech()
+    const recordingSpeech: SpeechPort = {
+      speak(text, lang) {
+        order.push('speak')
+        return speech.speak(text, lang)
+      },
+      cancel() {
+        speech.cancel()
+      },
+    }
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={recordingSpeech}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        suspendGeneration={() => order.push('suspend')}
+        resumeGeneration={() => order.push('resume')}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    expect(order).toContain('speak')
+    expect(order.slice(0, order.indexOf('speak'))).toContain('suspend')
+  })
+
+  it('resumes generation when unlock refuses, so a failed Start does not quiet the queue for the life of the app', async () => {
+    // The tap's take is the only one taken on this path: `phase` goes
+    // 'start' → 'start', the running-phase effect never mounts, and no
+    // cleanup is ever registered — unmounting the screen releases nothing
+    // because there is nothing to release. The queue is App-lifetime, so
+    // without an explicit release here one refused unlock stops her library
+    // filling until the app is reloaded.
+    const resumeGeneration = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() =>
+          Promise.resolve({ ok: false as const, name: 'NotAllowedError', message: 'refused' })
+        }
+        suspendGeneration={() => {}}
+        resumeGeneration={resumeGeneration}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    expect(testid('drill-start-card')).not.toBeNull()
+    expect(resumeGeneration).toHaveBeenCalledTimes(1)
+  })
+
+  it('resumes generation exactly once if the screen is discarded mid-Drill', async () => {
+    // Not reachable from any control here — the running phase renders
+    // Skip/Pause/Stop only. It is reachable from a 401 on any /api call,
+    // which renders the login screen into the one root (root-renderer.ts)
+    // and unmounts this tree, and from the natural end of a Drill.
+    const resumeGeneration = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        suspendGeneration={() => {}}
+        resumeGeneration={resumeGeneration}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    expect(resumeGeneration).not.toHaveBeenCalled()
+
+    const discarded = container
+    await act(async () => {
+      root.unmount()
+    })
+    discarded.remove()
+
+    expect(resumeGeneration).toHaveBeenCalledTimes(1)
+
+    // Leave a live root behind for the shared afterEach to unmount.
+    render(<div />)
+  })
+
+  it('does not resume and re-take on an unrelated re-render — the props are fresh arrows every time', async () => {
+    // App.tsx wires these the way it wires releaseAudioRoute: a new closure
+    // on every App render, and App does re-render during a Drill (the sync
+    // engine's snapshot subscription, a write failure, settings). An effect
+    // keyed on those identities would fire cleanup → resume() → body →
+    // suspend() on every one of them, letting four parked Clips into the
+    // network mid-Drill.
+    const suspendGeneration = vi.fn()
+    const resumeGeneration = vi.fn()
+    const screen = (): ReactElement => (
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        suspendGeneration={() => suspendGeneration()}
+        resumeGeneration={() => resumeGeneration()}
+        onExit={() => {}}
+      />
+    )
+    render(screen())
+    await settle()
+    await click(testid('drill-start'))
+    suspendGeneration.mockClear()
+    resumeGeneration.mockClear()
+
+    await act(async () => {
+      root.render(screen())
+      await flushMicrotasks()
+    })
+
+    expect(resumeGeneration).not.toHaveBeenCalled()
+    expect(suspendGeneration).not.toHaveBeenCalled()
+  })
+
+  it('does not resume generation when she pauses mid-Drill', async () => {
+    // Deliberately broader than "no request while a Drill is playing": a
+    // Pause is a moment inside a Drill she is about to carry on with, and
+    // generating through it wakes the very radio the Route hold exists to
+    // keep warm.
+    const resumeGeneration = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        suspendGeneration={() => {}}
+        resumeGeneration={resumeGeneration}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    await click(testid('drill-pause-resume'))
+    expect(textOf('drill-pause-resume')).toBe('Resume')
+
+    expect(resumeGeneration).not.toHaveBeenCalled()
+  })
+
+  it('does not resume generation when the app is backgrounded mid-Drill', async () => {
+    // Deliberately unlike the Route hold, which IS released here: iOS has
+    // suspended everything anyway, and generation must not be the one thing
+    // left free to wake the radio while the Drill is frozen. The stated
+    // consequence: a Drill left backgrounded keeps generation off until she
+    // comes back and stops it.
+    const resumeGeneration = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        suspendGeneration={() => {}}
+        resumeGeneration={resumeGeneration}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    await act(async () => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushMicrotasks()
+    })
+    expect(testid('drill-interrupted-banner')).not.toBeNull()
+
+    expect(resumeGeneration).not.toHaveBeenCalled()
   })
 })
