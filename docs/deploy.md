@@ -106,7 +106,55 @@ do not cover.
 Everything above runs once. This is what happens every other time: a fix
 lands on `main` and needs to reach their phone.
 
-**It does not reach them on its own, and the reason is structural.** The
+**A merge to `main` deploys it.** `.github/workflows/deploy.yml` runs the
+gates, and only a green run calls Render's deploy hook. A red gate means **no
+deploy** — the previous build stays live, which is the outcome you want: the user
+keeps a working app rather than getting a broken one promptly.
+
+| Gate | Command | Why it is in CI |
+|---|---|---|
+| Lint | `npm run lint` | |
+| Typecheck | `npx tsc -b` | **never `tsc --noEmit`** — the root `tsconfig.json` is a solution file (`"files": []` + two references), so `--noEmit` compiles nothing and reports success |
+| Test | `npm test` | 1391 tests. The real-Postgres tests self-skip with `SMOKE_DATABASE_URL` unset, so no database is wired into the job |
+| Build | `npm run build` | |
+
+Node in the job is pinned to **26**, because `Dockerfile` builds and runs on
+`node:26-alpine`. CI green on a different major would prove nothing about the
+image that actually ships. Install is `npm ci` (`package-lock.json` is
+`lockfileVersion: 3`).
+
+`npm run test:mutation` is deliberately **not** in CI — it is domain-scoped
+and slow (`docs/testing.md`). It stays a local obligation when `src/domain/`
+changes, per `AGENTS.md`.
+
+Runs are at
+<https://github.com/<owner>/phrase-drill/actions/workflows/deploy.yml>.
+
+### The secret is `RENDER_WEBHOOK_URI`
+
+A GitHub repository secret
+(<https://github.com/<owner>/phrase-drill/settings/secrets/actions>)
+holding the `phrase-drill` service's **Deploy Hook URL** from its Render
+Settings page ([docs](https://render.com/docs/deploy-hooks)).
+
+**The URL is itself a credential.** It carries a `key=` query parameter and
+anyone holding it can trigger a deploy. Never commit it, and never write its
+value into this file. The workflow passes it through an env var rather than
+interpolating it into the command line, so it cannot land in a shell trace.
+
+The `curl` is `curl -fsS`, and the `-f` is not stylistic: **without it curl
+exits 0 on a 401**, so a regenerated or revoked hook would fail silently on
+every deploy, forever. If the hook is ever regenerated on the Render Settings
+page, update the secret — the workflow will go red until you do, which is the
+intended behaviour.
+
+**Never call the hook with a `ref=` parameter.** Per Render's docs, a
+deploy-hook call naming a commit **disables automatic deploys for the
+service** — which would silently undo the reconnect described below.
+
+### Why a workflow and not Render's own auto-deploy
+
+**Render cannot do it for this service, and the reason is structural.** The
 service is linked to this repo by **public Git repository URL**, not through
 a connected GitHub account — confirmed by the owner, 2026-08-24. Render's
 docs are explicit: services using "a public Git repository URL ... must be
@@ -114,7 +162,7 @@ deployed manually"
 ([Deploys → Automatic deploys](https://render.com/docs/deploys#automatic-deploys)).
 Auto-deploy is therefore **impossible by construction** for this service. No
 dashboard setting turns it on, and no Blueprint sync binds it to
-`render.yaml`.
+`render.yaml`. So this workflow is the release path, not a supplement to one.
 
 **The earlier diagnosis in this document was wrong**, and is named here only
 so it is not re-derived: it read the failure as an unreadable dashboard
@@ -132,65 +180,49 @@ in the current Blueprint spec in favour of `autoDeployTrigger: commit`
 `autoDeploy: true` is still honoured, and `autoDeployTrigger` takes
 precedence if both appear.
 
-**What this cost.** Two round trips through a non-technical user in another
-country — 2026-08-04 (the drill-unlock fix) and 2026-08-24 (the Route hold) —
-each to answer a question one `curl` answers in under a second, once the
-service URL is known. See "How to tell what is actually deployed" below.
+A plain GitHub **repo webhook** pointed straight at the deploy hook was also
+rejected, and not on taste: `push` webhooks cannot filter by branch, and this
+repo routinely pushes `wt/T###` and `backup/*` refs — every one of which would
+have deployed `main`. The `if: github.ref == 'refs/heads/main'` on the deploy
+step is what supplies the branch filter.
 
-### Until it is fixed: Manual Deploy, every time
+**What the absence of this cost.** Two round trips through a non-technical
+user in another country — 2026-08-04 (the drill-unlock fix) and 2026-08-24
+(the Route hold) — each to answer a question one `curl` answers in under a
+second, once the service URL is known. See "How to tell what is actually
+deployed" below.
 
-Render dashboard → the `phrase-drill` service → **Events** → **Manual
-Deploy** → *Deploy latest commit*
-([docs](https://render.com/docs/deploys#manual-deploys)). Then confirm with
-the sha check below, not with the dashboard.
+### If the gates pass but nothing new is live
 
-Do **not** reach for *Deploy a specific commit* unless you mean it: per
-Render's docs that option **disables automatic deploys for the service**,
-which matters the day the service is reconnected.
+That is a finding about the **hook**, not about the gates. Check, in order:
 
-If a Manual Deploy does not produce a live build, the Render dashboard →
-`phrase-drill` → **Logs** (or **Events**) tab shows whether the build or the
-health check (`healthCheckPath: /api/health`) failed.
+1. The run's `Deploy` step — `curl -fsS` fails loudly on a 401/404, so a
+   stale secret shows up there, not as silence.
+2. Render dashboard → `phrase-drill` → **Events**, for a deploy that started
+   and then failed, and **Logs** for the build or the health check
+   (`healthCheckPath: /api/health`).
+3. The sha check below. Do not re-run the workflow blindly.
 
-### The two ways to fix it, both needing the owner
+The manual fallback, unchanged and still available: Render dashboard → the
+`phrase-drill` service → **Events** → **Manual Deploy** → *Deploy latest
+commit* ([docs](https://render.com/docs/deploys#manual-deploys)). Then
+confirm with the sha check, not with the dashboard. Do **not** reach for
+*Deploy a specific commit* unless you mean it: per Render's docs that option
+**disables automatic deploys for the service**.
 
-1. **Reconnect the service through the GitHub account.** The real fix — it
-   makes the service *eligible* for auto-deploy, at which point
-   `render.yaml`'s declaration starts meaning something. **Warning: if Render
-   requires the service to be recreated in order to change its repo link,
-   recreating it loses the `fromDatabase` wiring for `DATABASE_URL` and both
-   `sync: false` provider keys** (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY` —
-   they exist only in Render's own store, never in this repo). So this is not
-   obviously the safe option: check whether the repo link is editable in
-   place before touching it.
+### The real fix, still needing the owner
 
-2. **A GitHub Actions workflow that curls a deploy hook.** Every Render
-   service has a **Deploy Hook URL** on its Settings page
-   ([docs](https://render.com/docs/deploy-hooks)). A workflow at
-   `.github/workflows/deploy.yml`, on `main` only, would run the gates
-   (`npm test`, `npx tsc -b --force`, `npm run lint`, `npm run build`) and
-   then `curl` the hook.
+**Reconnect the service through the GitHub account.** It makes the service
+*eligible* for Render's own auto-deploy, at which point `render.yaml`'s
+declaration starts meaning something and this workflow could drop its deploy
+step (keeping its gates). **Warning: if Render requires the service to be
+recreated in order to change its repo link, recreating it loses the
+`fromDatabase` wiring for `DATABASE_URL` and both `sync: false` provider
+keys** (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY` — they exist only in
+Render's own store, never in this repo). So this is not obviously the safe
+option: check whether the repo link is editable in place before touching it.
 
-   **The hook URL is a secret.** It carries a `key=` query parameter, and
-   anyone holding it can trigger a deploy. It belongs in a GitHub repository
-   secret named `RENDER_DEPLOY_HOOK_URL` (repo → Settings → Secrets and
-   variables → Actions). **Never commit it, and never write it into this
-   file.**
-
-   **Never call the hook with a `ref=` parameter.** Per Render's docs, a
-   deploy-hook call naming a commit **disables automatic deploys for the
-   service** — which would silently undo option 1 the moment it happened.
-
-Neither is built. The workflow was deliberately not added: the secret does
-not exist yet, and a workflow that cannot authenticate is worse than none.
-
-### Related gap: this repo has no CI at all
-
-1391 tests (2026-08-24) and **nothing runs them on push** — there is no
-`.github/` directory in this repo. That is independent of deployment: a
-broken `main` is found by whoever next runs `npm test` by hand. Option 2
-above would close both gaps in one file, which is a reason to prefer it, not
-a reason to conflate them.
+Until then, nothing needs doing. The workflow is the release path.
 
 ### On their phone, once a new build is live
 
