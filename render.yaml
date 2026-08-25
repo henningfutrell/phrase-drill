@@ -33,14 +33,29 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
-    # A fix that is merged but not deployed does not exist for them. This was
-    # never declared, so the service sat on whatever the dashboard defaulted
-    # to and a push to main reached GitHub and stopped there — found on
-    # 2026-08-04, when the drill-unlock fix (T001) was pushed and did not
-    # arrive. Declared here so the answer lives in the repo rather than in a
-    # dashboard nobody reads. NOTE: Render only picks this up when the
-    # Blueprint is re-synced (dashboard → Blueprint → Sync); changing this
-    # file alone does not retro-apply it to an already-created service.
+    # A fix that is merged but not deployed does not exist for them. The earlier
+    # diagnosis here was that auto-deploy had never been declared, so the
+    # service ran on an unreadable dashboard default and one Blueprint sync
+    # would bind it to this file. **That diagnosis is superseded, 2026-08-24.**
+    # The owner confirmed the service is linked by **public Git repository
+    # URL**, not through a connected GitHub account. Render's docs are explicit:
+    # services using "a public Git repository URL ... must be deployed manually"
+    # (https://render.com/docs/deploys#automatic-deploys). The service was never
+    # *eligible* for auto-deploy — no dashboard setting and no Blueprint sync can
+    # make it so — and the dashboard's Auto-Deploy dropdown still displays "On
+    # Commit" (the default for a new service), which is why this read as
+    # configured and working for three weeks. Cost: two round trips through a
+    # non-technical user in another country, 2026-08-04 and 2026-08-24.
+    #
+    # `autoDeploy: true` below therefore has **no effect on this service**. It is
+    # kept rather than deleted: it is the correct declaration the day the service
+    # is reconnected through the GitHub account. Note it is also **deprecated** in
+    # the current Blueprint spec in favour of `autoDeployTrigger: commit`
+    # (https://render.com/docs/blueprint-spec) — `autoDeploy: true` is still
+    # honoured, and `autoDeployTrigger` takes precedence if both are present.
+    #
+    # The fix needs the owner; both options are written up in docs/deploy.md
+    # "Shipping a change after the one-time setup".
     autoDeploy: true
     envVars:
       # DATABASE_URL is wired from the database resource above, never a
