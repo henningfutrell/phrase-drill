@@ -290,7 +290,7 @@ export function DrillScreen({
   // rest of the app's life. Keyed on nothing and read through a ref: the prop
   // is a fresh arrow on every App render (App.tsx wires it the way it wires
   // acquireWakeLock), so an effect keyed on it would release the hold
-  // mid-Drill on any unrelated re-render. Since T002 this cleanup does run:
+  // mid-Drill on any unrelated re-render. This cleanup does run, since
   // `root-renderer.ts` memoizes one React root per container, so `showLogin()`
   // genuinely unmounts this tree instead of displacing it. That makes the
   // hold's own watchdog the belt rather than the braces — kept, not relied on.
