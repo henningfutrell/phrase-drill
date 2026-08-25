@@ -1,0 +1,83 @@
+# CI, and the release path — not two things that happen to share a file.
+#
+# The Render service is linked to this repo by *public Git repository URL*,
+# and Render's docs are explicit that such a service "must be deployed
+# manually" (docs/deploy.md, "Shipping a change after the one-time setup").
+# Auto-deploy is impossible by construction there, whatever the dashboard's
+# Auto-Deploy dropdown displays. So this workflow is how a change reaches her
+# phone: the gates run, and only a green run calls the deploy hook.
+#
+# A plain GitHub repo webhook pointed at the hook was rejected deliberately:
+# `push` webhooks cannot filter by branch, and this repo routinely pushes
+# `wt/T###` and `backup/*` refs — every one of which would have deployed
+# `main`. The `if:` on the deploy step is what supplies the branch filter.
+
+name: CI and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One deploy at a time, and never cancel one that has started: an interrupted
+# deploy leaves the service in a state nobody chose. Queueing is the cost.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node 26 because `Dockerfile` builds and runs on `node:26-alpine`. A CI
+      # that passes on a different major can pass where the image fails.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      # `npm ci`, not `npm install`: package-lock.json is lockfileVersion 3
+      # and the lockfile is the point of running this at all.
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # `tsc -b`, never `tsc --noEmit`: the root tsconfig.json is a solution
+      # file (`"files": []` plus two references), so `--noEmit` compiles
+      # nothing at all and reports success without having typechecked a line.
+      - name: Typecheck
+        run: npx tsc -b
+
+      # 1391 tests as of 2026-08-24. The real-Postgres tests self-skip with
+      # SMOKE_DATABASE_URL unset (12 skipped), which is why no database
+      # service is wired up here.
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # Last, and only on main. Three things here are load-bearing:
+      #
+      #  - `curl -fsS`. Without `-f`, curl exits 0 on a 401, so a regenerated
+      #    or revoked hook would fail silently forever — this application's
+      #    whole recurring defect class is a delivery step that looked fine.
+      #  - No `ref=` query parameter, ever. Per Render's docs a deploy-hook
+      #    call naming a commit permanently disables automatic deploys for the
+      #    service.
+      #  - The URL is the secret. It carries a `key=` parameter; anyone holding
+      #    it can deploy. It is passed through env, never interpolated into the
+      #    command line, so it cannot land in a shell trace or a log.
+      - name: Deploy
+        if: github.ref == 'refs/heads/main'
+        env:
+          deploy_url: ${{ secrets.RENDER_WEBHOOK_URI }}
+        run: curl -fsS "$deploy_url"
