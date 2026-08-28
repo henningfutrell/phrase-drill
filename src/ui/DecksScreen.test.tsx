@@ -50,6 +50,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -67,6 +68,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -86,6 +88,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -101,6 +104,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -117,6 +121,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
           onRestoreFileChosen={onRestoreFileChosen}
           onConfirmRestore={vi.fn()}
           onCancelRestore={vi.fn()}
@@ -135,6 +140,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -151,6 +157,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
           onOpenMix={onOpenMix}
         />,
       )
@@ -168,6 +175,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -184,12 +192,54 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
           onOpenImport={onOpenImport}
         />,
       )
     })
     click(container.querySelector('[data-testid="open-import"]')!)
     expect(onOpenImport).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * Long form — their own word for a Passage, and the only way to that screen.
+   * Unlike Mix and Scan it is not conditional: a Deck screen with no way to
+   * their long-form texts is a Deck screen that lost them.
+   */
+  it('renders a Long form action that calls onOpenPassages', () => {
+    const onOpenPassages = vi.fn()
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[deck('d1', 'Home', 3)]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          onOpenPassages={onOpenPassages}
+        />,
+      )
+    })
+    const action = container.querySelector('[data-testid="open-passages"]')!
+    expect(action.textContent).toBe('Long form')
+    click(action)
+    expect(onOpenPassages).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers Long form on the empty state too — a phone with no Decks may still have a page to read', () => {
+    act(() => {
+      root.render(
+        <DecksScreen
+          decks={[]}
+          onCreateDeck={vi.fn()}
+          onRenameDeck={vi.fn()}
+          onDeleteDeck={vi.fn()}
+          onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
+        />,
+      )
+    })
+    expect(container.querySelector('[data-testid="open-passages"]')).not.toBeNull()
   })
 
   it('omits the Scan a page link when onOpenImport is not provided', () => {
@@ -201,6 +251,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -217,6 +268,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={onOpenDeck}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -234,6 +286,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -254,6 +307,7 @@ describe('DecksScreen', () => {
           onRenameDeck={onRenameDeck}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -275,6 +329,7 @@ describe('DecksScreen', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={onDeleteDeck}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })
@@ -295,6 +350,7 @@ describe('DecksScreen — the sync line (T034)', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
           syncStatus="Synced 3 minutes ago"
         />,
       )
@@ -312,6 +368,7 @@ describe('DecksScreen — the sync line (T034)', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
         />,
       )
     })

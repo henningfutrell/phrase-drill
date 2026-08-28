@@ -1,9 +1,9 @@
 import type { IDBPDatabase } from 'idb'
-import type { Language, PhraseRecord, Voice } from '../../domain'
+import type { Language, Statement, Voice } from '../../domain'
 import { CLIPS_STORE, CLIP_META_STORE, createDatabaseConnection, runTransaction } from './database'
 
 /**
- * A cached rendering of one side of one Phrase, in one voice — the on-disk
+ * A cached rendering of one Statement, in one voice — the on-disk
  * shape of the `clips` store (T019 §5.2, docs/glossary.md "Clip"). `bytes`
  * is an `ArrayBuffer`, not a `Blob`: Safari's IndexedDB `Blob` support has a
  * buggy history, so this is the conservative choice. Playback wraps it with
@@ -49,7 +49,7 @@ export async function computeClipHash(key: ClipKey): Promise<string> {
  * readiness sweep and by playback so the two can never disagree: **the first
  * voice in the given order that has a Clip**, and callers put the pinned
  * voice first. Deterministic, and it stops at the first hit — a warm library
- * in the pinned voice costs one hash per side, exactly as before.
+ * in the pinned voice costs one hash per Statement, exactly as before.
  *
  * Takes `has` rather than a whole cache because the cache implementation
  * calls it from inside itself, against its own in-memory index.
@@ -67,6 +67,21 @@ export async function findCachedClipHash(
   return undefined
 }
 
+/**
+ * As much of a Rep as this cache needs to answer "could this play right now?":
+ * an id to report back, and the Statements whose Clips have to exist.
+ *
+ * Declared here rather than taking the domain's `Rep` because readiness has no
+ * use for a Cadence — and because that keeps the question askable about
+ * anything with Statements, not only about a thing the DrillPlayer would
+ * accept. A `Rep` satisfies it structurally, so the readiness sweep passes
+ * Reps straight through.
+ */
+export interface ReadyUnit {
+  readonly id: string
+  readonly statements: readonly Statement[]
+}
+
 export interface ClipCache {
   /**
    * The cached Clip, if there is one — and the one call that counts as
@@ -81,7 +96,7 @@ export interface ClipCache {
    * Marks `hashes` as the current run's working set — spared from eviction
    * for as long as they hold that status (T016, the defect where a clip a
    * running drill still needs could be evicted mid-run: `has()` does not
-   * count as play, so a Phrase the drill has not reached yet can carry a
+   * count as play, so a Rep the drill has not reached yet can carry a
    * stale `lastUsedAt` and lose to LRU while the drill that needs it runs).
    *
    * **Replaces the previous call's set; never adds to it.** One active
@@ -103,10 +118,22 @@ export interface ClipCache {
    */
   protect?(hashes: Iterable<string>): void
   /**
-   * Which of these Phrases already have both an FR and an EN clip cached in
-   * ANY of `voices` — "can be drilled right now, without generating
-   * anything". One call over the whole set, the question the drill-start
-   * readiness sweep asks, not one `has` per Phrase per language.
+   * Which of these units already have a cached Clip for EVERY one of their
+   * Statements, in ANY of `voices` — "can be drilled right now, without
+   * generating anything". One call over the whole set, the question the
+   * drill-start readiness sweep asks, not one `has` per Statement.
+   *
+   * **One rule, both kinds of unit.** A Phrase's Rep carries two Statements
+   * (French then English), a Line's carries one, and neither needed its own
+   * readiness rule: the question is universal over the Statement list. That
+   * is also why a unit with no Statements is ready — it is waiting for
+   * nothing, and the generation queue's `combineAll([])` agrees, which it
+   * must, or such a unit would be enqueued at every drill start and never
+   * become ready.
+   *
+   * An empty-text Statement is deliberately not special-cased: no Clip is
+   * ever generated for empty text, so a unit carrying one is never ready —
+   * exactly how a Phrase with an empty English half already behaved.
    *
    * **A list of voices, not the pinned one (T067).** A Clip's voice is a
    * property of that Clip: audio made in one voice stays playable after
@@ -116,7 +143,7 @@ export interface ClipCache {
    * first hit wins, so the ordinary case (everything in the pinned voice)
    * costs exactly what it did before.
    */
-  readyPhraseIds(phrases: readonly PhraseRecord[], voices: readonly Voice[]): Promise<Set<string>>
+  readyUnitIds(units: readonly ReadyUnit[], voices: readonly Voice[]): Promise<Set<string>>
 }
 
 /** What the cache is holding, and what it is allowed to hold (T036). */
@@ -228,9 +255,9 @@ interface ClipMeta {
  * go first, which is exactly the shape of their use. Oldest-first (by
  * `createdAt`) would evict the Deck the user has drilled daily since the day the user
  * made it. `has()` deliberately does not count: it is the readiness sweep's
- * question, asked of every Phrase in the library at every drill start, so
- * counting it would reset every Clip's age at once and leave the policy with
- * nothing to order by.
+ * question, asked about every Statement in the library at every drill start,
+ * so counting it would reset every Clip's age at once and leave the policy
+ * with nothing to order by.
  */
 export function createIndexedDbClipCache(options: ClipCacheOptions = {}): BoundedClipCache {
   const maxBytes = options.maxBytes ?? DEFAULT_CLIP_CACHE_MAX_BYTES
@@ -369,7 +396,7 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
    * audio and its index row as two separate `db.put`s left the same gap T078
    * closed on the way out, on the way in instead. Interrupted between them —
    * the tab killed, the phone reclaiming the app mid-generation — the audio
-   * lands with no row describing it: `has()` and `readyPhraseIds` answer from
+   * lands with no row describing it: `has()` and `readyUnitIds` answer from
    * the index alone, so real, playable audio reports as not ready, is
    * silently excluded from the drill or silently regenerated, and is never
    * charged against the 200 MB ceiling either. It only self-heals at the next
@@ -584,18 +611,18 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       //
       // **Still deliberately not a touch (T016).** `protect()` is a more
       // precise fix than refreshing `lastUsedAt` here would have been:
-      // refreshing on `has()` would reset the age of every Phrase in the
+      // refreshing on `has()` would reset the age of every cached Clip in the
       // WHOLE library on every readiness sweep — including the thousands the user
       // has no intention of drilling today — degrading LRU back toward
       // "evict whatever is oldest by wall-clock generation time" exactly as
       // the original doc comment on the class warns. `protect()` marks only
-      // the Phrases this run will actually use, which is narrower and correct
+      // the Clips this run will actually play, which is narrower and correct
       // where a blanket touch-on-read would only have been narrower.
       return (await getIndex()).has(hash)
     },
 
-    async readyPhraseIds(phrases: readonly PhraseRecord[], voices: readonly Voice[]): Promise<Set<string>> {
-      if (phrases.length === 0) return new Set()
+    async readyUnitIds(units: readonly ReadyUnit[], voices: readonly Voice[]): Promise<Set<string>> {
+      if (units.length === 0) return new Set()
 
       // The index, not `getAll(CLIPS_STORE)`. The old form loaded every Clip
       // in the cache — the whole ~848 MB at a full library — to answer a
@@ -607,14 +634,14 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       const has = (hash: string): Promise<boolean> => Promise.resolve(cachedHashes.has(hash))
 
       const ready = new Set<string>()
-      for (const phrase of phrases) {
-        const [french, english] = await Promise.all([
-          findCachedClipHash(has, voices, 'fr-FR', phrase.french),
-          findCachedClipHash(has, voices, 'en-US', phrase.english),
-        ])
-        if (french && english) {
-          ready.add(phrase.id)
-        }
+      for (const unit of units) {
+        // Every Statement, not a fixed French/English pair: two for a
+        // Phrase's Rep, one for a Line's, and the rule does not have to know
+        // which it was handed.
+        const hashes = await Promise.all(
+          unit.statements.map((statement) => findCachedClipHash(has, voices, statement.lang, statement.text)),
+        )
+        if (hashes.every((hash) => hash !== undefined)) ready.add(unit.id)
       }
       return ready
     },

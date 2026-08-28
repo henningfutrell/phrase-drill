@@ -48,11 +48,14 @@ const MIN_PLAUSIBLE_CLIP_BYTES = 1_000
  * The highest `schemaVersion` this build will accept in a push (T082).
  *
  * **Keep this equal to `src/adapters/storage/migrations.ts`'s
- * `CURRENT_SCHEMA_VERSION`.** The server and the PWA it serves are one Render
- * service and one build, so no device can ever hold a bundle newer than this
- * process — an older cached bundle pushing a lower version is the only skew
- * that exists, and the T060 gate below is what handles that.
- * `server/library-envelope.test.js` fails if a schema bump forgets this line.
+ * `CURRENT_SCHEMA_VERSION`.** v7 is the Passage bump: a `passages` object
+ * store on the device, and the `passages` field in the `Library` envelope
+ * that carries their long-form texts between their two phones. The server and
+ * the PWA it serves are one Render service and one build, so no device can
+ * ever hold a bundle newer than this process — an older cached bundle
+ * pushing a lower version is the only skew that exists, and the T060 gate
+ * below is what handles that. `server/library-envelope.test.js` fails if a
+ * schema bump forgets this line.
  *
  * **Why an upper bound at all.** `schemaVersion` gates every push (the T060
  * stale-client 409). Unbounded, one stored rogue value — a buggy build, a
@@ -62,7 +65,7 @@ const MIN_PLAUSIBLE_CLIP_BYTES = 1_000
  * told to update an app for which no update exists, and their library has
  * already been overwritten by the push that did it.
  */
-export const LIBRARY_MAX_SCHEMA_VERSION = 6
+export const LIBRARY_MAX_SCHEMA_VERSION = 7
 
 /**
  * Whether a `schemaVersion` is one this server can store, serve and compare.
@@ -112,6 +115,15 @@ function isLibraryEnvelope(value) {
     Array.isArray(value.decks) &&
     (value.mixes === undefined || Array.isArray(value.mixes)) &&
     (value.tombstones === undefined || Array.isArray(value.tombstones)) &&
+    // Their Passages (schema v7): an array or nothing, exactly as `mixes` and
+    // `tombstones`. Naming the field here is not redundant with storing the
+    // envelope verbatim — an unnamed field round-trips untouched, but this
+    // same test is what `handleLibraryGet` runs on the way OUT, and a stored
+    // row that fails it answers 500 `library-unreadable`, a state nothing
+    // short of `psql` recovers from. A field the envelope carries and the
+    // shape check does not name is a field a malformed write can put in the
+    // row unchallenged.
+    (value.passages === undefined || Array.isArray(value.passages)) &&
     // The pinned voice (T067): an object or nothing. Absent is every
     // envelope written before T067 and means "no voice recorded". The
     // server stores the envelope verbatim and never reads inside this

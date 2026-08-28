@@ -4,9 +4,15 @@ import type { SynthClient, SynthError } from './server-synth-client'
 import type { Clip, ClipCache } from '../storage/clip-cache'
 import { computeClipHash } from '../storage/clip-cache'
 import type { Voice } from '../../domain'
+import { buildLineRep, buildPhraseRep } from '../../domain'
 
 const VOICE: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
-const PHRASE = { id: 'p1', french: 'Bonjour', english: 'Hello' }
+
+/** The two-Statement unit these tests mostly drive: a Phrase's Rep, French then English. */
+const PHRASE = buildPhraseRep({ id: 'p1', french: 'Bonjour', english: 'Hello' })
+
+/** The one-Statement unit: a Line's Rep, French alone. */
+const LINE = buildLineRep({ id: 'l1', text: 'Il faisait beau ce matin.' })
 
 function unauthorized(): SynthError {
   return { kind: 'unauthorized' }
@@ -35,7 +41,7 @@ function createFakeClipCache(): ClipCache {
     async has(hash) {
       return clips.has(hash)
     },
-    async readyPhraseIds() {
+    async readyUnitIds() {
       return new Set()
     },
   }
@@ -110,7 +116,7 @@ describe('createGenerationQueue', () => {
       maxConcurrent: 2,
     })
 
-    queue.enqueue({ id: 'p9', french: 'Salut', english: 'Hi' })
+    queue.enqueue(buildPhraseRep({ id: 'p9', french: 'Salut', english: 'Hi' }))
     let idle = false
     void queue.whenIdle().then(() => {
       idle = true
@@ -177,7 +183,7 @@ describe('createGenerationQueue', () => {
       maxAttempts: 3,
     })
 
-    queue.enqueue({ id: 'p2', french: 'Salut', english: '' })
+    queue.enqueue(buildPhraseRep({ id: 'p2', french: 'Salut', english: '' }))
     await queue.whenIdle()
 
     // one target only (english is empty and cached-skip doesn't apply, but
@@ -268,7 +274,7 @@ describe('createGenerationQueue', () => {
       sleep: async () => {},
     })
 
-    queue.enqueue({ id: 'p3', french: 'Salut', english: 'Hi' })
+    queue.enqueue(buildPhraseRep({ id: 'p3', french: 'Salut', english: 'Hi' }))
     await queue.whenIdle()
 
     const frenchCalls = synthesize.mock.calls.filter((call) => call[0] === 'Salut')
@@ -294,7 +300,7 @@ describe('createGenerationQueue', () => {
       maxConcurrent: 3,
     })
 
-    for (let i = 0; i < 50; i++) queue.enqueue({ id: `c${i}`, french: `fr-${i}`, english: `en-${i}` })
+    for (let i = 0; i < 50; i++) queue.enqueue(buildPhraseRep({ id: `c${i}`, french: `fr-${i}`, english: `en-${i}` }))
     await queue.whenIdle()
 
     expect(synthesize).toHaveBeenCalledTimes(100)
@@ -314,6 +320,84 @@ describe('createGenerationQueue', () => {
     await queue.whenIdle()
 
     expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'unauthorized' })
+  })
+
+  // ── N Statements, not two ───────────────────────────────────────────────
+  // A Phrase's Rep carries two Statements, a Line's carries one, and the
+  // queue reads the list rather than assuming a French/English pair. These
+  // are the one-Statement mirrors of the two-Statement cases above.
+
+  it('synthesizes exactly one Clip for a one-Statement unit, and reports it ready', async () => {
+    const clipCache = createFakeClipCache()
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({
+      bytes: new ArrayBuffer(8),
+      durationMs: 500,
+    })
+    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+
+    queue.enqueue(LINE)
+    await queue.whenIdle()
+
+    expect(synthesize).toHaveBeenCalledTimes(1)
+    expect(synthesize).toHaveBeenCalledWith('Il faisait beau ce matin.', 'fr-FR', {
+      provider: VOICE.provider,
+      modelId: VOICE.modelId,
+      voiceId: VOICE.voiceId,
+    })
+    const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Il faisait beau ce matin.' })
+    expect(await clipCache.has(hash)).toBe(true)
+    expect(queue.statusFor('l1')).toEqual<GenerationStatus>({ kind: 'ready' })
+  })
+
+  /** The one-of-one mirror of "one of two clips is affected", above: with a
+   * single Statement the worst outcome and the only outcome coincide, and the
+   * unit must still report the failure rather than nothing. */
+  it('reports unauthorized for a one-Statement unit whose single request is refused', async () => {
+    const clipCache = createFakeClipCache()
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(unauthorized())
+    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+
+    queue.enqueue(LINE)
+    await queue.whenIdle()
+
+    expect(queue.statusFor('l1')).toEqual<GenerationStatus>({ kind: 'unauthorized' })
+    expect(synthesize).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a one-Statement unit failed when its single request runs out of network attempts', async () => {
+    const clipCache = createFakeClipCache()
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(network())
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache,
+      getVoice: async () => VOICE,
+      maxAttempts: 3,
+    })
+
+    queue.enqueue(LINE)
+    await queue.whenIdle()
+
+    expect(synthesize).toHaveBeenCalledTimes(3)
+    expect(queue.statusFor('l1')).toEqual<GenerationStatus>({ kind: 'failed' })
+  })
+
+  /**
+   * `combineAll([])`, reached through the port that owns it. Nothing to
+   * generate is nothing outstanding, so the honest answer is `ready` — and
+   * the alternative is worse than merely wrong: `generating` is a status
+   * nothing would ever settle, leaving a Statement-less unit reading
+   * "in flight" forever on a screen that is waiting for it to finish.
+   */
+  it('reports a unit with no Statements ready without asking the synth client for anything', async () => {
+    const clipCache = createFakeClipCache()
+    const synthesize = vi.fn<SynthClient['synthesize']>()
+    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+
+    queue.enqueue({ id: 'u0', statements: [] })
+    await queue.whenIdle()
+
+    expect(synthesize).not.toHaveBeenCalled()
+    expect(queue.statusFor('u0')).toEqual<GenerationStatus>({ kind: 'ready' })
   })
 
   it('notifies onStatusChange as generation starts and settles', async () => {
@@ -379,7 +463,7 @@ describe('createGenerationQueue', () => {
       maxConcurrent: 2,
     })
 
-    for (let i = 0; i < 4; i++) queue.enqueue({ id: `s${i}`, french: `fr-${i}`, english: `en-${i}` })
+    for (let i = 0; i < 4; i++) queue.enqueue(buildPhraseRep({ id: `s${i}`, french: `fr-${i}`, english: `en-${i}` }))
     await settle()
     expect(synthesize).toHaveBeenCalledTimes(2)
 

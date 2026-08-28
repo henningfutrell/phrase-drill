@@ -15,10 +15,12 @@ export type {
   PhraseRecord,
   DeckRecord,
   MixRecord,
+  PassageRecord,
   Tombstone,
   Library,
   DeckStore,
   MixStore,
+  PassageStore,
   DraftPhrase,
   ScanError,
   ScanReader,
@@ -33,6 +35,11 @@ export { isVoice } from './voice'
 export { mergeLibraries } from './library-merge'
 export type { Mix, MixId } from './mix'
 export { createMix, renameMix, setMixDecks, resolveMixDecks, resolveMixPhrases } from './mix'
+export type { Statement } from './statement'
+export type { Passage, PassageId } from './passage'
+export { createPassage, renamePassage, setPassageText } from './passage'
+export type { Line, LineId } from './line'
+export { LINE_MAX_CHARS, splitPassageIntoLines } from './line'
 export type { RandomSource } from './shuffle'
 export { shuffle } from './shuffle'
 export type { Step, Utterance, Pause } from './cadence'
@@ -40,11 +47,14 @@ export {
   PAUSE_MS_PER_CHARACTER,
   PAUSE_MIN_MS,
   PAUSE_MAX_MS,
+  PASSAGE_PAUSE_MAX_MS,
   estimatePauseDuration,
+  estimateLinePause,
   buildCadence,
+  buildLineCadence,
 } from './cadence'
 export type { Rep } from './rep'
-export { buildRep } from './rep'
+export { buildPhraseRep, buildLineRep } from './rep'
 export type { StepPorts } from './step-runner'
 export type {
   DrillStatus,

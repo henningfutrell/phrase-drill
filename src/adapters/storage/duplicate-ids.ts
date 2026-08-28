@@ -1,16 +1,17 @@
-import type { DeckRecord, Library, MixRecord, Tombstone } from '../../domain'
+import type { DeckRecord, Library, MixRecord, PassageRecord, Tombstone } from '../../domain'
 
 /**
- * Give every Deck and every Mix in a library an id of its own, splitting a
- * duplicated one instead of letting the store collapse it (T090).
+ * Give every Deck, every Mix and every Passage in a library an id of its own,
+ * splitting a duplicated one instead of letting the store collapse it (T090).
  *
  * ## Why this exists
  *
  * T086 taught `mergeLibraries` to keep both records under a duplicated id
- * rather than folding them into one. That was half a fix. The `decks` and
- * `mixes` object stores are keyed `{ keyPath: 'id' }`, and `replaceAll`
- * writes one `put` per record, so two records under one id meant the second
- * `put` overwrote the first — a whole Deck, with every Phrase in it, gone from
+ * rather than folding them into one. That was half a fix. The `decks`,
+ * `mixes` and `passages` object stores are all keyed `{ keyPath: 'id' }`, and
+ * `replaceAll` writes one `put` per record, so two records under one id meant
+ * the second `put` overwrote the first — a whole Deck, with every Phrase in
+ * it, or a whole Passage, with every word of the page the user typed, gone from
  * disk with nothing said. It reached their two ways:
  *
  * - **A restore from a hand-edited backup file** (`importAll`). The merge never
@@ -22,7 +23,8 @@ import type { DeckRecord, Library, MixRecord, Tombstone } from '../../domain'
  * ## Split, not refuse
  *
  * The later record keeps its content and takes a fresh id. The user ends up with two
- * visible Decks under two names and merges or deletes them themselves, in one tap.
+ * visible Decks (or Mixes, or Passages) under two names and merges or deletes
+ * them themselves, in one tap.
  *
  * **Refusing at parse time was considered and rejected.** T086 rejected
  * refusing at MERGE time — `parseLibraryFile` had already accepted the file,
@@ -124,6 +126,7 @@ export function splitDuplicateIds(library: Library): Library {
     ...library,
     decks: splitIds<DeckRecord>(library.decks, claimedBy('deck', tombstones)),
     mixes: splitIds<MixRecord>(library.mixes ?? [], claimedBy('mix', tombstones)),
+    passages: splitIds<PassageRecord>(library.passages ?? [], claimedBy('passage', tombstones)),
   }
 }
 

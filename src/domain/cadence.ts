@@ -1,4 +1,5 @@
 import type { Language } from './ports'
+import type { Line } from './line'
 import type { Phrase } from './phrase'
 
 export interface Utterance {
@@ -54,5 +55,33 @@ export function buildCadence(phrase: Phrase): readonly Step[] {
     pauseAfter(phrase.french),
     utterance(phrase.french, 'fr-FR'),
     pauseAfter(phrase.french),
+  ]
+}
+
+/**
+ * A Line's pause has a ceiling of its own. PAUSE_MAX_MS (5s) is sized for a
+ * memorised Phrase of a few words; a Line runs to LINE_MAX_CHARS characters
+ * and saying one back takes far longer, so clamping a Line at 5s would cut them
+ * off mid-sentence — the one thing the pause exists to prevent. 20s clears a
+ * full-length Line at PAUSE_MS_PER_CHARACTER (300 * 65 = 19.5s); the two
+ * constants are chosen together and cadence.test.ts pins the relation.
+ */
+export const PASSAGE_PAUSE_MAX_MS = 20000
+
+/** Estimated spoken duration of one Line, clamped to the Line pause range. */
+export function estimateLinePause(text: string): number {
+  const estimate = text.length * PAUSE_MS_PER_CHARACTER
+  return Math.min(PASSAGE_PAUSE_MAX_MS, Math.max(PAUSE_MIN_MS, estimate))
+}
+
+/**
+ * The playback pattern for one Line: read it once, then hold silence long
+ * enough for them to say it back. Not the Phrase Cadence's three readings — a
+ * Phrase is short and drilled until it is memorised, a page is read.
+ */
+export function buildLineCadence(line: Line): readonly Step[] {
+  return [
+    utterance(line.text, 'fr-FR'),
+    { kind: 'pause', ms: estimateLinePause(line.text) },
   ]
 }

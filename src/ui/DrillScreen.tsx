@@ -4,8 +4,8 @@ import type {
   DrillPlayer,
   DrillStatus,
   Language,
-  Phrase,
   RandomSource,
+  Rep,
   SpeechPort,
   Step,
 } from '../domain'
@@ -20,7 +20,7 @@ import './DrillScreen.css'
  * already has the real deps bound.
  */
 export interface DrillReadinessResult {
-  readonly ready: readonly Phrase[]
+  readonly ready: readonly Rep[]
   readonly skippedCount: number
   readonly canStart: boolean
   readonly reason?: 'no-voice' | 'none-ready'
@@ -47,7 +47,28 @@ function blockedCopy(reason: 'no-voice' | 'none-ready', online: boolean): string
         'It comes back on its own when you’re online again — your phrases are safe.'
 }
 
-const BEATS = [0, 1, 2, 3] as const
+/**
+ * The beats of the row this screen renders, one per Utterance-and-pause pair
+ * of the Cadence being played.
+ *
+ * Read off Rep 0 and never recomputed per Rep, because one Drill is
+ * homogeneous: a Deck and a Mix are all Phrase Reps (eight Steps, four beats),
+ * a Passage is all Line Reps (two Steps, one beat). Index 0 is therefore the
+ * whole answer for the run.
+ *
+ * The `/ 2` is the Cadence's own shape: it strictly alternates Utterance and
+ * pause (`cadence.ts`), which is the same property `instrumentPorts` relies on
+ * below, so one beat is one Utterance and the silence after it.
+ *
+ * This was `[0, 1, 2, 3]` — right for a Phrase and a silent lie about a Line,
+ * showing a Passage three beats that never light. Both Cadence lengths are
+ * pinned in DrillScreen.test.tsx precisely because the homogeneity above is
+ * an assumption no type enforces: the day a heterogeneous Drill exists, those
+ * tests fail rather than this row quietly misreporting.
+ */
+function beatsOf(reps: readonly Rep[]): readonly number[] {
+  return Array.from({ length: (reps[0]?.cadence.length ?? 0) / 2 }, (_, beat) => beat)
+}
 
 interface LiveStep {
   readonly beatIndex: number
@@ -74,8 +95,9 @@ interface LiveStep {
  * on: `StepPorts` never hands one across — `speak(text, lang)` and
  * `wait(ms, signal)` carry only the fields needed to execute it, not the
  * object itself, so there is nothing here to hold a reference to. What is
- * available is `step.kind`, and `buildCadence` (`cadence.ts`) is a fixed,
- * strictly alternating FR/pause/FR/pause/EN/pause/FR/pause — no two
+ * available is `step.kind`, and both Cadences in `cadence.ts` are fixed and
+ * strictly alternating — `buildCadence`'s FR/pause/FR/pause/EN/pause/FR/pause
+ * for a Phrase, `buildLineCadence`'s FR/pause for a Line — so no two
  * adjacent Steps in one Rep ever share a kind. So two `note()` calls in a
  * row reporting the *same* kind, within the same Rep, can only be this
  * replay; the cadence itself never produces that sequence.
@@ -134,9 +156,16 @@ function instrumentPorts(
 }
 
 export interface DrillScreenProps {
-  /** Deck or Mix name (docs/design.md §3.1 header). */
+  /** Deck, Mix or Passage name (docs/design.md §3.1 header). */
   readonly title: string
-  /** Runs the readiness gate (T024) — the composition root binds the real Phrases/deps. */
+  /**
+   * What one Rep of this Drill is, in their words — the noun the start card's
+   * counts use. A Deck and a Mix drill Phrases; a Passage drills the Lines of
+   * one text, and telling them a page is "12 phrases" would name a thing that
+   * is not in it. Required, because there is no noun that is right by default.
+   */
+  readonly repNoun: 'phrase' | 'line'
+  /** Runs the readiness gate (T024) — the composition root binds the real Reps/deps. */
   readonly checkReadiness: () => Promise<DrillReadinessResult>
   readonly speech: SpeechPort
   readonly clock: ClockPort
@@ -199,23 +228,26 @@ type Phase =
   | { kind: 'blocked'; reason: 'no-voice' | 'none-ready'; online: boolean }
   | {
       kind: 'start'
-      ready: readonly Phrase[]
+      ready: readonly Rep[]
       skippedCount: number
       online: boolean
       unlockFailure?: UnlockOutcome & { ok: false }
     }
-  | { kind: 'running'; skippedCount: number }
+  // The running phase carries the Reps too, and only for the beat row: its
+  // length is the Cadence's, and the Cadence lives on the Rep.
+  | { kind: 'running'; reps: readonly Rep[]; skippedCount: number }
 
 /**
- * The Drill screen (docs/design.md §3.1) — a Deck or Mix run end to end,
- * hands-free, arm's length, spoken aloud. Owns the readiness gate (T024),
- * the one-tap unlock (T023), the Wake Lock for the run's duration, and the
- * interrupted-by-screen-lock state. Does not reimplement `createDrillPlayer`
- * or the Cadence — it drives the existing domain player and reconstructs the
- * step-by-step UI from the ports it hands that player.
+ * The Drill screen (docs/design.md §3.1) — a Deck, a Mix or a Passage run end
+ * to end, hands-free, arm's length, spoken aloud. Owns the readiness gate
+ * (T024), the one-tap unlock (T023), the Wake Lock for the run's duration, and
+ * the interrupted-by-screen-lock state. Does not reimplement
+ * `createDrillPlayer` or the Cadence — it drives the existing domain player
+ * and reconstructs the step-by-step UI from the ports it hands that player.
  */
 export function DrillScreen({
   title,
+  repNoun,
   checkReadiness,
   speech,
   clock,
@@ -337,7 +369,7 @@ export function DrillScreen({
     }
   }, [onExit, releaseWakeLock, releaseAudioRoute])
 
-  async function handleStart(readyPhrases: readonly Phrase[], skippedCount: number, online: boolean) {
+  async function handleStart(readyReps: readonly Rep[], skippedCount: number, online: boolean) {
     // Guards against a second tap re-entering this method while the first
     // is still awaiting unlock() (T001) — the ref is the real guard (see its
     // doc comment); `starting`/`disabled` below is the visible half.
@@ -372,7 +404,7 @@ export function DrillScreen({
         // so without this line one refused unlock stops their library filling
         // for as long as the app stays loaded.
         resumeGeneration?.()
-        setPhase({ kind: 'start', ready: readyPhrases, skippedCount, online, unlockFailure: outcome })
+        setPhase({ kind: 'start', ready: readyReps, skippedCount, online, unlockFailure: outcome })
         return
       }
 
@@ -390,7 +422,7 @@ export function DrillScreen({
           setLive(info)
         },
       )
-      const player = createDrillPlayer(readyPhrases, ports, { random })
+      const player = createDrillPlayer(readyReps, ports, { random })
       // Not normally reachable — the guard above and the Start button only
       // rendering in the 'start' phase mean `playerRef.current` is null here
       // in ordinary use. Defensive: stop an old player rather than orphan it
@@ -401,7 +433,7 @@ export function DrillScreen({
       setStatus('playing')
       setRepIndex(0)
       setRepCount(player.repCount)
-      setPhase({ kind: 'running', skippedCount })
+      setPhase({ kind: 'running', reps: readyReps, skippedCount })
 
       await player.start()
       syncFromPlayer()
@@ -513,10 +545,22 @@ export function DrillScreen({
           Back
         </button>
         <h1 data-testid="drill-title">{title}</h1>
-        <p data-testid="drill-phrase-count">{phase.ready.length} phrases</p>
+        {/* The id stays `drill-phrase-count` — it names the control, not its
+            contents, and App.test.tsx addresses it. Its plural is
+            unconditional and has been since this card shipped ("1 phrases"),
+            which is a wart in the copy and not in the noun: changing it is a
+            copy change to make on its own, with their looking at it. */}
+        <p data-testid="drill-phrase-count">
+          {phase.ready.length} {repNoun}s
+        </p>
         {phase.skippedCount > 0 && (
           <p data-testid="drill-skipped-count" className="drill-skipped">
-            {phase.skippedCount} phrase{phase.skippedCount === 1 ? '' : 's'}{' '}
+            {phase.skippedCount} {repNoun}
+            {phase.skippedCount === 1 ? '' : 's'}{' '}
+            {/* Two forms, one distinction, unchanged (T036): online the audio
+                is being made and waiting is right; offline it was cleared to
+                keep the cache under its ceiling and it comes back with the
+                connection. */}
             {phase.online
               ? 'have no audio yet — skipped'
               : 'have no audio on this phone — skipped until you’re online'}
@@ -568,7 +612,7 @@ export function DrillScreen({
       )}
 
       <div className="drill-beat-row" data-testid="drill-beat-row">
-        {BEATS.map((beat) => {
+        {beatsOf(phase.reps).map((beat) => {
           const state = beat < live.beatIndex ? 'done' : beat === live.beatIndex ? 'live' : 'upcoming'
           return (
             <span

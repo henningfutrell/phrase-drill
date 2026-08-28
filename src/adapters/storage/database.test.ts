@@ -13,6 +13,7 @@ import {
   ERRORS_STORE,
   MIXES_STORE,
   TOMBSTONES_STORE,
+  PASSAGES_STORE,
 } from './database'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
@@ -294,6 +295,120 @@ describe('openDatabase v5 -> v6 migration (T072: the upgrade may not load the cl
     expect(await db.get(MIXES_STORE, 'm1')).toMatchObject({ name: 'Mornings' })
     expect(await db.get(TOMBSTONES_STORE, 'gone')).toEqual({ id: 'gone', kind: 'deck', deletedAt: 4 })
     expect((await db.getAll(CLIPS_STORE)).length).toBe(2)
+  })
+})
+
+describe('openDatabase v6 -> v7 migration (schema v7: Passages)', () => {
+  beforeEach(() => {
+    resetFakeIdb()
+  })
+
+  /**
+   * Fixture: a v6 database exactly as it sits on their phone before this build
+   * — every store there has ever been except `passages`, with a real Deck,
+   * a real Mix, a real Tombstone and warm audio in it. This is the only
+   * state the v7 upgrade will ever actually run against.
+   */
+  async function seedV6Database(): Promise<void> {
+    const v6db = await idbModule.openDB(DB_NAME, 6, {
+      upgrade(db) {
+        db.createObjectStore(DECKS_STORE, { keyPath: 'id' })
+        db.createObjectStore(SETTINGS_STORE)
+        db.createObjectStore(CLIPS_STORE, { keyPath: 'hash' })
+        db.createObjectStore(CLIP_META_STORE, { keyPath: 'hash' })
+        db.createObjectStore(ERRORS_STORE, { keyPath: 'id' })
+        db.createObjectStore(MIXES_STORE, { keyPath: 'id' })
+        db.createObjectStore(TOMBSTONES_STORE, { keyPath: 'id' })
+      },
+    })
+    await v6db.put(DECKS_STORE, {
+      id: 'home',
+      name: 'Home',
+      phrases: [
+        { id: 'p1', french: 'Bonjour', english: 'Hello' },
+        { id: 'p2', french: 'Merci', english: 'Thank you' },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    await v6db.put(MIXES_STORE, { id: 'm1', name: 'Mornings', deckIds: ['home'], createdAt: 3, updatedAt: 3 })
+    await v6db.put(TOMBSTONES_STORE, { id: 'gone', kind: 'deck', deletedAt: 4 })
+    await v6db.put(SETTINGS_STORE, { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' }, 'voice')
+    await v6db.put(CLIPS_STORE, { hash: 'a', bytes: new ArrayBuffer(8), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
+    // Real IndexedDB blocks an upgrade while an older connection is open, so
+    // the fixture has to end the way a previous page load does: closed.
+    v6db.close()
+  }
+
+  /**
+   * The migration proof `AGENTS.md` demands of every schema bump: their Deck,
+   * written by the previous build, read back byte for byte after the upgrade.
+   * A bump with no such test is the change most likely to eat their phrases.
+   */
+  it('adds the passages store on top of a real v6 database with every Deck, Phrase, Mix, Tombstone and Clip intact', async () => {
+    await seedV6Database()
+
+    const db = await openDatabase()
+
+    expect(db.version).toBe(CURRENT_SCHEMA_VERSION)
+    expect(db.objectStoreNames.contains(PASSAGES_STORE)).toBe(true)
+    expect(await db.get(DECKS_STORE, 'home')).toEqual({
+      id: 'home',
+      name: 'Home',
+      phrases: [
+        { id: 'p1', french: 'Bonjour', english: 'Hello' },
+        { id: 'p2', french: 'Merci', english: 'Thank you' },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    expect(await db.get(MIXES_STORE, 'm1')).toEqual({
+      id: 'm1',
+      name: 'Mornings',
+      deckIds: ['home'],
+      createdAt: 3,
+      updatedAt: 3,
+    })
+    expect(await db.get(TOMBSTONES_STORE, 'gone')).toEqual({ id: 'gone', kind: 'deck', deletedAt: 4 })
+    expect(await db.get(SETTINGS_STORE, 'voice')).toEqual({ provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1' })
+    expect((await db.getAll(CLIPS_STORE)).length).toBe(1)
+  })
+
+  /**
+   * Empty is the truth, not a gap: a phone that had no Passages has no
+   * Passages, and nothing may be invented here to make the store look used.
+   */
+  it('creates the passages store EMPTY — there is nothing of theirs to backfill it from', async () => {
+    await seedV6Database()
+
+    const db = await openDatabase()
+
+    expect(await db.getAll(PASSAGES_STORE)).toEqual([])
+  })
+
+  it('lets a Passage be written and read once the migration has run', async () => {
+    await seedV6Database()
+
+    const db = await openDatabase()
+    const passage = { id: 'pg1', name: 'Le Petit Prince', text: 'Lorsque j’avais six ans…', createdAt: 5, updatedAt: 5 }
+    await db.put(PASSAGES_STORE, passage)
+
+    expect(await db.get(PASSAGES_STORE, 'pg1')).toEqual(passage)
+  })
+
+  it('carries a v1 database all the way to v7 in one open, decks intact', async () => {
+    await seedV1Database()
+
+    const db = await openDatabase()
+
+    expect(await db.get(DECKS_STORE, 'home')).toEqual({
+      id: 'home',
+      name: 'Home',
+      phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    expect(db.objectStoreNames.contains(PASSAGES_STORE)).toBe(true)
   })
 })
 

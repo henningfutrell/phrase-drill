@@ -596,7 +596,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
  * makes true of all of them at once.
  */
 function nothingIsAgreed(): Library {
-  return buildLibrary([], [], [], 0)
+  return buildLibrary([], [], [], [], 0)
 }
 
 /**

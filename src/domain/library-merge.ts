@@ -1,4 +1,4 @@
-import type { DeckRecord, Library, MixRecord, PhraseRecord, Tombstone } from './ports'
+import type { DeckRecord, Library, MixRecord, PassageRecord, PhraseRecord, Tombstone } from './ports'
 
 /**
  * Reconcile two whole-library snapshots — this device's and the server's —
@@ -83,6 +83,15 @@ import type { DeckRecord, Library, MixRecord, PhraseRecord, Tombstone } from './
  * purpose (`resolveMixDecks`), and a dead id resurrects nothing — a Mix
  * holds ids, never Phrases.
  *
+ * Passages merge exactly like Mixes, and for a stronger reason: a
+ * Passage's whole content is one `text` field, so it has no interior to
+ * reconcile per element the way a Deck's Phrase list has. Later `updatedAt`
+ * wins the whole record, ties go to local, and which side wins is decided
+ * against the baseline first. The loser of a Passage conflict is a whole
+ * draft, so that rule is the one place a keystroke can be dropped here —
+ * there is nowhere else to put it, exactly as with the same Phrase edited on
+ * both sides.
+ *
  * Pure: no I/O, no clock, and neither input is mutated.
  */
 export function mergeLibraries(local: Library, remote: Library, base?: Library): Library {
@@ -116,9 +125,11 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
   const tombstones = mergeTombstones(local.tombstones ?? [], remote.tombstones ?? [])
   const decks = mergeDecks(local.decks, remote.decks, agreed?.decks)
   const mixes = mergeMixes(local.mixes ?? [], remote.mixes ?? [], agreed?.mixes)
+  const passages = mergePassages(local.passages ?? [], remote.passages ?? [], agreed?.passages)
 
   const baseDecks = byId(agreed?.decks)
   const baseMixes = byId(agreed?.mixes)
+  const basePassages = byId(agreed?.passages)
 
   const survivingDecks = decks.filter(
     (deck) => !isDeleted(deck, tombstones.get(key('deck', deck.id)), rewritten(deck, baseDecks, sameDeckContent)),
@@ -126,10 +137,19 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
   const survivingMixes = mixes.filter(
     (mix) => !isDeleted(mix, tombstones.get(key('mix', mix.id)), rewritten(mix, baseMixes, sameMixContent)),
   )
+  const survivingPassages = passages.filter(
+    (passage) =>
+      !isDeleted(
+        passage,
+        tombstones.get(key('passage', passage.id)),
+        rewritten(passage, basePassages, samePassageContent),
+      ),
+  )
 
   const survivingIds = new Set([
     ...survivingDecks.map((deck) => key('deck', deck.id)),
     ...survivingMixes.map((mix) => key('mix', mix.id)),
+    ...survivingPassages.map((passage) => key('passage', passage.id)),
   ])
 
   return {
@@ -140,6 +160,12 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
     exportedAt: Math.max(local.exportedAt, remote.exportedAt),
     decks: survivingDecks,
     mixes: survivingMixes,
+    // Always present, even when empty, matching what the storage adapter's
+    // `buildLibrary` writes: one shape for the envelope means a reader never
+    // has to distinguish "this build has no Passages" from "the user has none".
+    // Absent stays meaningful on the way IN — a pre-v7 envelope — and says
+    // "no Passages", never "clear theirs".
+    passages: survivingPassages,
     // A Tombstone whose record survived was outlived by a rewrite of that
     // id; keeping it would delete the record again on the next merge.
     tombstones: [...tombstones.values()].filter((tombstone) => !survivingIds.has(key(tombstone.kind, tombstone.id))),
@@ -155,7 +181,13 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
   }
 }
 
-/** One namespace for both aggregates, so a Deck's Tombstone can never reach a Mix. */
+/**
+ * One namespace for all three aggregates, so a Deck's Tombstone can never
+ * reach a Mix or a Passage. Every lookup — the map `mergeTombstones` builds,
+ * and the surviving-id filter at the end of `mergeLibraries` — is keyed this
+ * way, so a Tombstone is matched on `kind` AND `id` and an id alone never
+ * decides anything.
+ */
 function key(kind: Tombstone['kind'], id: string): string {
   return `${kind}:${id}`
 }
@@ -220,6 +252,45 @@ function sameMixContent(mix: MixRecord, base: MixRecord): boolean {
     mix.deckIds.length === base.deckIds.length &&
     mix.deckIds.every((id, index) => id === base.deckIds[index])
   )
+}
+
+/**
+ * Every Passage from both sides — see `mergeRecords` for how they are brought
+ * together, and what a duplicated id does there.
+ *
+ * Whole-record, like a Mix: a Passage is a name and one block of text,
+ * with no interior list to reconcile element by element the way a Deck's
+ * Phrases are. Which side wins is decided against the baseline first (T070),
+ * so a device with a wrong clock cannot discard an edit the other side never
+ * made — which matters more here than for a Mix, because the loser of a
+ * Passage conflict is text the user typed rather than a selection the user can re-make.
+ */
+function mergePassages(
+  local: readonly PassageRecord[],
+  remote: readonly PassageRecord[],
+  base: readonly PassageRecord[] | undefined,
+): PassageRecord[] {
+  return mergeRecords(local, remote, base, reconcilePassage, samePassageContent)
+}
+
+/**
+ * One Passage id, held by both devices. The side that did not move away from
+ * the baseline has nothing to contribute; when both moved, or there is no
+ * baseline to compare against, the later write wins (a tie keeps local).
+ */
+function reconcilePassage(local: PassageRecord, remote: PassageRecord, base: PassageRecord | undefined): PassageRecord {
+  if (base) {
+    const localChanged = !samePassageContent(local, base)
+    const remoteChanged = !samePassageContent(remote, base)
+    if (!localChanged) return remoteChanged ? remote : local
+    if (!remoteChanged) return local
+  }
+  return local.updatedAt >= remote.updatedAt ? local : remote
+}
+
+/** Is this Passage the one the baseline holds? Only what the user can change. */
+function samePassageContent(passage: PassageRecord, base: PassageRecord): boolean {
+  return passage.name === base.name && passage.text === base.text
 }
 
 /**
@@ -502,7 +573,7 @@ function rewritten<T extends { readonly id: string }>(
  * pinned by a test rather than papered over.
  */
 function isDeleted(
-  record: DeckRecord | MixRecord,
+  record: DeckRecord | MixRecord | PassageRecord,
   tombstone: Tombstone | undefined,
   rewrittenSinceBaseline: boolean,
 ): boolean {

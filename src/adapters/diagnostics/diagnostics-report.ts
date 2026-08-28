@@ -1,5 +1,5 @@
-import type { DeckStore } from '../../domain'
-import type { Voice } from '../../domain'
+import type { DeckStore, PassageStore, Voice } from '../../domain'
+import { buildLineRep, buildPhraseRep, splitPassageIntoLines } from '../../domain'
 import type { ClipCache, SettingsStore } from '../storage'
 import { knownVoices } from '../audio/voice-catalogue'
 import type { BuildInfo } from './build-info'
@@ -32,17 +32,23 @@ export interface RouteHoldSummary {
 }
 
 /**
- * Everything Diagnostics shows, gathered in one place. No phrase content —
- * only what T039 asks the report to answer: the pinned voice, Clips ready
- * vs total Phrases, storage, last sync, and the last N captured errors.
+ * Everything Diagnostics shows, gathered in one place. No phrase or passage
+ * content — only what T039 asks the report to answer: the pinned voice, Clips
+ * ready vs total, storage, last sync, and the last N captured errors.
  * T041 dropped the two provider-key-presence fields this used to carry: the
  * device holds no provider key any more to be present or absent.
+ *
+ * Readiness is two counts, not one. A merged number cannot tell "their Passage
+ * has no audio" from "their Deck has no audio", and that is the first
+ * distinction the person reading their pasted report needs.
  */
 export interface DiagnosticsSnapshot {
   readonly build: BuildInfo
   readonly voice: Voice | null
   readonly phrasesTotal: number
-  readonly clipsReady: number
+  readonly phrasesReady: number
+  readonly passageLinesTotal: number
+  readonly passageLinesReady: number
   readonly routeHold: RouteHoldSummary
   readonly storage: StorageEstimateResult
   readonly lastSyncAt: number | null
@@ -51,6 +57,13 @@ export interface DiagnosticsSnapshot {
 
 export interface CollectDiagnosticsDeps {
   readonly deckStore: DeckStore
+  /**
+   * Required, not optional. The composition root has one, and an optional
+   * `passageStore` here is exactly how the readiness count would quietly go
+   * back to ignoring every Passage — a report that answers "it's not working"
+   * with "everything is ready" while a Passage sits silent.
+   */
+  readonly passageStore: PassageStore
   readonly settingsStore: SettingsStore
   readonly clipCache: ClipCache
   readonly errorLog: ErrorLog
@@ -62,34 +75,51 @@ export interface CollectDiagnosticsDeps {
 
 /**
  * Gathers the diagnostics snapshot from every port this needs — the only
- * place that touches all of DeckStore/SettingsStore/ClipCache/ErrorLog for
- * this purpose. Clips ready is honestly 0 when no voice is pinned, never a
- * guess (mirrors `computeDrillReadiness`'s treatment of "no voice").
+ * place that touches all of DeckStore/PassageStore/SettingsStore/ClipCache/
+ * ErrorLog for this purpose. Clips ready is honestly 0 when no voice is
+ * pinned, never a guess (mirrors `computeDrillReadiness`'s treatment of "no
+ * voice").
+ *
+ * This is `profile.md`'s reason for the Diagnostic report existing at all:
+ * it is the only channel that answers "it's not working" without a round trip
+ * through a non-technical user in another country. So readiness is counted
+ * over the whole library — Phrase Reps and Passage Line Reps together, in one
+ * sweep, exactly as the drill would ask it — and reported as two populations.
  */
 export async function collectDiagnostics(deps: CollectDiagnosticsDeps): Promise<DiagnosticsSnapshot> {
-  const { deckStore, settingsStore, clipCache, errorLog, getBuildInfo, getRouteHold, getStorageEstimate } = deps
+  const { deckStore, passageStore, settingsStore, clipCache, errorLog, getBuildInfo, getRouteHold, getStorageEstimate } =
+    deps
   const recentErrorsLimit = deps.recentErrorsLimit ?? DEFAULT_RECENT_ERRORS_LIMIT
 
-  const [decks, settings, entries, storage] = await Promise.all([
+  const [decks, passages, settings, entries, storage] = await Promise.all([
     deckStore.loadAll(),
+    passageStore.loadAll(),
     settingsStore.load(),
     errorLog.list(),
     getStorageEstimate(),
   ])
 
-  const phrases = decks.flatMap((d) => d.phrases)
-  // Over every voice a Clip could be in, not only the pinned one (T067):
-  // this number has to be the one the drill acts on, or a report reads
-  // "0 of 200 ready" about a library that drills perfectly.
-  const clipsReady = settings.voice
-    ? (await clipCache.readyPhraseIds(phrases, knownVoices(settings.voice))).size
-    : 0
+  const phraseReps = decks.flatMap((deck) => deck.phrases.map(buildPhraseRep))
+  // A Line is derived, never stored, so the Lines have to be re-derived here
+  // the same way the drill derives them — otherwise the count would answer a
+  // question about Passages, and the user drills Lines.
+  const lineReps = passages.flatMap((passage) => splitPassageIntoLines(passage).map(buildLineRep))
+
+  // One sweep over both populations, over every voice a Clip could be in, not
+  // only the pinned one (T067): these numbers have to be the ones the drill
+  // acts on, or a report reads "0 of 200 ready" about a library that drills
+  // perfectly.
+  const readyIds = settings.voice
+    ? await clipCache.readyUnitIds([...phraseReps, ...lineReps], knownVoices(settings.voice))
+    : new Set<string>()
 
   return {
     build: getBuildInfo(),
     voice: settings.voice,
-    phrasesTotal: phrases.length,
-    clipsReady,
+    phrasesTotal: phraseReps.length,
+    phrasesReady: phraseReps.filter((rep) => readyIds.has(rep.id)).length,
+    passageLinesTotal: lineReps.length,
+    passageLinesReady: lineReps.filter((rep) => readyIds.has(rep.id)).length,
     routeHold: getRouteHold(),
     storage,
     lastSyncAt: settings.lastSyncAt,
@@ -140,14 +170,21 @@ function formatRecentErrors(entries: readonly LogEntry[]): string {
 
 /**
  * Formats the snapshot as plain text — the one thing the copy control sends
- * to the clipboard for pasting into a message. Counts only, never phrase
- * text.
+ * to the clipboard for pasting into a message. Counts only, never their Phrase
+ * or Passage text.
+ *
+ * The two readiness lines are unconditional, even at zero. A report that
+ * dropped the Passage Lines line when the user has no Passages would be
+ * indistinguishable from a build that cannot count them at all, and "does
+ * this build even know about my Passage?" is the question the reader is
+ * actually asking.
  */
 export function formatDiagnosticsReport(snapshot: DiagnosticsSnapshot): string {
   return [
     `Build: ${snapshot.build.sha} (${snapshot.build.builtAt})`,
     formatVoice(snapshot.voice),
-    `Clips ready: ${snapshot.clipsReady} of ${snapshot.phrasesTotal} Phrases`,
+    `Clips ready: ${snapshot.phrasesReady} of ${snapshot.phrasesTotal} Phrases`,
+    `Clips ready: ${snapshot.passageLinesReady} of ${snapshot.passageLinesTotal} Passage Lines`,
     formatRouteHold(snapshot.routeHold),
     formatStorage(snapshot.storage),
     formatLastSync(snapshot.lastSyncAt),

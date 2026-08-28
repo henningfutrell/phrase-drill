@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { LIBRARY_FORMAT, type DeckRecord, type Library, type MixRecord, type PhraseRecord, type Tombstone } from './ports'
+import {
+  LIBRARY_FORMAT,
+  type DeckRecord,
+  type Library,
+  type MixRecord,
+  type PassageRecord,
+  type PhraseRecord,
+  type Tombstone,
+} from './ports'
 import { mergeLibraries } from './library-merge'
 
 /**
@@ -54,10 +62,24 @@ function randomness(seed: number): Random {
 
 const DECK_IDS = ['d1', 'd2', 'd3']
 const PHRASE_IDS = ['p1', 'p2', 'p3', 'p4']
+// Deliberately the SAME ids as the Decks. Three aggregates share one Tombstone
+// namespace, so a generator that gave each kind its own ids would never produce
+// the collision `Tombstone.kind` exists to survive.
+const PASSAGE_IDS = DECK_IDS
 const WORDS = ['bonjour', 'la pomme de terre', 'merci', 'bonsoir', 'la clé', 'demain']
 
 function phrase(random: Random, id: string): PhraseRecord {
   return { id, french: random.pick(WORDS), english: random.pick(WORDS).toUpperCase() }
+}
+
+function passageOf(random: Random, id: string, updatedAt: number): PassageRecord {
+  return {
+    id,
+    name: random.pick(['Chapitre 1', 'Le renard', 'La rose']),
+    text: `${random.pick(WORDS)}. ${random.pick(WORDS)} ?`,
+    createdAt: 1,
+    updatedAt,
+  }
 }
 
 function deck(random: Random, id: string, updatedAt: number): DeckRecord {
@@ -90,7 +112,22 @@ function library(random: Random, clock: number): Library {
       })
     }
   }
-  return { format: LIBRARY_FORMAT, schemaVersion: VERSION, exportedAt: clock, decks, mixes, tombstones: [] }
+  // No duplicated Passage ids: a Tombstone naming an id one side holds twice
+  // makes "did the id survive?" and "did THIS copy survive?" different
+  // questions, which the id-level properties below cannot ask (see
+  // `partlyDeletable`). That shape is pinned for Passages by example instead.
+  const passages = PASSAGE_IDS.filter(() => random.chance(0.5)).map((id) =>
+    passageOf(random, id, clock + random.int(50)),
+  )
+  return {
+    format: LIBRARY_FORMAT,
+    schemaVersion: VERSION,
+    exportedAt: clock,
+    decks,
+    mixes,
+    passages,
+    tombstones: [],
+  }
 }
 
 /** One edit somebody made to a library, on one device, after the baseline. */
@@ -118,13 +155,32 @@ function evolve(random: Random, from: Library, clock: number): Library {
   const kept = [...decks, ...added]
   const heldIds = new Set(kept.map((record) => record.id))
 
+  const passages = (from.passages ?? [])
+    // A Passage the user deleted: the Tombstone below is what records it.
+    .filter(() => !random.chance(0.15))
+    .map((record) =>
+      random.chance(0.4)
+        ? record
+        : { ...record, text: `${record.text} ${random.pick(WORDS)}.`, updatedAt: clock + random.int(50) },
+    )
+  const heldPassageIds = new Set(passages.map((record) => record.id))
+
   const tombstones: Tombstone[] = []
   for (const id of DECK_IDS) {
     if (!heldIds.has(id) && from.decks.some((record) => record.id === id) && random.chance(0.7)) {
       tombstones.push({ id, kind: 'deck', deletedAt: clock + random.int(50) })
     }
   }
-  return { ...from, exportedAt: clock, decks: kept, tombstones }
+  for (const id of PASSAGE_IDS) {
+    if (
+      !heldPassageIds.has(id) &&
+      (from.passages ?? []).some((record) => record.id === id) &&
+      random.chance(0.7)
+    ) {
+      tombstones.push({ id, kind: 'passage', deletedAt: clock + random.int(50) })
+    }
+  }
+  return { ...from, exportedAt: clock, decks: kept, passages, tombstones }
 }
 
 /**
@@ -219,14 +275,14 @@ function scenario(seed: number): {
 
 /** A library with nothing in it — an evicted phone, or a truncated server row. */
 function emptied(from: Library): Library {
-  return { ...from, decks: [], mixes: [], tombstones: [] }
+  return { ...from, decks: [], mixes: [], passages: [], tombstones: [] }
 }
 
-/** An envelope written before Mixes (v4) or Tombstones (v5) existed. */
+/** An envelope written before Mixes (v4), Tombstones (v5) or Passages (v7) existed. */
 function strip(random: Random, from: Library): Library {
   if (!random.chance(0.15)) return from
   const stripped: Library = { ...from }
-  return { ...stripped, mixes: undefined, tombstones: undefined }
+  return { ...stripped, mixes: undefined, passages: undefined, tombstones: undefined }
 }
 
 describe('mergeLibraries — the invariant, over generated adversarial input (T070)', () => {
@@ -392,6 +448,60 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
     }
   })
 
+  it('never removes a Passage without a passage Tombstone in the result recording the deletion', () => {
+    for (const seed of seeds) {
+      const { local, remote, merged } = scenario(seed)
+      const survived = new Set((merged.passages ?? []).map((record) => record.id))
+      const tombstoned = new Set((merged.tombstones ?? []).filter((t) => t.kind === 'passage').map((t) => t.id))
+
+      for (const record of [...(local.passages ?? []), ...(remote.passages ?? [])]) {
+        if (survived.has(record.id)) continue
+        expect({ seed, id: record.id, tombstoned: tombstoned.has(record.id) }).toEqual({
+          seed,
+          id: record.id,
+          tombstoned: true,
+        })
+      }
+    }
+  })
+
+  it('invents nothing: every Passage in the result was written on one of the two devices', () => {
+    for (const seed of seeds) {
+      const { local, remote, merged } = scenario(seed)
+      const written = new Set(
+        [...(local.passages ?? []), ...(remote.passages ?? [])].map(
+          (record) => `${record.id}|${record.name}|${record.text}`,
+        ),
+      )
+
+      for (const record of merged.passages ?? []) {
+        const token = `${record.id}|${record.name}|${record.text}`
+        expect({ seed, token, written: written.has(token) }).toEqual({ seed, token, written: true })
+      }
+    }
+  })
+
+  it('lets no Tombstone reach across kinds, however many aggregates share an id', () => {
+    for (const seed of seeds) {
+      const { local, remote, merged } = scenario(seed)
+      // A record whose OWN kind has no Tombstone at all under its id cannot
+      // have been deleted by one, whatever the other kinds' Tombstones say.
+      const named = new Set(
+        [...(local.tombstones ?? []), ...(remote.tombstones ?? [])].map((t) => `${t.kind}:${t.id}`),
+      )
+      const survived = new Set((merged.passages ?? []).map((record) => record.id))
+
+      for (const record of [...(local.passages ?? []), ...(remote.passages ?? [])]) {
+        if (named.has(`passage:${record.id}`)) continue
+        expect({ seed, id: record.id, kept: survived.has(record.id) }).toEqual({
+          seed,
+          id: record.id,
+          kept: true,
+        })
+      }
+    }
+  })
+
   it('generates the shapes it claims to — a rolled-back server, skew, duplicates and empties', () => {
     const shapes = seeds.map((seed) => scenario(seed))
 
@@ -408,5 +518,15 @@ describe('mergeLibraries — the invariant, over generated adversarial input (T0
     expect(shapes.some(({ merged }) => (merged.tombstones ?? []).length > 0)).toBe(true)
     expect(shapes.some(({ local }) => new Set(local.decks.map((d) => d.id)).size !== local.decks.length)).toBe(true)
     expect(shapes.some(({ remote }) => new Set(remote.decks.map((d) => d.id)).size !== remote.decks.length)).toBe(true)
+    expect(shapes.some(({ local }) => local.passages === undefined)).toBe(true)
+    expect(shapes.some(({ local }) => (local.passages ?? []).length === 0)).toBe(true)
+    expect(shapes.some(({ merged }) => (merged.passages ?? []).length > 0)).toBe(true)
+    expect(shapes.some(({ merged }) => (merged.tombstones ?? []).some((t) => t.kind === 'passage'))).toBe(true)
+    // Both a Deck and a Passage under one id: the collision `kind` exists for.
+    expect(
+      shapes.some(({ local }) =>
+        local.decks.some((d) => (local.passages ?? []).some((p) => p.id === d.id)),
+      ),
+    ).toBe(true)
   })
 })

@@ -24,7 +24,7 @@ falls out of sync with `CURRENT_SCHEMA_VERSION`.
 
 ## The stores
 
-One database (`phrase-drill`), one version number, seven stores — all declared
+One database (`phrase-drill`), one version number, eight stores — all declared
 in the single `openDatabase()` upgrade path (`database.ts`):
 
 | Store | Holds | Added |
@@ -36,6 +36,7 @@ in the single `openDatabase()` upgrade path (`database.ts`):
 | `mixes` | saved Mixes — Deck **ids**, never Phrases | v4 (T059) |
 | `tombstones` | what was deleted, and when — so sync can merge | v5 (T060) |
 | `clipMeta` | size index over `clips` — `{ hash, bytes, lastUsedAt }` | v6 (T036) |
+| `passages` | long-form Passages — `name` + `text`, Lines derived on read | v7 |
 
 ## The clip cache is bounded, and eviction cannot reach a Phrase
 
@@ -63,16 +64,17 @@ crosses the line. Two things make that safe rather than merely intended:
 `clipMeta` is a separate store rather than fields on the Clip because the
 whole point is that reading it is cheap: `getAll(CLIPS_STORE)` deserializes
 every `ArrayBuffer` off disk (`docs/scale.md` §3), which at a full cache is
-hundreds of MB to answer a question about numbers. `readyPhraseIds` and
+hundreds of MB to answer a question about numbers. `readyUnitIds` and
 `has` now read the index too, which removes that whole-cache load from every
 drill start.
 
-`decks` and `mixes` are separate stores on purpose: it makes "deleting a Mix
-never touches its source Decks" — and its converse — structural rather than a
-rule someone has to remember. The one place they meet is the `Library`
-envelope (`exportAll`/`importAll`/`updateAll`, `/api/library`), which carries
-both, because a backup or a new phone that restored only half of their data
-would be worse than one that restored none.
+`decks`, `mixes` and `passages` are separate stores on purpose: it makes
+"deleting a Mix never touches its source Decks", "deleting a Passage never
+touches a Deck", and their converses, structural rather than rules someone has
+to remember. The one place they meet is the `Library` envelope
+(`exportAll`/`importAll`/`updateAll`, `/api/library`), which carries all of
+them, because a backup or a new phone that restored only half of their data would
+be worse than one that restored none.
 
 `updateAll` is the sync path's write and the reason the envelope has three
 verbs rather than two (T074): it reads the stores, applies a merge, and writes
@@ -90,15 +92,15 @@ instant. The defect it closes did not stop at this device: the Phrase it
 overwrote was still in the Sync Baseline, which the merge reads as a deletion
 and takes to the server (`docs/sync.md`).
 
-`tombstones` is the exception to that separation, and deliberately so: both
-the deck store and the mix store write to it, each only its own `kind`, and
-neither ever reads the other's rows. It exists because sync **merges** two
-devices' libraries rather than overwriting one with the other (T060 —
+`tombstones` is the exception to that separation, and deliberately so: the deck
+store, the mix store and the passage store all write to it, each only its own
+`kind`, and none ever reads another's rows. It exists because sync **merges**
+two devices' libraries rather than overwriting one with the other (T060 —
 `domain/library-merge.ts` holds the rule), and a merge cannot tell "the user
 deleted this" from "this device has never seen it" unless the deletion is
-itself recorded. Removing a Deck or a Mix writes its Tombstone in the *same*
-transaction as the delete: a delete without one is a delete every other
-device undoes at the next sync.
+itself recorded. Removing a Deck, a Mix or a Passage writes its Tombstone in
+the *same* transaction as the delete: a delete without one is a delete every
+other device undoes at the next sync.
 
 ## How these tests run: a real IndexedDB, not a double
 
@@ -139,7 +141,7 @@ Two hooks exist beside the database, and both are narrow on purpose:
 
 - `idbOperations` / `idbTransactions` — a log of every operation and the
   transaction that carried it. "The read and the write are one transaction" and
-  "it spans all three stores" are facts about a transaction, not about the
+  "it spans all four record stores" are facts about a transaction, not about the
   values left in the stores, so pinning them needs a way to name it.
 - `failNextWriteTo(store)` — a refused write. A working database will not fail
   on request, and the restore path's "nothing was replaced" promise is about

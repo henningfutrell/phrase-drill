@@ -1,7 +1,7 @@
-import type { DeckRecord, MixRecord, PhraseRecord, Tombstone } from '../../domain'
+import type { DeckRecord, MixRecord, PassageRecord, PhraseRecord, Tombstone } from '../../domain'
 
 /** The current on-disk shapes, re-exported for local use. */
-export type { DeckRecord, MixRecord, Tombstone }
+export type { DeckRecord, MixRecord, PassageRecord, Tombstone }
 
 /** Schema version 1's shape — identical to `DeckRecord` today, since v1 is current. */
 export type DeckRecordV1 = DeckRecord
@@ -35,8 +35,14 @@ export type PhraseRecordV1 = PhraseRecord
  * audio it is measuring. Deck records are untouched — see
  * `DECK_MIGRATIONS[5]` below — and the new store is backfilled from whatever
  * Clips are already cached, so an upgrading phone keeps its audio.
+ *
+ * v6 -> v7: the `passages` store was added, for long-form Passages.
+ * Deck records are untouched — a Passage holds its own `name` and `text` and
+ * nothing of a Deck's — see `DECK_MIGRATIONS[6]` below. The new store is
+ * created EMPTY, which is the truth rather than a gap: a phone that had no
+ * Passages has no Passages, and there is nothing of theirs to backfill it from.
  */
-export const CURRENT_SCHEMA_VERSION = 6
+export const CURRENT_SCHEMA_VERSION = 7
 
 /** One step of a migration chain: a pure transform from a version-n record to version-(n+1). */
 export type RecordMigration = (record: never) => unknown
@@ -117,6 +123,13 @@ const v4ToV5: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigr
 const v5ToV6: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
 
 /**
+ * v6 -> v7: the `passages` store landed beside `decks`. It holds a Passage's
+ * own records — `name` and `text` — and nothing of a Deck's, so no deck
+ * record gains, loses or changes a field. Identity, like every step before it.
+ */
+const v6ToV7: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
+
+/**
  * Exported so `DECK_MIGRATIONS.length` can be checked against
  * `CURRENT_SCHEMA_VERSION` directly (persisted-shape.test.ts) — the two
  * must move together, and that test is what turns a mismatch into a build
@@ -129,6 +142,7 @@ export const DECK_MIGRATIONS: readonly RecordMigration[] = [
   v3ToV4,
   v4ToV5,
   v5ToV6,
+  v6ToV7,
 ]
 
 /**

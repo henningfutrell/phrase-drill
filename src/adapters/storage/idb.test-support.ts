@@ -123,7 +123,7 @@ let armedWriteThrow: { store: string; name: string } | undefined
  * It is the one write failure `error` handlers cannot see: no request ever
  * fires, so nothing aborts the transaction on the app's behalf and IndexedDB
  * commits whatever the transaction has already done. In `importAll` that is a
- * `clear()` of all three stores plus however many Decks were written before
+ * `clear()` of all four record stores plus however many Decks were written before
  * the bad one — their whole library replaced by a fragment.
  */
 export function throwOnNextWriteTo(store: string, name = 'DataCloneError'): void {

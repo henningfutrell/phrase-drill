@@ -7,6 +7,7 @@
 
 import type { Deck, DeckId } from './deck'
 import type { Mix, MixId } from './mix'
+import type { Passage, PassageId } from './passage'
 import type { Voice } from './voice'
 
 /** Closed on purpose — widening it later is a type change, not a data migration. */
@@ -67,11 +68,26 @@ export interface MixRecord {
   readonly updatedAt: number
 }
 
+/**
+ * A Passage as it sits on disk: the domain shape plus the same
+ * `createdAt`/`updatedAt` bookkeeping a DeckRecord and a MixRecord carry.
+ * Its whole content is `name` and `text` — a Passage has no interior list,
+ * which is why the merge treats it whole-record like a Mix rather than
+ * per-element like a Deck (`library-merge.ts`).
+ */
+export interface PassageRecord {
+  readonly id: string
+  readonly name: string
+  readonly text: string
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
 export const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
- * The record that a Deck or a Mix was deleted, and when (T060). It outlives
- * the thing it names, on purpose.
+ * The record that a Deck, a Mix or a Passage was deleted, and when (T060). It
+ * outlives the thing it names, on purpose.
  *
  * Sync merges two libraries instead of overwriting one with the other, and
  * a merge cannot tell "absent because the user deleted it" from "absent because
@@ -81,12 +97,14 @@ export const LIBRARY_FORMAT = 'phrase-drill-library'
  * itself data, and it travels in the `Library` envelope like everything
  * else that is theirs.
  *
- * `kind` is not decoration: Deck ids and Mix ids live in one namespace here,
- * and a Tombstone must delete exactly the aggregate it was written for.
+ * `kind` is not decoration: Deck, Mix and Passage ids all live in one
+ * namespace here, so an id alone names up to three different aggregates. The
+ * merge therefore matches a Tombstone on `kind` AND `id`, and a Tombstone
+ * deletes exactly the aggregate it was written for.
  */
 export interface Tombstone {
   readonly id: string
-  readonly kind: 'deck' | 'mix'
+  readonly kind: 'deck' | 'mix' | 'passage'
   readonly deletedAt: number
 }
 
@@ -113,6 +131,15 @@ export interface Library {
    * — absent means "no saved Mixes", never "invalid file".
    */
   readonly mixes?: readonly MixRecord[]
+  /**
+   * Long-form Passages travel with the Decks, for the same reason the
+   * Mixes do: they are text the user typed, and a library that left them behind
+   * would lose them on a new phone. Optional for the same reason `mixes` and
+   * `tombstones` are: every envelope written before schema v7 has no such
+   * field, and absent means "no Passages" — never "invalid file", and never
+   * "clear their Passages".
+   */
+  readonly passages?: readonly PassageRecord[]
   /**
    * What has been deleted, so a merge can tell a deletion from an absence
    * (T060). Optional for the same reason `mixes` is: every envelope written
@@ -216,6 +243,28 @@ export interface MixStore {
   /** Whole-aggregate put: insert or replace. */
   save(mix: Mix): Promise<void>
   remove(id: MixId): Promise<void>
+}
+
+/**
+ * Long-form Passages. Its own store for the same reason a Mix has
+ * one: a Passage is its own aggregate with its own lifetime, and deleting
+ * one must never reach a Deck. Whole-library export/import stays on
+ * `DeckStore`, which owns the one `Library` envelope every store travels in.
+ *
+ * **No `update(id, apply)`, unlike `DeckStore`.** That transaction exists
+ * because a Deck holds many Phrases: a merge can land one between the render
+ * the user tapped and the write, and a whole-Deck put computed from the stale
+ * render would write it away (T075). A Passage's whole content is one text
+ * field, so there is no such thing as a merged part of it to lose —
+ * last-writer-wins is already its merge rule, in `library-merge.ts` and here
+ * alike, and a read-apply-write transaction would buy nothing. It matches
+ * `MixStore`, which is a flat record for the same reason.
+ */
+export interface PassageStore {
+  loadAll(): Promise<Passage[]>
+  /** Whole-aggregate put: insert or replace. */
+  save(passage: Passage): Promise<void>
+  remove(id: PassageId): Promise<void>
 }
 
 /**

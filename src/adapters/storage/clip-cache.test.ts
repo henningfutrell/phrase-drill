@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Clip } from './clip-cache'
+import type { Clip, ReadyUnit } from './clip-cache'
 import { openDB } from 'idb'
 import { idbDestructiveOperations, idbOperations, resetFakeIdb } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
@@ -11,11 +11,28 @@ import {
   CLIP_META_BACKFILL_CHUNK,
 } from './clip-cache'
 import { CLIPS_STORE, CLIP_META_STORE, DB_NAME, openDatabase } from './database'
+import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
 function bytesOf(text: string): ArrayBuffer {
   return new TextEncoder().encode(text).buffer
+}
+
+/** A Phrase's Rep as this cache sees it: French then English, per `buildPhraseRep`. */
+function phraseUnit(id: string, french: string, english: string): ReadyUnit {
+  return {
+    id,
+    statements: [
+      { text: french, lang: 'fr-FR' },
+      { text: english, lang: 'en-US' },
+    ],
+  }
+}
+
+/** A Line's Rep as this cache sees it: one French Statement, per `buildLineRep`. */
+function lineUnit(id: string, text: string): ReadyUnit {
+  return { id, statements: [{ text, lang: 'fr-FR' }] }
 }
 
 describe('computeClipHash', () => {
@@ -83,13 +100,10 @@ describe('createIndexedDbClipCache', () => {
     expect((await cache.get(hash))?.durationMs).toBe(2)
   })
 
-  describe('readyPhraseIds', () => {
-    it('returns only the phrases whose FR and EN clips are both cached', async () => {
+  describe('readyUnitIds', () => {
+    it('returns only the units whose FR and EN clips are both cached', async () => {
       const cache = createIndexedDbClipCache()
-      const phrases = [
-        { id: 'p1', french: 'Bonjour', english: 'Hello' },
-        { id: 'p2', french: 'Salut', english: 'Hi' },
-      ]
+      const units = [phraseUnit('p1', 'Bonjour', 'Hello'), phraseUnit('p2', 'Salut', 'Hi')]
       const frHash1 = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Bonjour' })
       const enHash1 = await computeClipHash({ ...VOICE, lang: 'en-US' as const, text: 'Hello' })
       await cache.put({ hash: frHash1, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
@@ -98,32 +112,89 @@ describe('createIndexedDbClipCache', () => {
       const frHash2 = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Salut' })
       await cache.put({ hash: frHash2, bytes: bytesOf('fr2'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const ready = await cache.readyPhraseIds(phrases, [VOICE])
+      const ready = await cache.readyUnitIds(units, [VOICE])
 
       expect(ready).toEqual(new Set(['p1']))
     })
 
-    it('excludes a phrase whose text was edited after its old clip was cached, forcing regeneration', async () => {
+    /**
+     * A Line's Rep has ONE Statement, and the rule is "every Statement", not
+     * "both of two". Before Passages existed the implementation asked two
+     * fixed questions — French and English — so a one-Statement unit could
+     * not be expressed at all, let alone reported ready.
+     */
+    it('reports a one-Statement unit ready on the strength of that single Clip', async () => {
+      const cache = createIndexedDbClipCache()
+      const hash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Il faisait beau ce matin.' })
+      await cache.put({ hash, bytes: bytesOf('line'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+
+      const ready = await cache.readyUnitIds([lineUnit('l1', 'Il faisait beau ce matin.')], [VOICE])
+
+      expect(ready).toEqual(new Set(['l1']))
+    })
+
+    it('reports a one-Statement unit unready when that single Clip is missing', async () => {
+      const cache = createIndexedDbClipCache()
+      // The English Clip for the same words exists; the FR one the Line asks
+      // for does not. A rule that counted Clips rather than matching each
+      // Statement's own language would pass this wrongly.
+      const enHash = await computeClipHash({ ...VOICE, lang: 'en-US' as const, text: 'Il faisait beau ce matin.' })
+      await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+
+      const ready = await cache.readyUnitIds([lineUnit('l1', 'Il faisait beau ce matin.')], [VOICE])
+
+      expect(ready).toEqual(new Set())
+    })
+
+    /** N is not 1 and not 2: the rule is universal over the Statement list. */
+    it('holds a three-Statement unit unready while any one of its Statements is missing', async () => {
+      const cache = createIndexedDbClipCache()
+      const texts = ['un', 'deux', 'trois']
+      const unit: ReadyUnit = { id: 'u1', statements: texts.map((text) => ({ text, lang: 'fr-FR' as const })) }
+      const hashes = await Promise.all(
+        texts.map((text) => computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text })),
+      )
+
+      // Add them one at a time; only the last addition may flip it to ready.
+      for (const [index, hash] of hashes.entries()) {
+        expect(await cache.readyUnitIds([unit], [VOICE])).toEqual(new Set())
+        await cache.put({ hash, bytes: bytesOf(`clip-${index}`), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+      }
+
+      expect(await cache.readyUnitIds([unit], [VOICE])).toEqual(new Set(['u1']))
+    })
+
+    /**
+     * The counterpart of `combineAll([])` in the generation queue, and it has
+     * to agree with it: nothing to generate is nothing outstanding. If this
+     * said "unready" a Statement-less unit would be enqueued at every drill
+     * start and never become ready.
+     */
+    it('counts a unit with no Statements as ready — it is waiting for nothing', async () => {
+      const cache = createIndexedDbClipCache()
+      expect(await cache.readyUnitIds([{ id: 'u0', statements: [] }], [VOICE])).toEqual(new Set(['u0']))
+    })
+
+    it('excludes a unit whose text was edited after its old clip was cached, forcing regeneration', async () => {
       const cache = createIndexedDbClipCache()
       const staleHash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Old text' })
       await cache.put({ hash: staleHash, bytes: bytesOf('old'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
       const enHash = await computeClipHash({ ...VOICE, lang: 'en-US' as const, text: 'Hello' })
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const edited = [{ id: 'p1', french: 'New text', english: 'Hello' }]
-      const ready = await cache.readyPhraseIds(edited, [VOICE])
+      const ready = await cache.readyUnitIds([phraseUnit('p1', 'New text', 'Hello')], [VOICE])
 
       expect(ready).toEqual(new Set())
     })
 
     /**
      * T067. A Clip's voice is a property of that Clip, not of the app: a
-     * Phrase whose audio exists in ANY of the voices offered is ready, and
+     * unit whose audio exists in ANY of the voices offered is ready, and
      * re-pinning cannot make a library unready. The old behaviour — every
      * Phrase unready the moment the pinned voice changed — is what queued
      * a whole library for regeneration.
      */
-    it('keeps a phrase ready when its clips exist in a voice other than the pinned one', async () => {
+    it('keeps a unit ready when its clips exist in a voice other than the pinned one', async () => {
       const cache = createIndexedDbClipCache()
       const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Bonjour' })
       const enHash = await computeClipHash({ ...VOICE, lang: 'en-US' as const, text: 'Hello' })
@@ -131,29 +202,24 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
       const newlyPinned = { ...VOICE, voiceId: 'voice-2' }
-      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [
-        newlyPinned,
-        VOICE,
-      ])
+      const ready = await cache.readyUnitIds([phraseUnit('p1', 'Bonjour', 'Hello')], [newlyPinned, VOICE])
 
       expect(ready).toEqual(new Set(['p1']))
     })
 
-    it('excludes a phrase whose clips are in no offered voice at all', async () => {
+    it('excludes a unit whose clips are in no offered voice at all', async () => {
       const cache = createIndexedDbClipCache()
       const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Bonjour' })
       const enHash = await computeClipHash({ ...VOICE, lang: 'en-US' as const, text: 'Hello' })
       await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [
-        { ...VOICE, voiceId: 'voice-2' },
-      ])
+      const ready = await cache.readyUnitIds([phraseUnit('p1', 'Bonjour', 'Hello')], [{ ...VOICE, voiceId: 'voice-2' }])
 
       expect(ready).toEqual(new Set())
     })
 
-    it('counts a phrase ready when one side is cached in one voice and the other side in another', async () => {
+    it('counts a unit ready when one Statement is cached in one voice and another in a different one', async () => {
       const cache = createIndexedDbClipCache()
       const other = { ...VOICE, voiceId: 'voice-2' }
       const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Bonjour' })
@@ -161,7 +227,7 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [VOICE, other])
+      const ready = await cache.readyUnitIds([phraseUnit('p1', 'Bonjour', 'Hello')], [VOICE, other])
 
       expect(ready).toEqual(new Set(['p1']))
     })
@@ -173,12 +239,12 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      expect(await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [])).toEqual(new Set())
+      expect(await cache.readyUnitIds([phraseUnit('p1', 'Bonjour', 'Hello')], [])).toEqual(new Set())
     })
 
-    it('returns an empty set for an empty phrase list', async () => {
+    it('returns an empty set for an empty unit list', async () => {
       const cache = createIndexedDbClipCache()
-      expect(await cache.readyPhraseIds([], [VOICE])).toEqual(new Set())
+      expect(await cache.readyUnitIds([], [VOICE])).toEqual(new Set())
     })
   })
 
@@ -306,18 +372,16 @@ describe('createIndexedDbClipCache', () => {
       expect(await second.has('a')).toBe(true)
     })
 
-    it('reports an evicted Phrase as no longer ready, rather than claiming audio it threw away', async () => {
+    it('reports an evicted unit as no longer ready, rather than claiming audio it threw away', async () => {
       const cache = createIndexedDbClipCache({ maxBytes: 1600, now: ticking() })
-      const phrases = [
-        { id: 'p1', french: 'Bonjour', english: 'Hello' },
-        { id: 'p2', french: 'Salut', english: 'Hi' },
-      ]
-      for (const phrase of phrases) {
-        await cache.put(sizedClip(await computeClipHash({ ...VOICE, lang: 'fr-FR', text: phrase.french }), 500))
-        await cache.put(sizedClip(await computeClipHash({ ...VOICE, lang: 'en-US', text: phrase.english }), 500))
+      const units = [phraseUnit('p1', 'Bonjour', 'Hello'), phraseUnit('p2', 'Salut', 'Hi')]
+      for (const unit of units) {
+        for (const statement of unit.statements) {
+          await cache.put(sizedClip(await computeClipHash({ ...VOICE, ...statement }), 500))
+        }
       }
 
-      expect(await cache.readyPhraseIds(phrases, [VOICE])).toEqual(new Set(['p2']))
+      expect(await cache.readyUnitIds(units, [VOICE])).toEqual(new Set(['p2']))
     })
 
     /**
@@ -447,7 +511,7 @@ describe('createIndexedDbClipCache', () => {
       // of a separate index is that reading it never touches the audio bytes.
       // Since T072 that writing happens on the first index build after the
       // upgrade, never inside the upgrade itself.
-      const upgraded = await openDB(DB_NAME, 6)
+      const upgraded = await openDB(DB_NAME, CURRENT_SCHEMA_VERSION)
       expect((await upgraded.getAll(CLIP_META_STORE)).length).toBe(2)
     })
   })

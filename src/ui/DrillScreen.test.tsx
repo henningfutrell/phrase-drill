@@ -3,7 +3,8 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DrillScreen, type DrillReadinessResult } from './DrillScreen'
-import type { Phrase, SpeechPort } from '../domain'
+import type { Line, Phrase, Rep, SpeechPort } from '../domain'
+import { buildLineRep, buildPhraseRep } from '../domain'
 import {
   controllableSpeech,
   fakeClock,
@@ -13,6 +14,10 @@ import {
 
 const bonjour: Phrase = { id: 'p1', french: 'Bonjour', english: 'Hello' }
 const merci: Phrase = { id: 'p2', french: 'Merci', english: 'Thank you' }
+// One Line, and a Passage's Rep for it. A Line Cadence is two Steps — read it
+// once, then hold silence — against a Phrase Cadence's eight.
+const uneLigne: Line = { id: 'g1#0', text: 'Il faisait un temps de chien.' }
+const autreLigne: Line = { id: 'g1#1', text: 'Elle ouvrit la fenêtre.' }
 
 let container: HTMLDivElement
 let root: Root
@@ -48,8 +53,28 @@ function textOf(id: string): string | undefined {
   return testid(id)?.textContent ?? undefined
 }
 
+/**
+ * The readiness gate hands the screen Reps, not Phrases — a Deck's Phrases
+ * become Phrase Reps here exactly as the composition root builds them, so
+ * every test below drills what App.tsx would drill.
+ */
 function ready(phrases: Phrase[], skippedCount = 0, online = true): DrillReadinessResult {
-  return { ready: phrases, skippedCount, canStart: phrases.length > 0, online }
+  return {
+    ready: phrases.map(buildPhraseRep),
+    skippedCount,
+    canStart: phrases.length > 0,
+    online,
+  }
+}
+
+/** The same, for a Passage's Lines. */
+function readyLines(lines: Line[], skippedCount = 0, online = true): DrillReadinessResult {
+  return {
+    ready: lines.map(buildLineRep),
+    skippedCount,
+    canStart: lines.length > 0,
+    online,
+  }
 }
 
 afterEach(() => {
@@ -69,6 +94,7 @@ describe('DrillScreen — readiness gate', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour, merci]))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -87,6 +113,7 @@ describe('DrillScreen — readiness gate', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour], 3))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -104,6 +131,7 @@ describe('DrillScreen — readiness gate', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() =>
           Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'no-voice', online: true })
         }
@@ -126,6 +154,7 @@ describe('DrillScreen — readiness gate', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() =>
           Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready', online: true })
         }
@@ -150,6 +179,7 @@ describe('DrillScreen — readiness gate', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() =>
           Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready', online: false })
         }
@@ -172,6 +202,7 @@ describe('DrillScreen — readiness gate', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour], 3, false))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -191,6 +222,7 @@ describe('DrillScreen — readiness gate', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour], 1))}
         speech={speech}
         clock={fakeClock()}
@@ -223,6 +255,7 @@ describe('DrillScreen — the one-tap unlock', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={{
           ...speech,
@@ -248,6 +281,7 @@ describe('DrillScreen — the one-tap unlock', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
@@ -274,6 +308,7 @@ describe('DrillScreen — the one-tap unlock', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -320,6 +355,7 @@ describe('DrillScreen — the one-tap unlock', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -359,6 +395,7 @@ describe('DrillScreen — the one-tap unlock', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -396,6 +433,7 @@ describe('DrillScreen — running a Drill', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour, merci]))}
         speech={speech}
         clock={clock}
@@ -440,6 +478,7 @@ describe('DrillScreen — running a Drill', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
@@ -462,6 +501,7 @@ describe('DrillScreen — running a Drill', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
@@ -485,6 +525,7 @@ describe('DrillScreen — running a Drill', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour, merci]))}
         speech={speech}
         clock={fakeClock()}
@@ -508,6 +549,7 @@ describe('DrillScreen — running a Drill', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
@@ -530,6 +572,7 @@ describe('DrillScreen — running a Drill', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={clock}
@@ -567,6 +610,7 @@ describe('DrillScreen — the beat row survives a pause/resume replay', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={clock}
@@ -612,6 +656,7 @@ describe('DrillScreen — Wake Lock', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -634,6 +679,7 @@ describe('DrillScreen — Wake Lock', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -663,6 +709,7 @@ describe('DrillScreen — interrupted by screen lock', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={speech}
         clock={fakeClock()}
@@ -701,6 +748,7 @@ describe('DrillScreen — a failed unlock names the real cause', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -749,6 +797,7 @@ describe('DrillScreen — the Route hold', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -783,6 +832,7 @@ describe('DrillScreen — the Route hold', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -806,6 +856,7 @@ describe('DrillScreen — the Route hold', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -832,6 +883,7 @@ describe('DrillScreen — the Route hold', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -865,6 +917,7 @@ describe('DrillScreen — the Route hold', () => {
     const screen = (): ReactElement => (
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -896,6 +949,7 @@ describe('DrillScreen — the Route hold', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -930,6 +984,7 @@ describe('DrillScreen — the Route hold', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -957,6 +1012,7 @@ describe('DrillScreen — the Route hold', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -980,6 +1036,7 @@ describe('DrillScreen — the Route hold', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -1029,6 +1086,7 @@ describe('DrillScreen — Generation suspension', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -1074,6 +1132,7 @@ describe('DrillScreen — Generation suspension', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={recordingSpeech}
         clock={fakeClock()}
@@ -1101,6 +1160,7 @@ describe('DrillScreen — Generation suspension', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={instantSpeech()}
         clock={fakeClock()}
@@ -1128,6 +1188,7 @@ describe('DrillScreen — Generation suspension', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -1165,6 +1226,7 @@ describe('DrillScreen — Generation suspension', () => {
     const screen = (): ReactElement => (
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -1198,6 +1260,7 @@ describe('DrillScreen — Generation suspension', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -1225,6 +1288,7 @@ describe('DrillScreen — Generation suspension', () => {
     render(
       <DrillScreen
         title="Home"
+        repNoun="phrase"
         checkReadiness={() => Promise.resolve(ready([bonjour]))}
         speech={controllableSpeech()}
         clock={fakeClock()}
@@ -1245,5 +1309,272 @@ describe('DrillScreen — Generation suspension', () => {
     expect(testid('drill-interrupted-banner')).not.toBeNull()
 
     expect(resumeGeneration).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The beat row is the Cadence made visible, so its length has to come from the
+ * Cadence rather than from a constant. It was `BEATS = [0, 1, 2, 3]` — correct
+ * for a Phrase's eight Steps and a silent lie about a Line's two, which would
+ * have shown a Passage three beats that never light.
+ */
+describe('DrillScreen — the beat row is the Cadence it is playing', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  function beatCount(): number {
+    return testid('drill-beat-row')?.childElementCount ?? 0
+  }
+
+  it('renders four beats for a Phrase Drill — FR · pause · FR · pause · EN · pause · FR · pause', async () => {
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun="phrase"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    expect(beatCount()).toBe(4)
+    expect(testid('drill-beat-3')).not.toBeNull()
+  })
+
+  it('renders exactly one beat for a Line Drill — read once, then hold silence', async () => {
+    render(
+      <DrillScreen
+        title="Le vent"
+        repNoun="line"
+        checkReadiness={() => Promise.resolve(readyLines([uneLigne]))}
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    expect(beatCount()).toBe(1)
+    expect(testid('drill-beat-0')?.getAttribute('data-state')).toBe('live')
+    expect(testid('drill-beat-1')).toBeNull()
+  })
+
+  /**
+   * The screen derives the count from Rep 0's Cadence, which is only right
+   * because one Drill is homogeneous — a Deck and a Mix are all Phrase Reps, a
+   * Passage is all Line Reps. Nothing in the type system says so, so the two
+   * tests above pin both real Cadence lengths and this one pins the derivation
+   * itself: neither domain Cadence is six Steps long, so a hard-coded four (or
+   * a `repNoun === 'line' ? 1 : 4` special case) fails here.
+   */
+  it('takes the beat count from the Cadence it was handed, not from a constant', async () => {
+    const sixSteps: Rep = {
+      id: 'r1',
+      statements: [{ text: 'Un', lang: 'fr-FR' }],
+      cadence: [
+        { kind: 'utterance', text: 'Un', lang: 'fr-FR' },
+        { kind: 'pause', ms: 10 },
+        { kind: 'utterance', text: 'Deux', lang: 'fr-FR' },
+        { kind: 'pause', ms: 10 },
+        { kind: 'utterance', text: 'Trois', lang: 'fr-FR' },
+        { kind: 'pause', ms: 10 },
+      ],
+    }
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun="phrase"
+        checkReadiness={() =>
+          Promise.resolve({ ready: [sixSteps], skippedCount: 0, canStart: true, online: true })
+        }
+        speech={controllableSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    expect(beatCount()).toBe(3)
+  })
+
+  it('holds the Line’s single beat live across its own pause — one beat is one Line', async () => {
+    const speech = controllableSpeech()
+    render(
+      <DrillScreen
+        title="Le vent"
+        repNoun="line"
+        checkReadiness={() => Promise.resolve(readyLines([uneLigne, autreLigne]))}
+        speech={speech}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    // The Line has been read; the pause the user says it back in begins. Cadence
+    // index 1 floors to beat 0, so the beat stays live rather than going done
+    // with nothing after it to light.
+    await act(async () => {
+      speech.resolveCurrent()
+      await flushMicrotasks()
+    })
+
+    expect(testid('drill-beat-0')?.getAttribute('data-state')).toBe('live')
+    expect(beatCount()).toBe(1)
+  })
+})
+
+/**
+ * The start card says what it is about to play, and a Passage plays Lines. The
+ * count element keeps the id `drill-phrase-count` — it is the id of the
+ * control, not a claim about its contents, and App.test.tsx addresses it.
+ */
+describe('DrillScreen — the start card counts what it will play', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  function startCard(readiness: DrillReadinessResult, repNoun: 'phrase' | 'line') {
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun={repNoun}
+        checkReadiness={() => Promise.resolve(readiness)}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+  }
+
+  // The noun is the only thing repNoun decides. The count's plural is
+  // unconditional and stays that way in this change — App.test.tsx pins the
+  // exact string, including the "1 phrases" a one-Phrase Deck has always
+  // shown.
+  it('counts lines for a Passage', async () => {
+    startCard(readyLines([uneLigne, autreLigne]), 'line')
+    await settle()
+    expect(textOf('drill-phrase-count')).toBe('2 lines')
+  })
+
+  it('counts phrases for a Deck', async () => {
+    startCard(ready([bonjour, merci]), 'phrase')
+    await settle()
+    expect(textOf('drill-phrase-count')).toBe('2 phrases')
+  })
+
+  it('counts one line as a line', async () => {
+    startCard(readyLines([uneLigne]), 'line')
+    await settle()
+    expect(textOf('drill-phrase-count')).toBe('1 lines')
+  })
+
+  it('names the excluded pieces with the same noun, singular and plural', async () => {
+    startCard(readyLines([uneLigne], 1), 'line')
+    await settle()
+    expect(textOf('drill-skipped-count')).toBe('1 line have no audio yet — skipped')
+
+    act(() => {
+      root.unmount()
+    })
+    container.remove()
+
+    startCard(readyLines([uneLigne], 4), 'line')
+    await settle()
+    expect(textOf('drill-skipped-count')).toBe('4 lines have no audio yet — skipped')
+  })
+
+  it('keeps the offline form of the skipped sentence for a Passage', async () => {
+    // The online/offline split is the same distinction it always was: offline,
+    // waiting achieves nothing and the audio comes back with the connection.
+    startCard(readyLines([uneLigne], 4, false), 'line')
+    await settle()
+
+    const skipped = textOf('drill-skipped-count') ?? ''
+    expect(skipped).toMatch(/4 lines/)
+    expect(skipped).toMatch(/online|connect/i)
+    expect(skipped).not.toMatch(/phrase/i)
+  })
+})
+
+describe('DrillScreen — running a Passage', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  it('runs a Line Drill through start, pause, resume, skip and stop', async () => {
+    const speech = controllableSpeech()
+    const onExit = vi.fn()
+    render(
+      <DrillScreen
+        title="Le vent"
+        repNoun="line"
+        checkReadiness={() => Promise.resolve(readyLines([uneLigne, autreLigne]))}
+        speech={speech}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={onExit}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+
+    expect(textOf('drill-running-title')).toBe('Le vent')
+    expect(textOf('drill-current-line')).toBe(uneLigne.text)
+    expect(textOf('drill-rep-counter')).toBe('Rep 1 of 2')
+    expect(speech.calls).toEqual([{ text: uneLigne.text, lang: 'fr-FR' }])
+
+    await click(testid('drill-pause-resume'))
+    expect(speech.cancelledCount).toBe(1)
+    expect(textOf('drill-pause-resume')).toBe('Resume')
+
+    await click(testid('drill-pause-resume'))
+    // The player replays the aborted Step, exactly as it does for a Phrase.
+    expect(speech.calls).toHaveLength(2)
+    expect(textOf('drill-pause-resume')).toBe('Pause')
+
+    await click(testid('drill-skip'))
+    expect(textOf('drill-rep-counter')).toBe('Rep 2 of 2')
+    expect(textOf('drill-current-line')).toBe(autreLigne.text)
+
+    await click(testid('drill-stop'))
+    expect(onExit).toHaveBeenCalled()
+  })
+
+  it('never speaks an English half — a Passage has none', async () => {
+    const speech = instantSpeech()
+    render(
+      <DrillScreen
+        title="Le vent"
+        repNoun="line"
+        checkReadiness={() => Promise.resolve(readyLines([uneLigne, autreLigne]))}
+        speech={speech}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+
+    expect(speech.calls).toEqual([
+      { text: uneLigne.text, lang: 'fr-FR' },
+      { text: autreLigne.text, lang: 'fr-FR' },
+    ])
   })
 })

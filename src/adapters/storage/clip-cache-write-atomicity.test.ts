@@ -5,7 +5,7 @@
  * `writeClip` put the Clip and its `clipMeta` row as two `idb` convenience
  * calls — `db.put(...)` auto-commits its own transaction — so an interruption
  * between them leaves audio on disk with no row describing it. `has()` and
- * `readyPhraseIds` answer from the index alone, so that orphan reports real,
+ * `readyUnitIds` answer from the index alone, so that orphan reports real,
  * playable audio as NOT ready: silently excluded from the drill, or silently
  * regenerated at cost, and never charged against the 200 MB ceiling either
  * (the ceiling under-counts exactly what it is supposed to bind). It only

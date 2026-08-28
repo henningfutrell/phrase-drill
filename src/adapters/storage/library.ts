@@ -4,6 +4,7 @@ import {
   migrateDeckRecord,
   type DeckRecord,
   type MixRecord,
+  type PassageRecord,
   type Tombstone,
 } from './migrations'
 
@@ -21,17 +22,17 @@ export type ParseLibraryResult =
  * against a file that isn't actually a backup). Pure and total: whatever
  * garbage is handed in, this returns a result, it never throws.
  *
- * Restore is the one path that CLEARS all three object stores before writing
+ * Restore is the one path that CLEARS all four record stores before writing
  * (`importAll`), so every refusal here is a wipe that did not happen (T070):
  *
  * - **`needs-update`** — an envelope from a newer build. It cannot be read
  *   down to this schema; accepting it would write a shape this build does not
  *   understand over the one it does.
- * - **`empty`** — a file with no Decks, no Mixes and no Tombstones in it. It
- *   carries nothing, so restoring it can only destroy: if the user genuinely has
- *   none, refusing costs them nothing at all, and if the file was truncated or
- *   hand-edited, refusing costs them everything the user still has. That asymmetry
- *   is the whole argument.
+ * - **`empty`** — a file with no Decks, no Mixes, no Passages and no
+ *   Tombstones in it. It carries nothing, so restoring it can only destroy: if
+ *   the user genuinely has none, refusing costs them nothing at all, and if the file
+ *   was truncated or hand-edited, refusing costs them everything the user still has.
+ *   That asymmetry is the whole argument.
  * - **`invalid`** — anything whose records are not records. `decks: [null]` is
  *   shaped like a library and is not one.
  */
@@ -76,6 +77,12 @@ export function parseLibraryFile(raw: string): ParseLibraryResult {
   if (candidate.tombstones !== undefined && !Array.isArray(candidate.tombstones)) {
     return { ok: false, reason: 'invalid' }
   }
+  // `passages` arrived at schema v7, and reads the same way again:
+  // absent is every backup written before then, present-and-not-an-array is
+  // corrupt.
+  if (candidate.passages !== undefined && !Array.isArray(candidate.passages)) {
+    return { ok: false, reason: 'invalid' }
+  }
 
   // `voice` arrived at T067 and reads like the two above: absent is every
   // backup written before then and means "no voice recorded"; present and
@@ -88,15 +95,26 @@ export function parseLibraryFile(raw: string): ParseLibraryResult {
   }
 
   const mixes = (candidate.mixes ?? []) as unknown[]
+  const passages = (candidate.passages ?? []) as unknown[]
   const tombstones = (candidate.tombstones ?? []) as unknown[]
   if (
     !candidate.decks.every(isDeckRecord) ||
     !mixes.every(isMixRecord) ||
+    !passages.every(isPassageRecord) ||
     !tombstones.every(isTombstone)
   ) {
     return { ok: false, reason: 'invalid' }
   }
-  if (candidate.decks.length === 0 && mixes.length === 0 && tombstones.length === 0) {
+  // A backup whose only content is Passages carries something the user typed, so it
+  // is a file worth restoring — `passages` belongs in this condition beside
+  // `decks` and `mixes`, or a long-form-only backup would be refused as if it
+  // held nothing at all.
+  if (
+    candidate.decks.length === 0 &&
+    mixes.length === 0 &&
+    passages.length === 0 &&
+    tombstones.length === 0
+  ) {
     return { ok: false, reason: 'empty' }
   }
 
@@ -141,11 +159,25 @@ function isMixRecord(value: unknown): boolean {
   )
 }
 
+function isPassageRecord(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.text === 'string' &&
+    typeof value.createdAt === 'number' &&
+    typeof value.updatedAt === 'number'
+  )
+}
+
 function isTombstone(value: unknown): boolean {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
-    (value.kind === 'deck' || value.kind === 'mix') &&
+    // `passage` since schema v7. A Tombstone whose kind this build does
+    // not know names an aggregate it cannot act on, so the file is refused
+    // rather than partly understood.
+    (value.kind === 'deck' || value.kind === 'mix' || value.kind === 'passage') &&
     typeof value.deletedAt === 'number'
   )
 }
@@ -163,13 +195,20 @@ export function backupFilename(date: Date): string {
 
 /**
  * Wrap a whole-library snapshot with its format, current schema version, and
- * export time. Saved Mixes travel with the Decks (T059): the same envelope
- * is both the backup file and the `/api/library` sync body, so a Mix left
- * out here is a Mix the user loses when the user gets a new phone.
+ * export time. Saved Mixes travel with the Decks (T059) and so do long-form
+ * Passages: the same envelope is both the backup file and the
+ * `/api/library` sync body, so a Mix or a Passage left out here is a Mix or a
+ * Passage the user loses when the user gets a new phone.
+ *
+ * Every collection is spread unconditionally, empty or not, for the reason
+ * `mergeLibraries` writes the same shape: one shape for the envelope means a
+ * reader never has to tell "this build has no Passages" from "the user has none".
+ * Absence stays meaningful only on the way IN, where it names a pre-v7 file.
  */
 export function buildLibrary(
   decks: readonly DeckRecord[],
   mixes: readonly MixRecord[],
+  passages: readonly PassageRecord[],
   tombstones: readonly Tombstone[],
   exportedAt: number,
 ): Library {
@@ -179,6 +218,7 @@ export function buildLibrary(
     exportedAt,
     decks: [...decks],
     mixes: [...mixes],
+    passages: [...passages],
     tombstones: [...tombstones],
   }
 }
@@ -210,6 +250,7 @@ export function normalizeLibrary(library: Library): Library {
     exportedAt: library.exportedAt,
     decks: migrateLibraryDecks(library),
     mixes: migrateLibraryMixes(library),
+    passages: migrateLibraryPassages(library),
     tombstones: migrateLibraryTombstones(library),
     voice: migrateLibraryVoice(library),
   }
@@ -297,4 +338,22 @@ export function migrateLibraryDecks(library: Library): DeckRecord[] {
 export function migrateLibraryMixes(library: Library): MixRecord[] {
   assertReadableSchemaVersion(library.schemaVersion)
   return [...(library.mixes ?? [])]
+}
+
+/**
+ * The long-form Passages of an imported library. Passage records were born at
+ * schema v7 and have had exactly one shape since, so there is no chain to run
+ * — only the one question a pre-v7 envelope asks, which is what "no
+ * `passages` field at all" means.
+ *
+ * **It means no Passages. It never means "invalid file", and it never means
+ * "clear theirs".** Every envelope written before v7 has no such field, so
+ * reading absence as anything else would make every existing backup on them
+ * phone unrestorable, or worse, make restoring one wipe Passages it simply
+ * predates. The version guard itself still runs here, so a library newer than
+ * this build is refused before anything is written.
+ */
+export function migrateLibraryPassages(library: Library): PassageRecord[] {
+  assertReadableSchemaVersion(library.schemaVersion)
+  return [...(library.passages ?? [])]
 }

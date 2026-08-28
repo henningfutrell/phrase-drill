@@ -1,4 +1,4 @@
-import type { Language, Phrase } from '../../domain'
+import type { Language, Statement } from '../../domain'
 import { computeClipHash, type ClipCache } from '../storage/clip-cache'
 import type { Voice } from '../../domain'
 import type { SynthClient, SynthError } from './server-synth-client'
@@ -33,15 +33,15 @@ const DEFAULT_MAX_CONCURRENT = 4
 const DEFAULT_MAX_RATE_LIMIT_WAITS = 50
 
 /**
- * The visible state of one Phrase's generation, combined across its two
- * Clips (worse of the two wins): `generating` while in flight, `ready` once
- * both Clips are cached, `unauthorized`/`quota` per `SynthError` (never
+ * The visible state of one unit's generation, combined across its Statements'
+ * Clips (the worst outcome wins): `generating` while any is in flight, `ready`
+ * once every one is cached, `unauthorized`/`quota` per `SynthError` (never
  * retried), `failed` once retries are exhausted — network retries or waits
  * on our own server's rate limit alike.
  *
  * There is deliberately no `rate-limited` state here. Being paced is not an
- * outcome: it is the queue working. A Phrase that is waiting its turn is
- * `generating`, which is what it is, and only a Phrase that ran out of turns
+ * outcome: it is the queue working. A unit that is waiting its turn is
+ * `generating`, which is what it is, and only one that ran out of turns
  * is `failed`.
  */
 export type GenerationStatus =
@@ -68,8 +68,8 @@ export interface GenerationQueueDeps {
   readonly maxConcurrent?: number
   /** Waits on our own server's rate limit before one Clip gives up. Default 50. */
   readonly maxRateLimitWaits?: number
-  /** The visible-state seam: called whenever a Phrase's combined status changes. */
-  onStatusChange?(phraseId: string, status: GenerationStatus): void
+  /** The visible-state seam: called whenever a unit's combined status changes. */
+  onStatusChange?(unitId: string, status: GenerationStatus): void
   readonly now?: () => number
   /** The delay seam. Injected in tests so a half-hour drain can be driven in milliseconds. */
   sleep?(ms: number): Promise<void>
@@ -77,14 +77,15 @@ export interface GenerationQueueDeps {
 
 export interface GenerationQueue {
   /**
-   * Queue both Clips (French, English) for a Phrase in the background.
-   * Synchronous and never throws — a Phrase's text is saved by the caller
-   * before or independent of this call, never gated on it.
+   * Queue every Clip a unit needs in the background — a Phrase's Rep asks for
+   * two (French, then English), a Line's Rep for one. Synchronous and never
+   * throws: the unit's text is saved by the caller before or independent of
+   * this call, never gated on it.
    */
-  enqueue(phrase: Pick<Phrase, 'id' | 'french' | 'english'>): void
-  /** The last known combined status for a Phrase, or `undefined` if it was
+  enqueue(unit: { readonly id: string; readonly statements: readonly Statement[] }): void
+  /** The last known combined status for a unit, or `undefined` if it was
    * never queued (including: no voice was pinned when it was). */
-  statusFor(phraseId: string): GenerationStatus | undefined
+  statusFor(unitId: string): GenerationStatus | undefined
   /**
    * Resolves when nothing enqueued is still outstanding — already resolved if
    * nothing is.
@@ -130,11 +131,12 @@ export interface GenerationQueue {
 }
 
 /**
- * `SpeechPort`'s companion on the write side: turns a saved Phrase into two
- * cached Clips. Adapter-side per T019 §4 — the domain never sees this. Skips
- * a Clip already in the cache, dedupes concurrent requests for the same
- * content hash, bounds how many requests it has in flight, and never lets one
- * Phrase's failure affect another's.
+ * `SpeechPort`'s companion on the write side: turns a saved unit into one
+ * cached Clip per Statement — two for a Phrase's Rep, one for a Line's.
+ * Adapter-side per T019 §4 — the domain never sees this. Skips a Clip already
+ * in the cache, dedupes concurrent requests for the same content hash, bounds
+ * how many requests it has in flight, and never lets one unit's failure
+ * affect another's.
  *
  * **How it treats our own server's rate limit (T035).** A 429 from this app's
  * server is not a failure of the Clip; it is the server saying "not yet", with
@@ -164,9 +166,9 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   let suspended = false
   let resumeWaiters: Array<() => void> = []
 
-  function setStatus(phraseId: string, status: GenerationStatus): void {
-    statuses.set(phraseId, status)
-    deps.onStatusChange?.(phraseId, status)
+  function setStatus(unitId: string, status: GenerationStatus): void {
+    statuses.set(unitId, status)
+    deps.onStatusChange?.(unitId, status)
   }
 
   async function waitOutRateLimit(): Promise<void> {
@@ -275,27 +277,30 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   }
 
   return {
-    enqueue(phrase) {
+    enqueue(unit) {
       idle.begin() // synchronous, so `whenIdle()` called straight after this already knows
       void (async () => {
         try {
           const voice = await deps.getVoice()
           if (!voice) return // no voice pinned: nothing to generate against, no default invented
 
-          setStatus(phrase.id, { kind: 'generating' })
-          const [french, english] = await Promise.all([
-            generateOne(phrase.french, 'fr-FR', voice),
-            generateOne(phrase.english, 'en-US', voice),
-          ])
-          setStatus(phrase.id, combine(french, english))
+          setStatus(unit.id, { kind: 'generating' })
+          // One request per Statement, concurrently — the pair a Phrase's Rep
+          // asks for and the single one a Line's Rep asks for take the same
+          // path, and `withSlot` inside `generateOne` is what keeps the width
+          // of this `Promise.all` from becoming the width of the sweep.
+          const results = await Promise.all(
+            unit.statements.map((statement) => generateOne(statement.text, statement.lang, voice)),
+          )
+          setStatus(unit.id, combineAll(results))
         } finally {
           idle.end()
         }
       })()
     },
 
-    statusFor(phraseId) {
-      return statuses.get(phraseId)
+    statusFor(unitId) {
+      return statuses.get(unitId)
     },
 
     whenIdle: idle.whenIdle,
@@ -316,12 +321,22 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   }
 }
 
-/** The worse of two Clip outcomes wins the Phrase's combined status. */
-function combine(a: GenerationStatus, b: GenerationStatus): GenerationStatus {
-  if (a.kind === 'unauthorized' || b.kind === 'unauthorized') return { kind: 'unauthorized' }
-  if (a.kind === 'quota' || b.kind === 'quota') return { kind: 'quota' }
-  if (a.kind === 'failed' || b.kind === 'failed') return { kind: 'failed' }
-  if (a.kind === 'ready' && b.kind === 'ready') return { kind: 'ready' }
+/**
+ * The worst outcome across a unit's Clips wins its combined status: a Phrase
+ * whose English half was refused is `unauthorized`, not half-ready.
+ *
+ * **No Statements yields `ready`.** Nothing to generate is nothing
+ * outstanding — and the alternative is worse than merely wrong: `generating`
+ * is a status nothing would ever settle, so such a unit would read "in
+ * flight" forever on a screen waiting for it to finish. `readyUnitIds` makes
+ * the same call on the read side, which it must, or the sweep would enqueue
+ * such a unit at every drill start and never see it become ready.
+ */
+function combineAll(statuses: readonly GenerationStatus[]): GenerationStatus {
+  if (statuses.some((status) => status.kind === 'unauthorized')) return { kind: 'unauthorized' }
+  if (statuses.some((status) => status.kind === 'quota')) return { kind: 'quota' }
+  if (statuses.some((status) => status.kind === 'failed')) return { kind: 'failed' }
+  if (statuses.every((status) => status.kind === 'ready')) return { kind: 'ready' }
   return { kind: 'generating' }
 }
 

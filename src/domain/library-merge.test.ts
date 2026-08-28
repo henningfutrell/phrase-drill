@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { LIBRARY_FORMAT, type DeckRecord, type Library, type MixRecord, type Tombstone } from './ports'
+import {
+  LIBRARY_FORMAT,
+  type DeckRecord,
+  type Library,
+  type MixRecord,
+  type PassageRecord,
+  type Tombstone,
+} from './ports'
 import { mergeLibraries } from './library-merge'
 
 /** An arbitrary shared schema version — merge only requires the two sides to agree. */
@@ -19,9 +26,14 @@ function mix(overrides: Partial<MixRecord> & { id: string }): MixRecord {
   return { name: 'Mornings', deckIds: ['d1'], createdAt: 1, updatedAt: 1, ...overrides }
 }
 
+function passage(overrides: Partial<PassageRecord> & { id: string }): PassageRecord {
+  return { name: 'Le Petit Prince', text: 'Bonjour. Comment vas-tu ?', createdAt: 1, updatedAt: 1, ...overrides }
+}
+
 function library(parts: {
   decks?: readonly DeckRecord[]
   mixes?: readonly MixRecord[]
+  passages?: readonly PassageRecord[]
   tombstones?: readonly Tombstone[]
   exportedAt?: number
 }): Library {
@@ -32,6 +44,7 @@ function library(parts: {
     decks: parts.decks ?? [],
     mixes: parts.mixes ?? [],
     tombstones: parts.tombstones ?? [],
+    passages: parts.passages ?? [],
   }
 }
 
@@ -1239,5 +1252,273 @@ describe('mergeLibraries — duplicate Deck and Mix ids are kept, never collapse
     )
 
     expect(merged.mixes!.map((m) => m.name)).toEqual(['Mine'])
+  })
+})
+
+/**
+ * Passages. A Passage is a flat record whose whole content is one text
+ * field, so it merges like a Mix and not like a Deck: there is no interior to
+ * reconcile, and the loser of a conflict is a whole draft rather than a Phrase
+ * inside one. The rules below are therefore the Mix rules, restated for the
+ * third aggregate that shares the Tombstone id namespace.
+ */
+describe('mergeLibraries — Passages', () => {
+  it('keeps a Passage that exists only on one side, from either side', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'local' })] }),
+      library({ passages: [passage({ id: 'remote' })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.id)).toEqual(['local', 'remote'])
+  })
+
+  it('keeps the Passage with the later updatedAt when both sides hold the same id', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', text: 'Older.', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Newer.', updatedAt: 20 })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.text)).toEqual(['Newer.'])
+  })
+
+  it('keeps the later Passage whichever side of the merge holds it', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', text: 'Newer.', updatedAt: 20 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Older.', updatedAt: 10 })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.text)).toEqual(['Newer.'])
+  })
+
+  it('breaks an exact updatedAt tie in favour of the local copy, deterministically', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', text: 'Local.', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Remote.', updatedAt: 10 })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.text)).toEqual(['Local.'])
+  })
+
+  it('takes this device\'s whole Passage when the other side is unchanged from the baseline, later clock or not', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', name: 'Chapitre 1', text: 'Ma révision.', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', updatedAt: 900 })] }),
+      library({ passages: [passage({ id: 'x1', updatedAt: 1 })] }),
+    )
+
+    expect(merged.passages!.map((held) => [held.name, held.text])).toEqual([['Chapitre 1', 'Ma révision.']])
+  })
+
+  it('takes the other device\'s whole Passage when this side is unchanged from the baseline', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', updatedAt: 900 })] }),
+      library({ passages: [passage({ id: 'x1', name: 'Chapitre 1', text: 'Leur révision.', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', updatedAt: 1 })] }),
+    )
+
+    expect(merged.passages!.map((held) => [held.name, held.text])).toEqual([['Chapitre 1', 'Leur révision.']])
+  })
+
+  it('counts a rename alone as a change, so a re-save on the other device cannot undo it', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', name: 'Renamed', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', updatedAt: 900 })] }),
+      library({ passages: [passage({ id: 'x1', updatedAt: 1 })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.name)).toEqual(['Renamed'])
+  })
+
+  it('falls back to the later write when both devices changed the same Passage', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', text: 'Mine.', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Theirs.', updatedAt: 20 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Agreed.', updatedAt: 1 })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.text)).toEqual(['Theirs.'])
+  })
+
+  /**
+   * The mirror of the test above, and it is not symmetry for its own sake: with
+   * only the remote-wins direction covered, `reconcilePassage`'s
+   * `if (!localChanged)` guard can be mutated to `if (true)` and no test
+   * notices — the mutant returns `remote` and the assertion above wants
+   * `remote` anyway. That mutation is exactly the defect of taking the other
+   * device's text whenever both edited, regardless of which write is later,
+   * and the loser here is a page the user typed.
+   */
+  it('falls back to the later write when it is this device that wrote later', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', text: 'Mine.', updatedAt: 20 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Theirs.', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Agreed.', updatedAt: 1 })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.text)).toEqual(['Mine.'])
+  })
+
+  it('breaks a both-changed tie in favour of the local copy, baseline or not', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', text: 'Mine.', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Theirs.', updatedAt: 10 })] }),
+      library({ passages: [passage({ id: 'x1', text: 'Agreed.', updatedAt: 1 })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.text)).toEqual(['Mine.'])
+  })
+
+  it('leaves a Passage neither device changed exactly as it was', () => {
+    const agreed = passage({ id: 'x1', text: 'Agreed.', updatedAt: 10 })
+    const merged = mergeLibraries(
+      library({ passages: [agreed] }),
+      library({ passages: [{ ...agreed, updatedAt: 900 }] }),
+      library({ passages: [{ ...agreed, updatedAt: 1 }] }),
+    )
+
+    expect(merged.passages).toEqual([agreed])
+  })
+
+  it('drops a Passage the other side deleted after that copy was last written', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', updatedAt: 10 })] }),
+      library({ tombstones: [{ id: 'x1', kind: 'passage', deletedAt: 20 }] }),
+    )
+
+    expect(merged.passages).toEqual([])
+    expect(merged.tombstones).toEqual([{ id: 'x1', kind: 'passage', deletedAt: 20 }])
+  })
+
+  it('keeps a Passage written again after the delete, and discards the Tombstone it outlived', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', updatedAt: 30 })] }),
+      library({ tombstones: [{ id: 'x1', kind: 'passage', deletedAt: 20 }] }),
+    )
+
+    expect(merged.passages!.map((held) => held.id)).toEqual(['x1'])
+    expect(merged.tombstones).toEqual([])
+  })
+
+  it('keeps a Passage rewritten since the baseline against a Tombstone that claims to be newer (T070)', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', text: 'Retyped.', updatedAt: 120_000 })] }),
+      library({ tombstones: [{ id: 'x1', kind: 'passage', deletedAt: 300_000 }] }),
+      library({ passages: [passage({ id: 'x1', text: 'Agreed.', updatedAt: 100_000 })] }),
+    )
+
+    expect(merged.passages!.map((held) => held.text)).toEqual(['Retyped.'])
+    expect(merged.tombstones).toEqual([])
+  })
+
+  it('keeps a Passage the baseline never held at all against a Tombstone (T072)', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', updatedAt: 1000 })] }),
+      library({ tombstones: [{ id: 'x1', kind: 'passage', deletedAt: 2000 }] }),
+      library({}),
+    )
+
+    expect(merged.passages!.map((held) => held.id)).toEqual(['x1'])
+  })
+
+  it('still deletes a Passage neither side has touched since the baseline', () => {
+    const merged = mergeLibraries(
+      library({ passages: [passage({ id: 'x1', updatedAt: 100_000 })] }),
+      library({ tombstones: [{ id: 'x1', kind: 'passage', deletedAt: 300_000 }] }),
+      library({ passages: [passage({ id: 'x1', updatedAt: 100_000 })] }),
+    )
+
+    expect(merged.passages).toEqual([])
+  })
+
+  it('always carries a passages field, even when there are none — the shape buildLibrary writes', () => {
+    expect(mergeLibraries(library({}), library({})).passages).toEqual([])
+  })
+
+  it('treats an envelope written before Passages existed as having none, without clearing the other side\'s', () => {
+    const before: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: VERSION,
+      exportedAt: 0,
+      decks: [],
+    }
+
+    expect(mergeLibraries(library({ passages: [passage({ id: 'x1' })] }), before).passages!.map((h) => h.id)).toEqual([
+      'x1',
+    ])
+    expect(mergeLibraries(before, library({ passages: [passage({ id: 'x1' })] })).passages!.map((h) => h.id)).toEqual([
+      'x1',
+    ])
+  })
+
+  it('keeps both Passages held under one duplicated id — two never collapse into one (T086)', () => {
+    const twinA = passage({ id: 'x1', name: 'Twin A', text: 'A.', updatedAt: 2000 })
+    const twinB = passage({ id: 'x1', name: 'Twin B', text: 'B.', updatedAt: 2000 })
+
+    const merged = mergeLibraries(library({ passages: [twinA, twinB] }), library({ passages: [twinA, twinB] }))
+
+    expect(merged.passages).toEqual([twinA, twinB])
+  })
+})
+
+/**
+ * Three aggregates share one Tombstone id namespace, and `Tombstone.kind` is
+ * what keeps them apart. Ids are uuids, so a collision is not an observed
+ * defect — it is the whole reason the field exists, and a third kind is the
+ * moment to pin every pairing rather than the two that happened to be tested.
+ */
+describe('mergeLibraries — a Tombstone reaches only its own kind', () => {
+  const SHARED = { id: 'shared', updatedAt: 10 }
+
+  function all(tombstone: Tombstone): Library {
+    return mergeLibraries(
+      library({
+        decks: [deck(SHARED)],
+        mixes: [mix(SHARED)],
+        passages: [passage(SHARED)],
+      }),
+      library({ tombstones: [tombstone] }),
+    )
+  }
+
+  it('deletes only the Deck for a deck Tombstone', () => {
+    const merged = all({ id: 'shared', kind: 'deck', deletedAt: 20 })
+
+    expect(merged.decks).toEqual([])
+    expect(merged.mixes!.length).toBe(1)
+    expect(merged.passages!.length).toBe(1)
+  })
+
+  it('deletes only the Mix for a mix Tombstone', () => {
+    const merged = all({ id: 'shared', kind: 'mix', deletedAt: 20 })
+
+    expect(merged.mixes).toEqual([])
+    expect(merged.decks.length).toBe(1)
+    expect(merged.passages!.length).toBe(1)
+  })
+
+  it('deletes only the Passage for a passage Tombstone', () => {
+    const merged = all({ id: 'shared', kind: 'passage', deletedAt: 20 })
+
+    expect(merged.passages).toEqual([])
+    expect(merged.decks.length).toBe(1)
+    expect(merged.mixes!.length).toBe(1)
+  })
+
+  it('keeps a Tombstone whose own kind of record is not here, and drops the ones whose record survived', () => {
+    // The Deck and the Mix under this id survive, so their Tombstones would
+    // delete them again on the next merge and are dropped; the Passage
+    // Tombstone is still owed to the next device to sync.
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'shared', updatedAt: 30 })], mixes: [mix({ id: 'shared', updatedAt: 30 })] }),
+      library({
+        tombstones: [
+          { id: 'shared', kind: 'deck', deletedAt: 20 },
+          { id: 'shared', kind: 'mix', deletedAt: 20 },
+          { id: 'shared', kind: 'passage', deletedAt: 20 },
+        ],
+      }),
+    )
+
+    expect(merged.tombstones).toEqual([{ id: 'shared', kind: 'passage', deletedAt: 20 }])
   })
 })

@@ -4,6 +4,7 @@ import { resetFakeIdb } from './idb.test-support'
 import { createIndexedDbSettingsStore } from './settings-store'
 import { createIndexedDbClipCache, computeClipHash } from './clip-cache'
 import { knownVoices } from '../audio/voice-catalogue'
+import { buildPhraseRep } from '../../domain'
 
 /**
  * T026 wrote this test to prove the opposite of what it proves now, and the
@@ -30,6 +31,7 @@ describe('re-pinning the voice through SettingsStore leaves cached readiness alo
     const oldVoice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-old' }
     const newVoice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-new' }
     const phrase = { id: 'p1', french: 'Bonjour', english: 'Hello' }
+    const unit = buildPhraseRep(phrase)
 
     await settingsStore.setVoice(oldVoice)
     const frHash = await computeClipHash({ ...oldVoice, lang: 'fr-FR', text: phrase.french })
@@ -38,7 +40,7 @@ describe('re-pinning the voice through SettingsStore leaves cached readiness alo
     await clipCache.put({ hash: enHash, bytes: new ArrayBuffer(1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
     const voicesBefore = knownVoices((await settingsStore.load()).voice)
-    expect(await clipCache.readyPhraseIds([phrase], [...voicesBefore, oldVoice])).toEqual(new Set(['p1']))
+    expect(await clipCache.readyUnitIds([unit], [...voicesBefore, oldVoice])).toEqual(new Set(['p1']))
 
     await settingsStore.setVoice(newVoice)
     const voicesAfter = knownVoices((await settingsStore.load()).voice)
@@ -46,7 +48,7 @@ describe('re-pinning the voice through SettingsStore leaves cached readiness alo
     // `oldVoice` is not in the catalogue, so it is appended here the way the
     // drill would find it: what matters is that the sweep asks about more
     // than the pinned voice at all.
-    expect(await clipCache.readyPhraseIds([phrase], [...voicesAfter, oldVoice])).toEqual(new Set(['p1']))
+    expect(await clipCache.readyUnitIds([unit], [...voicesAfter, oldVoice])).toEqual(new Set(['p1']))
   })
 
   it('still excludes a phrase whose audio exists in no offered voice', async () => {
@@ -54,8 +56,8 @@ describe('re-pinning the voice through SettingsStore leaves cached readiness alo
     const clipCache = createIndexedDbClipCache()
     await settingsStore.setVoice({ provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-new' })
 
-    const ready = await clipCache.readyPhraseIds(
-      [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
+    const ready = await clipCache.readyUnitIds(
+      [buildPhraseRep({ id: 'p1', french: 'Bonjour', english: 'Hello' })],
       knownVoices((await settingsStore.load()).voice),
     )
 
