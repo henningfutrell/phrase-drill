@@ -698,6 +698,21 @@ and the sheet (`src/ui/PassageSheet.tsx`).
 the feature; Passage, Line and Rep are the glossary's words for the code, and
 this is the one place the screen deliberately speaks theirs.
 
+**Refused: a Passage as a Deck of Phrases with an empty English half.** It is the
+obvious shortcut — a Passage looks like a list of short French strings, and
+modelling it as a Deck would have needed no new object store, no schema bump and
+no change at all to the audio layer. It does not work, and the way it fails is
+silent. `generateOne` (`src/adapters/audio/generation-queue.ts`) skips a
+Statement whose text is empty, so no English Clip is ever generated for such a
+Phrase; readiness requires a cached Clip for **every** Statement of a unit, so
+each of those Phrases reports unready forever; and the start card then shows
+`This drill's audio isn't ready yet — it's still being made. Try again in a
+moment.` for a wait that never ends. It would also have put a page of text
+through the Phrase Cadence — each entry read three times, with a translation
+that does not exist spoken in between. The cost of the honest model is one
+object store and one identity migration. The cost of the shortcut is a screen
+that lies.
+
 - Header: `Long form`, with `Back` and `+ New` as link-style actions — the same
   header shape as Decks.
 - One row per Passage, store order. The whole left of the row is one large
