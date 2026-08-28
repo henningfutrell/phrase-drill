@@ -57,10 +57,11 @@ model's clamped range, which is the corroboration available without a key.
 ## 2. Cold-fill cost
 
 **Call count — read from code + measured.** `generateOne` (`generation-queue.ts`)
-is called once per language per Phrase, unconditionally, whenever the Phrase
-isn't already cached. `computeDrillReadiness` (`drill-readiness.ts` line
-54) loops over **every** unready Phrase and calls `generationQueue.enqueue()`
-synchronously, in one pass, for all of them — not batched, not paginated.
+is called once per Statement of the enqueued unit, unconditionally, whenever
+that Statement isn't already cached — two per Phrase, one per Line.
+`computeDrillReadiness` (`drill-readiness.ts` line 88) loops over **every**
+unready Rep and calls `generationQueue.enqueue()` synchronously, in one pass,
+for all of them — not batched, not paginated.
 
 | Phrases | ElevenLabs calls (measured, matches 2n exactly) |
 |---:|---:|
@@ -125,31 +126,44 @@ available). Two plausible bottlenecks, in order of likely severity:
 > re-taken; re-run the bench before treating any of them as current.
 
 
-| Phrases | Save all decks, one at a time (ms) | `importAll` — one transaction (ms) | `readyPhraseIds`, cold cache (ms) | `readyPhraseIds`, warm cache (ms) | raw 2n-hash loop (ms) |
+| Phrases | Save all decks, one at a time (ms) | `importAll` — one transaction (ms) | `readyUnitIds`, cold cache (ms) | `readyUnitIds`, warm cache (ms) | raw 2n-hash loop (ms) |
 |---:|---:|---:|---:|---:|---:|
 | 100 | 0.38 | 0.07 | 2.01 | 1.27 | 1.75 |
 | 1,000 | 0.13 | 0.01 | 12.46 | 9.23 | 14.92 |
 | 5,000 | 0.32 | 0.05 | 52.74 | 52.66 | 65.33 |
 | 10,000 | 0.82 | 0.09 | 94.12 | 90.47 | 134.03 |
 
+**Both `readyUnitIds` columns were measured against the two-Statement Phrase
+shape.** Every unit the bench passes in is a Phrase Rep carrying French and
+English (`scale.bench.test.ts`, step 5), so each one costs two digests, and the
+header's `n` is Phrase Reps rather than units in general. A Line Rep carries
+one Statement and costs one; a Passage costs one per Line. Read the first
+bullet below before scaling these numbers to anything that is not a Phrase.
+
 Deck save/import are near-instant against the fake — expected, it's a `Map`
 write. **Not representative of real Safari IndexedDB**, which persists to
 disk and has its own overhead; treat these two columns as a floor only.
 
-**`readyPhraseIds` is the important row, and it is worse than the timings
+**`readyUnitIds` is the important row, and it is worse than the timings
 above suggest.** Two findings, both read from code and confirmed by the
 harness:
 
-- **It hashes every Phrase, every drill start.** `readyPhraseIds`
-  (`clip-cache.ts` lines 91–109) calls `computeClipHash` twice per Phrase —
-  real SHA-256 via `crypto.subtle.digest`, unconditionally, for the whole
-  set passed in. `computeDrillReadiness` calls it once per drill start
-  (`drill-readiness.ts` line 48). At 10,000 Phrases that is 20,000 SHA-256
+- **It hashes every Statement of every unit, every drill start.**
+  `readyUnitIds` (`clip-cache.ts`, the IndexedDB implementation from line 624)
+  calls `computeClipHash` once per Statement of every unit passed in — real
+  SHA-256 via `crypto.subtle.digest`, unconditionally, for the whole set.
+  `computeDrillReadiness` calls it once per drill start (`drill-readiness.ts`
+  line 83). **The cost is one hash per Statement, summed over every Rep in the
+  drill** — which is not the two-per-unit arithmetic these numbers were taken
+  under. A Phrase Rep carries two Statements, a Line Rep carries one, and a
+  Passage contributes `splitPassageIntoLines(passage).length` Reps of one
+  Statement each: a page of text is dozens of units where a Phrase is one, and
+  its cost is its Line count, not 1. At 10,000 Phrases that is 20,000 SHA-256
   digests — 94–134 ms in this harness's Node/V8; a phone's JS engine is
   typically slower, and this runs synchronously before the Drill screen can
   render anything.
 - **It loads the *entire* clip store, not the Phrases being drilled.**
-  `readyPhraseIds` unconditionally does `db.getAll(CLIPS_STORE)` (line 95)
+  `readyUnitIds` unconditionally does `db.getAll(CLIPS_STORE)`
   — every Clip in the whole cache — regardless of how many Phrases are
   passed in. Starting a Drill on a 10-Phrase Deck, in a library that has
   grown to 10,000 Phrases with a fully warm cache, still pulls the **whole**
@@ -158,7 +172,7 @@ harness:
   fake's `getAll()` is a reference-array copy with no structured-clone
   cost — real IndexedDB deserializes every stored `ArrayBuffer` off disk.
   **This is the harness's biggest blind spot**: the real on-device cost of
-  `readyPhraseIds` at a large, warm cache could not be measured here, and
+  `readyUnitIds` at a large, warm cache could not be measured here, and
   is very likely materially worse than what this table shows.
 
 ## 4. Export file size (measured)
@@ -177,13 +191,35 @@ export, by construction, regardless of library size.
 ~126 bytes/Phrase of JSON. Export stays small and fast at every size tested
 — it is not on the list of things that break.
 
+**A Passage's storage cost is its text, and the export envelope carries it
+whole** (modelled). Schema v7 added `passages` to the `Library` envelope, so
+every export and every sync push carries every Passage's `text` verbatim;
+Lines are derived and never stored, so there is nothing else to count. The
+bound is the server's push ceiling — `LIBRARY_MAX_BODY_BYTES` = 8 MB =
+8,388,608 bytes (`server/app.js`), above which `PUT /api/library` answers
+`413 payload-too-large`. A page of typed French is ~3,000 characters, i.e.
+~3.1 KB of JSON once the id, the name and the escaping are counted:
+
+| Passages, one page each | Passage bytes | + a 10,000-Phrase export (1.2 MB) | of the 8 MB ceiling |
+|---:|---:|---:|---:|
+| 10 | 31 KB | 1.3 MB | 15% |
+| 100 | 310 KB | 1.5 MB | 19% |
+| 1,000 | 3.1 MB | 4.2 MB | 52% |
+| 2,300 | 7.1 MB | 8.0 MB | **100% — where it binds** |
+
+So it binds at roughly **2,300 pages** of long-form text beside a
+10,000-Phrase library, and at ~2,700 pages with no Phrases at all. That is
+not a size this application reaches. It is still a real bound, it fails as a
+hard 413 rather than as a degradation, and the number to watch is total
+characters typed — not the number of Passages.
+
 ## 5. Read from code, not modelled or measured
 
-- **Does the drill-start sweep enqueue every unready Phrase in one go?**
-  Yes (`drill-readiness.ts` line 54, `for (const phrase of unready)
-  deps.generationQueue.enqueue(phrase)` — synchronous loop, no batching, no
+- **Does the drill-start sweep enqueue every unready unit in one go?**
+  Yes (`drill-readiness.ts` line 88, `for (const rep of unready)
+  deps.generationQueue.enqueue(rep)` — synchronous loop, no batching, no
   cap). For a cold 10,000-Phrase library this fires 20,000 concurrent
-  ElevenLabs calls in one pass (§2).
+  ElevenLabs calls in one pass (§2); for a cold Passage it fires one per Line.
 - **Does anything bound the clip cache size, or evict old Clips?** ~~No.~~
   **It did not; T036 closed this.** As measured here, `put()` only ever
   overwrote a Clip stored under the *same* content hash — nothing deleted
@@ -191,8 +227,10 @@ export, by construction, regardless of library size.
   and the cache grew monotonically forever. `clip-cache.ts` now carries a
   200 MB ceiling and evicts least-recently-*played* Clips down to 90% of it
   on every `put` that crosses the line. See §6 below.
-- **Is `computeClipHash` called per Phrase per drill start?** Yes, twice
-  per Phrase, every time `readyPhraseIds` runs, every drill start (§3).
+- **Is `computeClipHash` called per unit per drill start?** Yes — once per
+  Statement, summed over every Rep in the drill, every time `readyUnitIds`
+  runs, every drill start (§3). Two digests for a Phrase Rep, one for a Line
+  Rep, and one per Line for a Passage.
 
 ## What breaks first
 
@@ -220,7 +258,7 @@ still says which one would come back first if either fix regressed.
    at that size it is squarely in the range where iOS treats an origin's
    storage as evictable — and an origin evicted whole loses the Phrases too.
    Now bounded at 200 MB, §6.
-3. **`readyPhraseIds`' whole-cache `getAll()`** — ~~a self-compounding cost
+3. **`readyUnitIds`' whole-cache `getAll()`** — ~~a self-compounding cost
    with #2~~ **fixed alongside it in T036.** Every drill start loaded the
    *entire* clip cache (not just the Phrases in play) into memory and hashed
    the *entire* Phrase library passed to it. It now reads the `clipMeta`
@@ -228,6 +266,14 @@ still says which one would come back first if either fix regressed.
    entirely. **The hashing cost is untouched and remains**: 94–134 ms at
    10,000 Phrases in Node, on every drill start, for every Deck however
    small. This is the one live item left in this section (T037).
+
+   **And the count that cost is charged per is no longer "per Phrase."** The
+   sweep's unit is a Rep carrying N Statements, so the hashing cost is one
+   digest per Statement summed over the drill's Reps: two for a Phrase Rep,
+   one for a Line Rep, and one per Line for a Passage — whose Rep count is
+   `splitPassageIntoLines(passage).length`, not 1. The numbers above were
+   measured at two digests per unit, which is the Phrase shape; the finding
+   they support is unchanged, but the multiplier to plug in is Statements.
 4. **Export/import — not a breaking point.** Stays small (1.2 MB at
    10,000 Phrases) and fast at every size tested, because Clips are
    structurally excluded.
@@ -376,7 +422,7 @@ byte-identical across it.
 - **Modelled, not measured:** Clip duration/bytes (§1), per-call ElevenLabs
   latency and Safari's per-host connection ceiling used for the wall-clock
   cold-fill estimate (§2). No ElevenLabs key was available or used.
-- **Could not verify:** the real, on-device cost of `readyPhraseIds`
+- **Could not verify:** the real, on-device cost of `readyUnitIds`
   against a large warm cache backed by actual Safari IndexedDB (structured
   clone of hundreds of MB) — the in-memory IndexedDB used throughout this
   harness reaches no disk, and is a known blind spot (§3).

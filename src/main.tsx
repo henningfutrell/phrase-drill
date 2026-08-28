@@ -5,6 +5,7 @@ import {
   createIndexedDbClipCache,
   createIndexedDbDeckStore,
   createIndexedDbMixStore,
+  createIndexedDbPassageStore,
   createIndexedDbSettingsStore,
   createIndexedDbSyncBaselineStore,
   databaseTrouble,
@@ -55,6 +56,7 @@ const routeHoldElement: HTMLAudioElement = routeHoldElementCandidate
 
 const deckStore = createIndexedDbDeckStore()
 const mixStore = createIndexedDbMixStore()
+const passageStore = createIndexedDbPassageStore()
 const settingsStore = createIndexedDbSettingsStore()
 const clipCache = createIndexedDbClipCache()
 const syncBaselineStore = createIndexedDbSyncBaselineStore()
@@ -158,6 +160,7 @@ function showApp(): void {
     <App
       deckStore={deckStore}
       mixStore={mixStore}
+      passageStore={passageStore}
       settingsStore={settingsStore}
       synthClient={synthClient}
       generationQueue={generationQueue}

@@ -69,13 +69,15 @@ argument for lowering has to be made explicitly in the commit message.
 | 2026-08-02 | 82 | 82.74% | the baseline the gate arrived at |
 | 2026-08-03 | 95 | 100.00% | T044/T045 killed every survivor |
 | 2026-08-03 | 95 | 100.00% | T060 added `library-merge.ts`; 63 new mutants, all killed |
+| 2026-08-28 | 95 | 100.00% | Passage/Line/Statement landed; 607 mutants, all killed |
 
-It is deliberately **not 100**, even though the domain measures 100.00% over
-three runs. Four to five of the 151 mutants are killed by *timeout*, and a
-timeout is a wall-clock judgement rather than a property of the code — the
-killed/timeout split moved between runs on the same machine (146/5, 147/4). A
-machine faster than the one measured here could let one of those mutants
-complete instead of timing out, at which point it might survive, and a
+It is deliberately **not 100**, even though the domain has measured 100.00% on
+every run since. Some mutants are killed by *timeout* — 24 of the 607 in the
+current run, four to five of the 151 in the first — and a timeout is a
+wall-clock judgement rather than a property of the code: the killed/timeout
+split moved between runs on the same machine at the original size (146/5,
+147/4). A machine faster than the one measured here could let one of those
+mutants complete instead of timing out, at which point it might survive, and a
 threshold of 100 would fail a build containing no defect. 95 absorbs one such
 flip and still fails loudly on a real regression.
 
@@ -88,22 +90,30 @@ that the npm script exists. It deliberately does not assert the score. Its job
 is to stop the gate quietly becoming decoration: a scope that matches nothing
 reports 100%, and a `break` of `null` reports a score and exits 0 regardless.
 
-## Current state (2026-08-03)
+## Current state (2026-08-28)
 
-**100.00%** — 151 mutants, 0 survived, 0 uncovered, across all seven domain
-files. The 26 survivors and 3 uncovered mutants the gate found on arrival were
-closed by T044 and T045.
+**100.00%** — **607 mutants, 0 survived**: 583 killed outright, 24 killed by
+timeout, 0 uncovered, across every file in `src/domain/`.
 
-Read that number with one qualification. Of the 29, **twelve were killed by new
-tests** and **seventeen were suppressed** as equivalent mutants — changes that
-cannot alter observable behaviour, so no test can kill them and demanding one
-would only produce a test asserting an implementation detail. Suppression
-removes a mutant from the denominator, so 100.00% over 151 mutants is not the
-same claim as 100.00% over 168.
+Up from 151 at the T044/T045 baseline, in two steps: `library-merge.ts` (T060,
+63 mutants), and then the Passage work, which added `passage.ts`, `line.ts` and
+`statement.ts` as domain files and widened `rep.ts`, `cadence.ts` and
+`drill-player.ts` — a Rep now carries N Statements rather than one Phrase, and
+`cadence.ts` carries the Line Cadence and `PASSAGE_PAUSE_MAX_MS` beside the
+Phrase's.
+
+Read that number with one qualification, carried from the 151-mutant run and
+still true. Of the 29 findings the gate arrived with, **twelve were killed by
+new tests** and **seventeen were suppressed** as equivalent mutants — changes
+that cannot alter observable behaviour, so no test can kill them and demanding
+one would only produce a test asserting an implementation detail. Suppression
+removes a mutant from the denominator, so a score is over the mutants Stryker
+was allowed to make, not over every edit it could have made.
 
 Every suppression is a `// Stryker disable next-line <Mutator>: <reason>`
-comment in `src/domain/drill-player.ts` carrying its own argument, and each was
-checked against the source before it was accepted. They fall into four groups:
+comment carrying its own argument, and each was checked against the source
+before it was accepted. Seven are in `src/domain/drill-player.ts`, in four
+groups:
 
 - **`generation` (2)** — `+= 1` versus `-= 1`. The counter is read only through
   an equality check against a snapshot taken at loop-iteration start, so any
@@ -118,10 +128,62 @@ checked against the source before it was accepted. They fall into four groups:
   always equal in truth value, so `&&`, `||`, and either clause pinned to
   `true` all decide the same thing.
 
+One more sits in `src/domain/library-merge.ts:531` — `>` versus `>=` when two
+Tombstones under one `kind:id` compare equal on `deletedAt`. A Tombstone is
+exactly `{kind, id, deletedAt}`, so two that tie are structurally identical and
+the map holds the same value whichever the tie keeps.
+
 If you add a `// Stryker disable` comment, it needs an argument of this kind in
 the comment itself. A disable without one is indistinguishable from hiding a
 missing test, and it is the one way this gate can quietly stop meaning
 anything.
+
+## A worked survivor: a conflict rule tested in one direction
+
+The best example this file has of reading a survivor, because the test that
+missed it looked complete.
+
+`reconcilePassage` (`src/domain/library-merge.ts`) decides a Passage conflict:
+baseline first, then the later `updatedAt`. Its `if (!localChanged)` guard
+**survived** mutation to `if (true)`.
+
+A mutant that survives is not a hole in coverage — the guard was covered. The
+hole was the direction. The only both-sides-changed test had the **remote** copy
+as the later write, so `if (true)` returned `remote`, and the assertion wanted
+`remote` anyway. The mutant is exactly the defect of taking the other device's
+text whenever both sides edited, whichever write is later: a page the user typed on
+this phone, replaced by an older page from the other one, silently. A test
+asserting the right answer for the wrong reason cannot see it.
+
+Killed by adding the mirror — both changed, **local** later — and a both-changed
+tie, which pins "a tie keeps local" as well. Three cases where there was one.
+
+**The lesson, worth more than the fix: a conflict-resolution rule tested in only
+one direction is not tested.** Whenever a rule picks between two sides, the
+suite needs each side winning, and the tie. Otherwise one assertion is doing the
+work of the rule and of a coin toss at once, and mutation is the only thing that
+will tell you which.
+
+## Two hand checks the gate cannot do for you
+
+Both were used in the Passage work, where the automated gates could not reach.
+
+- **Hand-apply the mutant and re-run one file.** A full `npm run test:mutation`
+  is too slow to iterate against while you are writing the test that kills a
+  survivor. Make the mutant's edit in the source by hand, run only the affected
+  test file, and watch it stay green — that is the survivor reproduced in about
+  a second. Then write the test, watch it go red, and undo the edit. Confirm
+  with the real run once, at the end; `npx stryker run --mutate <one file>` is
+  the middle option.
+- **Grep for a renamed symbol; `tsc -b` is not a blast-radius oracle here.**
+  `tsconfig` excludes `src/**/*.integration.test.ts`, so a rename that breaks an
+  integration test compiles clean and a green type-check proves nothing about
+  the callers it did not read. The Passage work renamed the Rep builder into two
+  (`rep.ts`) and the clip cache's readiness sweep (`clip-cache.ts`), and in both
+  cases the surviving references were in files the type-check never opened —
+  integration tests and this `docs/` tree. So after a rename, grep the whole
+  tree for the old name and expect zero hits. The type checker answers a
+  narrower question than the one you are asking.
 
 ## Open finding: `drill-player.ts:125` is dead code
 

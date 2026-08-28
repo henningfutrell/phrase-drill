@@ -23,6 +23,7 @@ import { createGenerationQueue } from './generation-queue'
 import { computeDrillReadiness } from './drill-readiness'
 import { createClipPlayer } from './clip-player'
 import { knownVoices, VOICE_CATALOGUE } from './voice-catalogue'
+import { buildPhraseRep } from '../../domain'
 
 type Voice = import('../../domain').Voice
 type Phrase = import('../../domain').Phrase
@@ -42,6 +43,9 @@ const PHRASES: Phrase[] = [
   { id: 'p2', french: 'Salut', english: 'Hi' },
   { id: 'p3', french: 'Merci', english: 'Thanks' },
 ]
+
+/** What the queue and the readiness sweep are handed: one Rep per Phrase. */
+const REPS = PHRASES.map(buildPhraseRep)
 
 /** Counts what it was asked to make, and in which voice. Never a real network. */
 function countingSynthClient(): SynthClient & { calls: { text: string; voiceId: string }[] } {
@@ -71,7 +75,7 @@ describe('changing the pinned voice (T067)', () => {
       getVoice: () => settingsStore.load().then((s) => s.voice),
     })
     await settingsStore.setVoice(VOICE_A)
-    for (const phrase of PHRASES) queue.enqueue(phrase)
+    for (const rep of REPS) queue.enqueue(rep)
     await queue.whenIdle()
     expect(synthClient.calls).toHaveLength(PHRASES.length * 2)
     return { clipCache, settingsStore, synthClient, queue }
@@ -83,7 +87,7 @@ describe('changing the pinned voice (T067)', () => {
     synthClient.calls.length = 0
 
     await settingsStore.setVoice(VOICE_B)
-    const readiness = await computeDrillReadiness(PHRASES, {
+    const readiness = await computeDrillReadiness(REPS, {
       clipCache,
       generationQueue: { enqueue, statusFor: vi.fn(), whenIdle: async () => {}, suspend: vi.fn(), resume: vi.fn() },
       voice: (await settingsStore.load()).voice,
@@ -132,7 +136,7 @@ describe('changing the pinned voice (T067)', () => {
     await settingsStore.setVoice(VOICE_B)
     synthClient.calls.length = 0
 
-    queue.enqueue({ id: 'p4', french: 'Au revoir', english: 'Goodbye' })
+    queue.enqueue(buildPhraseRep({ id: 'p4', french: 'Au revoir', english: 'Goodbye' }))
     await queue.whenIdle()
 
     expect(synthClient.calls.map((c) => c.voiceId)).toEqual([VOICE_B.voiceId, VOICE_B.voiceId])
@@ -150,7 +154,7 @@ describe('changing the pinned voice (T067)', () => {
     await settingsStore.setVoice(VOICE_B)
     synthClient.calls.length = 0
 
-    for (const phrase of PHRASES) queue.enqueue(phrase)
+    for (const rep of REPS) queue.enqueue(rep)
     await queue.whenIdle()
 
     expect(synthClient.calls).toHaveLength(PHRASES.length * 2)
@@ -165,7 +169,7 @@ describe('changing the pinned voice (T067)', () => {
     const { synthClient, queue } = await generatedInVoiceA()
     synthClient.calls.length = 0
 
-    for (const phrase of PHRASES) queue.enqueue(phrase)
+    for (const rep of REPS) queue.enqueue(rep)
     await queue.whenIdle()
 
     expect(synthClient.calls).toHaveLength(0)

@@ -171,8 +171,9 @@ lose a whole Mix: the put names one Mix and touches no other record.
 
 `src/domain/library-merge.ts` is pure and has three layers:
 
-- **Per record, last write wins** (T060). A Deck or Mix only one side holds is
-  kept unconditionally; the same id on both sides resolves by `updatedAt`.
+- **Per record, last write wins** (T060). A Deck, a Mix or a Passage only one
+  side holds is kept unconditionally; the same id on both sides resolves by
+  `updatedAt`, after the baseline test below has had its say.
 - **Tombstones** (T060) make a deletion travel as data, so a delete sticks
   instead of being pushed back by whichever device still holds the record.
 - **Three-way per Phrase** (T034), against the **Sync Baseline**.
@@ -191,6 +192,41 @@ deliberate: a `Phrase` has one French field and one English field, and
 inventing a second copy of a phrase would corrupt the drill the user is running.
 Everything else — different Phrases of the same Deck, an add against a delete,
 a rename against an edit — is preserved on both sides.
+
+### A Passage merges whole-record, like a Mix (schema v7)
+
+A Passage is one text, so the merge treats it as one value: **whole-record,
+the way a Mix is, and never element-by-element the way a Deck's Phrases are.**
+`reconcilePassage` (`src/domain/library-merge.ts`) decides it, and it asks the
+baseline **before** it looks at a clock:
+
+| Case | Result |
+| ---- | ------ |
+| Only one side moved from the Sync Baseline | That side's record, whole. The side that did not move has nothing to contribute. |
+| Both moved, or there is no baseline | The later `updatedAt` wins; an exact tie keeps local. |
+
+**The baseline goes first because a clock can be wrong and a page cannot be
+re-made.** A phone whose date is off by a day would otherwise discard an edit
+the other side never made — it would win on `updatedAt` while holding the
+older text. Against the baseline that cannot happen: the side still matching
+the last state both sides agreed on is, by construction, the side that has
+written nothing since, whatever its clock says. And the stake is higher than a
+Mix's — the loser of a Mix conflict loses a selection of Deck ids the user can
+re-make in seconds, the loser of a Passage conflict loses a page the user typed.
+
+Why not a three-way merge inside the text, the way a Deck gets one per Phrase:
+a Passage's Lines are derived and never persisted (`src/domain/line.ts`), so
+there is no element with an id to pair up — only one string. Merging two
+renderings of one string means inventing a third nobody wrote, which is the
+same reason the per-Phrase merge stops at the Phrase's own two fields.
+
+**A Passage's deletion travels as a Tombstone of `kind: 'passage'`**, and a
+Tombstone is matched on `kind` as well as `id`. Decks, Mixes and Passages
+share one id namespace, and `kind` is what keeps them apart: a Passage's
+Tombstone must never delete a Deck that happens to hold the same id, and must
+never block that Deck's split id either. Everything the baseline rule says
+about a Tombstone (below) holds unchanged — a Passage is deleted only when it
+is unchanged from the last state both sides agreed on.
 
 ### A Phrase is removed only when something records the deletion (T070)
 
@@ -352,18 +388,18 @@ stored baseline can be unusable.
 
 ## The pinned voice (T067)
 
-The envelope carries one field that is not a Deck, a Mix or a Tombstone: the
-**pinned voice**. It is a preference, and losing it on a new phone was
-expensive — the decks arrived, the drill was blocked on `no-voice`, and the user
-had no way to know which voice the user had before.
+The envelope carries one field that is not a Deck, a Mix, a Passage or a
+Tombstone: the **pinned voice**. It is a preference, and losing it on a new
+phone was expensive — the decks arrived, the drill was blocked on `no-voice`,
+and the user had no way to know which voice the user had before.
 
 Three rules, and they are all short:
 
 - **It is joined on by name, never exported wholesale.** `DeckStore.exportAll()`
-  still reads only `decks`, `mixes` and `tombstones`;
-  `adapters/sync/synced-library.ts` adds `voice` and nothing else. What leaves
-  this device is enumerated, so a field added to the `settings` store later
-  stays on the phone until somebody names it too.
+  still reads only the record stores — `decks`, `mixes`, `passages` (schema v7)
+  and `tombstones`; `adapters/sync/synced-library.ts` adds `voice` and nothing
+  else. What leaves this device is enumerated, so a field added to the
+  `settings` store later stays on the phone until somebody names it too.
 - **Last writer wins, with no timestamp.** `mergeLibraries` takes
   `local.voice ?? remote.voice`: this device's, unless this device has none.
   No `pinnedAt` was invented, because since T067 there is nothing left for one
@@ -489,6 +525,17 @@ written by a newer build than this one) are the two failures a retry cannot
 fix, so the engine stops retrying and says what only the user can do about it. A
 local change made in either state does not paint over the message.
 
+**What `stale-client` is now protecting.** The 409 fires when the pushed
+envelope's `schemaVersion` is *lower* than the stored one (`docs/server.md`),
+so a build still on schema 6 cannot push over a stored v7 envelope. That
+refusal used to be about their Tombstones and the fields v6 knows nothing of; it
+now guards their long-form texts as well. A v6 build has no `passages` field at
+all, and a push replaces the stored row wholesale — so an accepted v6 push
+would strip every Passage the user has written off the server copy, silently, from a
+phone whose only fault was not having updated. "Saved on this phone · update
+the app to sync" is the right outcome, and the only one that keeps the page the user
+typed.
+
 ## Nothing in the round-trip may throw (T069)
 
 `run()` used to be `try`/`finally` with no `catch`, and four of the calls
@@ -578,7 +625,8 @@ system not acting on that decision.
 The paragraph above said "nothing readable is discarded", and it was reasoning
 about `mergeLibraries` while sounding like a claim about their phrases. They are
 not the same claim. A row can fail this server's `isLibraryEnvelope` check on
-`format`, on `schemaVersion`, or on the shape of `mixes`/`tombstones`/`voice`
+`format`, on `schemaVersion`, or on the shape of
+`mixes`/`tombstones`/`passages`/`voice`
 and still carry **every Deck the user has**. Unreadable to this build is not empty.
 
 `server-copy-unreadable` was handled exactly like `not-found`, so `remote`
@@ -658,6 +706,11 @@ bytes are archived.
   same applies to a Mix the user edits while a merge is landing: `persistMix` writes
   a whole Mix from React state, which T075 stopped doing for Decks and did not
   for Mixes (see above for why).
+- **A Passage is whole-record too, and the stake is a page.** Both sides
+  editing one Passage between round-trips resolves to one text and drops the
+  other. The baseline test means a clock cannot decide it while one side has
+  written nothing; the remaining case — both genuinely rewritten — has no third
+  text to keep, exactly as for a Phrase edited on both sides.
 - **A Phrase deleted on the other device comes back here** until this device
   deletes it too (T070). The fix is a Phrase-level deletion record, which is a
   change to the persisted `Library` envelope and to every write path — not a

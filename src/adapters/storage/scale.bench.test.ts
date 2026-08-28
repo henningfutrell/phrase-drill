@@ -17,7 +17,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Deck, Phrase } from '../../domain'
-import { estimatePauseDuration } from '../../domain'
+import { buildPhraseRep, estimatePauseDuration } from '../../domain'
 import { resetFakeIdb } from './idb.test-support'
 
 // This project's tsconfig carries no @types/node ("types": ["vite/client"]
@@ -154,8 +154,8 @@ interface Row {
   importAllMsMeasured: number
   exportAllMsMeasured: number
   exportBytesMeasured: number
-  readyPhraseIdsColdMsMeasured: number
-  readyPhraseIdsWarmMsMeasured: number
+  readyUnitIdsColdMsMeasured: number
+  readyUnitIdsWarmMsMeasured: number
 }
 
 const results: Row[] = []
@@ -170,6 +170,11 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
     it(`measures library size ${n}`, async () => {
       const phrases = generatePhrases(n)
       const decks = chunkIntoDecks(phrases, PHRASES_PER_DECK)
+      // What the queue and the cache are actually handed: one Rep per Phrase,
+      // two Statements each. The Passage side of the library is not modelled
+      // here — a Line's Rep is strictly cheaper (one Statement, one digest),
+      // so the Phrase population is still the worst case this bounds.
+      const reps = phrases.map(buildPhraseRep)
 
       // 1. Modelled clip cache bytes (2 clips/phrase, FR + EN).
       const clipCacheBytesModelled = modelledLibraryClipCacheBytes(phrases)
@@ -192,7 +197,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         async has(hash: string) {
           return clips.has(hash)
         },
-        async readyPhraseIds() {
+        async readyUnitIds() {
           return new Set<string>()
         },
       }
@@ -207,7 +212,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         getVoice: async () => VOICE,
       })
 
-      for (const phrase of phrases) queue.enqueue(phrase)
+      for (const rep of reps) queue.enqueue(rep)
       // Flush until every enqueue()'s async IIFE has settled. A pure
       // microtask flush (bare `await Promise.resolve()`) is NOT enough:
       // computeClipHash's crypto.subtle.digest() resolves via a macrotask
@@ -236,7 +241,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         async has() {
           return false
         },
-        async readyPhraseIds() {
+        async readyUnitIds() {
           return new Set<string>()
         },
       }
@@ -252,7 +257,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         clipCache: hangingClipCache,
         getVoice: async () => VOICE,
       })
-      for (const phrase of phrases) hangingQueue.enqueue(phrase)
+      for (const rep of reps) hangingQueue.enqueue(rep)
       for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0))
       const coldFillConcurrencyMeasured = hangingCalls // out of 2n possible
 
@@ -270,8 +275,9 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         decks.map((d) => ({ id: d.id, name: d.name, phrases: [...d.phrases], createdAt: 1, updatedAt: 1 })),
         // No saved Mixes in the scale fixture: a Mix is a handful of ids,
         // orders of magnitude below the Deck/Phrase volume this benchmark
-        // exists to bound. Same for Tombstones: one small record per
-        // deletion, never per Phrase.
+        // exists to bound. Same for Passages (one row plus its text) and for
+        // Tombstones: one small record per deletion, never per Phrase.
+        [],
         [],
         [],
         Date.now(),
@@ -287,22 +293,22 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
       const serialized = JSON.stringify(exported)
       const exportBytesMeasured = new TextEncoder().encode(serialized).byteLength
 
-      // 5. readyPhraseIds — the drill-start sweep. Since T067 the sweep asks
+      // 5. readyUnitIds — the drill-start sweep. Since T067 the sweep asks
       // about every voice a Clip could be in, pinned first, and stops at the
       // first hit: the WARM number below is therefore still two digests per
-      // phrase (everything is in the pinned voice), and the COLD number is
-      // the worst case, `knownVoices().length` digests per side, because no
-      // voice has anything. Real SHA-256 via crypto.subtle either way.
+      // Phrase Rep (everything is in the pinned voice), and the COLD number
+      // is the worst case, `knownVoices().length` digests per Statement,
+      // because no voice has anything. Real SHA-256 via crypto.subtle either
+      // way.
       const clipCache = createIndexedDbClipCache()
 
       const coldStart = performance.now()
-      const readyCold = await clipCache.readyPhraseIds(phrases, knownVoices(VOICE))
-      const readyPhraseIdsColdMsMeasured = performance.now() - coldStart
+      const readyCold = await clipCache.readyUnitIds(reps, knownVoices(VOICE))
+      const readyUnitIdsColdMsMeasured = performance.now() - coldStart
       expect(readyCold.size).toBe(0) // nothing cached yet
 
-      // Warm the cache: put a Clip (modelled bytes) for every phrase/lang,
-      // so readyPhraseIds' db.getAll(CLIPS_STORE) has to load 2N real
-      // ArrayBuffers of realistic (modelled) size out of the store —
+      // Warm the cache: put a Clip (modelled bytes) for every Statement of
+      // every Rep, so the sweep has to answer about 2N real cached hashes —
       // this is what happens on every drill start once the library is
       // fully generated.
       for (const phrase of phrases) {
@@ -325,8 +331,8 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
       }
 
       const warmStart = performance.now()
-      const readyWarm = await clipCache.readyPhraseIds(phrases, knownVoices(VOICE))
-      const readyPhraseIdsWarmMsMeasured = performance.now() - warmStart
+      const readyWarm = await clipCache.readyUnitIds(reps, knownVoices(VOICE))
+      const readyUnitIdsWarmMsMeasured = performance.now() - warmStart
       expect(readyWarm.size).toBe(n) // everything now ready
 
       // 6. Raw hashing cost in isolation: 2N SHA-256 digests, nothing else.
@@ -347,8 +353,8 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         importAllMsMeasured,
         exportAllMsMeasured,
         exportBytesMeasured,
-        readyPhraseIdsColdMsMeasured,
-        readyPhraseIdsWarmMsMeasured,
+        readyUnitIdsColdMsMeasured,
+        readyUnitIdsWarmMsMeasured,
       }
       results.push(row)
 

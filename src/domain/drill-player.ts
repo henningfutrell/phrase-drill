@@ -1,7 +1,6 @@
-import { buildRep, type Rep } from './rep'
+import type { Rep } from './rep'
 import { runStep, type StepPorts } from './step-runner'
 import { shuffle, type RandomSource } from './shuffle'
-import type { Phrase } from './phrase'
 
 export type DrillStatus = 'playing' | 'paused' | 'stopped'
 
@@ -14,7 +13,7 @@ export interface DrillPlayerOptions {
 
 /**
  * The Drill state machine: an ordered sequence of Reps over a snapshot of
- * Phrases, with position and playing/paused/stopped state. In-memory only —
+ * them, with position and playing/paused/stopped state. In-memory only —
  * discarded when the run ends.
  */
 export interface DrillPlayer {
@@ -24,22 +23,27 @@ export interface DrillPlayer {
   start(): Promise<void>
   pause(): void
   resume(): Promise<void>
-  /** Skip to the next Phrase, cancelling whatever step is in flight. */
+  /** Skip to the next Rep, cancelling whatever step is in flight. */
   skip(): Promise<void>
   stop(): void
 }
 
 /**
- * Creates a Drill over a snapshot of `phrases` — later edits to the source
- * (e.g. the Deck it came from) never reach a running Drill. Optionally
- * shuffled at this point, per the injected randomness source.
+ * Creates a Drill over a snapshot of `reps` — later edits to whatever they
+ * came from (a Deck's Phrases, a Passage's text) never reach a running Drill.
+ * Optionally shuffled at this point, per the injected randomness source.
+ *
+ * Reps, not Phrases: the player has no idea whether it is walking a Deck's
+ * Phrases or a Passage's Lines, which is what keeps one state machine serving
+ * both. Building the Reps is the composition root's job (App.tsx), because it
+ * is the same list the clip cache had to check for readiness first.
  */
 export function createDrillPlayer(
-  phrases: readonly Phrase[],
+  reps: readonly Rep[],
   ports: DrillPlayerPorts,
   options: DrillPlayerOptions = {},
 ): DrillPlayer {
-  return new DrillPlayerEngine(phrases, ports, options)
+  return new DrillPlayerEngine(reps, ports, options)
 }
 
 class DrillPlayerEngine implements DrillPlayer {
@@ -53,15 +57,12 @@ class DrillPlayerEngine implements DrillPlayer {
   private readonly ports: DrillPlayerPorts
 
   constructor(
-    phrases: readonly Phrase[],
+    reps: readonly Rep[],
     ports: DrillPlayerPorts,
     options: DrillPlayerOptions,
   ) {
     this.ports = ports
-    const snapshot = options.random
-      ? shuffle(phrases, options.random)
-      : [...phrases]
-    this.reps = snapshot.map(buildRep)
+    this.reps = options.random ? shuffle(reps, options.random) : [...reps]
   }
 
   get status(): DrillStatus {

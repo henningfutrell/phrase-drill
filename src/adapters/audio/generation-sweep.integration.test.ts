@@ -24,6 +24,7 @@ import { createGenerationQueue, type GenerationStatus } from './generation-queue
 import { createServerSynthClient } from './server-synth-client'
 import type { Clip, ClipCache } from '../storage/clip-cache'
 import type { Voice } from '../../domain'
+import { buildPhraseRep } from '../../domain'
 
 const VOICE: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 const PHRASE_COUNT = 1000
@@ -141,7 +142,7 @@ function createFakeClipCache(): ClipCache {
     async has(hash) {
       return clips.has(hash)
     },
-    async readyPhraseIds() {
+    async readyUnitIds() {
       return new Set()
     },
   }
@@ -173,18 +174,20 @@ describe('a cold library sweep against a rate-limiting server', () => {
         maxConcurrent: MAX_CONCURRENT,
         now: clock.now,
         sleep: clock.sleep,
-        onStatusChange: (phraseId, status) => {
-          if (status.kind === 'generating') settledStatuses.delete(phraseId)
-          else settledStatuses.set(phraseId, status)
+        onStatusChange: (unitId, status) => {
+          if (status.kind === 'generating') settledStatuses.delete(unitId)
+          else settledStatuses.set(unitId, status)
         },
       })
 
-      const phrases = Array.from({ length: PHRASE_COUNT }, (_, i) => ({
-        id: `p${i}`,
-        french: `phrase française numéro ${i}`,
-        english: `french phrase number ${i}`,
-      }))
-      for (const phrase of phrases) queue.enqueue(phrase)
+      const reps = Array.from({ length: PHRASE_COUNT }, (_, i) =>
+        buildPhraseRep({
+          id: `p${i}`,
+          french: `phrase française numéro ${i}`,
+          english: `french phrase number ${i}`,
+        }),
+      )
+      for (const rep of reps) queue.enqueue(rep)
 
       // Quiescence is the queue's own answer (`whenIdle`), never a counted
       // number of turns. Each pass lets the real event loop do everything it

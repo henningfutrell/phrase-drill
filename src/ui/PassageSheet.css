@@ -1,0 +1,50 @@
+/*
+ * PassageSheet: the one field in this app that has to take a page.
+ *
+ * The shared `.sheet-*` rules in styles.css still own the ground, the labels
+ * and the two fields' chrome. Everything here is about the textarea being a
+ * page rather than a line, and about iOS Safari's behaviour when a field of
+ * this size takes focus on a phone.
+ */
+
+@import '../styles/tokens.css';
+
+.passage-sheet-text {
+  /* Tall enough that a pasted paragraph is visible as a paragraph, capped so
+     the sheet never covers the whole screen and the two actions below it stay
+     in reach of a thumb. It scrolls past that — the text is not limited by
+     what fits. */
+  min-height: 40vh;
+  max-height: 52vh;
+  overflow-y: auto;
+  /* .sheet-input centres one line of text vertically with `min-height` and no
+     padding-block; a textarea needs real block padding and a line box that
+     starts at the top. */
+  padding: 12px 13px;
+  line-height: 1.5;
+  /* At or above 16px, or iOS Safari zooms the whole viewport when the field
+     takes focus and the user has to pinch back out to see the sheet's buttons.
+     --text-base is 19px, so this is parity with the rest of the app rather
+     than a workaround — it is stated because dropping it to --text-sm (16px)
+     is the smallest edit that would still be safe, and --text-xs (14px) is
+     the one that would not. */
+  font-size: var(--text-base);
+  /* A page of French, and the drill line's own face. Not italic, not script:
+     the user proof-reads this text against the paper the user typed it from. */
+  font-family: var(--font-body);
+  /* iOS momentum scrolling inside the field, so a long text does not drag the
+     sheet instead of the text. */
+  -webkit-overflow-scrolling: touch;
+  /* The corner handle Safari draws is meaningless here — the field is already
+     as tall as the sheet allows. */
+  resize: none;
+}
+
+/* Why the Save the user tapped did nothing. The same --danger the write-failure
+   banner uses, at the size of a label rather than a heading: it is an answer
+   to something the user just did, not an alarm. */
+.passage-sheet-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}

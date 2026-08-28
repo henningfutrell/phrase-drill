@@ -1,10 +1,10 @@
 import type { Library, Voice } from '../../domain'
 
 /**
- * Do these two libraries hold the same records? Decks, Mixes and Tombstones —
- * everything the deck store keeps, and nothing else. The pinned voice lives in
- * the `settings` store and is compared by `sameVoice` below, beside the store
- * that owns it.
+ * Do these two libraries hold the same records? Decks, Mixes, Passages and
+ * Tombstones — everything the deck store keeps, and nothing else. The pinned
+ * voice lives in the `settings` store and is compared by `sameVoice` below,
+ * beside the store that owns it.
  *
  * Two questions are answered with this, and both of them are "may I skip a
  * write?":
@@ -29,6 +29,11 @@ function fingerprint(library: Library): string {
     // order of the Decks themselves is not, so it is normalized away.
     decks: [...library.decks].sort(byId),
     mixes: [...(library.mixes ?? [])].sort(byId),
+    // A Passage's whole content is `name` and `text`, so comparing the record
+    // is comparing the Passage. It has to be here: this is what decides
+    // whether `updateAll` writes at all, so a fingerprint blind to `passages`
+    // would silently drop a Passage a merge had just brought down.
+    passages: [...(library.passages ?? [])].sort(byId),
     tombstones: [...(library.tombstones ?? [])].sort((x, y) => (`${x.kind}:${x.id}` < `${y.kind}:${y.id}` ? -1 : 1)),
   })
 }

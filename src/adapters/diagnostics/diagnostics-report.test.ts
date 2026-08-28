@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { Deck, DeckStore, Library } from '../../domain'
-import { LIBRARY_FORMAT } from '../../domain'
+import type { Deck, DeckStore, Library, Passage, PassageStore } from '../../domain'
+import { LIBRARY_FORMAT, splitPassageIntoLines } from '../../domain'
 import type { ClipCache, Settings, SettingsStore } from '../storage'
 import type { Voice } from '../../domain'
 import { collectDiagnostics, formatDiagnosticsReport } from './diagnostics-report'
-import type { RouteHoldSummary } from './diagnostics-report'
+import type { DiagnosticsSnapshot, RouteHoldSummary } from './diagnostics-report'
 import type { ErrorLog, LogEntry } from './error-log'
 
 function fakeDeckStore(decks: readonly Deck[]): DeckStore {
@@ -27,6 +27,16 @@ function fakeDeckStore(decks: readonly Deck[]): DeckStore {
     async updateAll(update) {
       return { library: update(await this.exportAll()), changed: false }
     },
+  }
+}
+
+function fakePassageStore(passages: readonly Passage[]): PassageStore {
+  return {
+    async loadAll() {
+      return [...passages]
+    },
+    async save() {},
+    async remove() {},
   }
 }
 
@@ -57,8 +67,8 @@ function fakeClipCache(readyIds: ReadonlySet<string>): ClipCache {
     async has() {
       return false
     },
-    async readyPhraseIds(phrases) {
-      return new Set(phrases.map((p) => p.id).filter((id) => readyIds.has(id)))
+    async readyUnitIds(units) {
+      return new Set(units.map((unit) => unit.id).filter((id) => readyIds.has(id)))
     },
   }
 }
@@ -94,47 +104,122 @@ const DECKS: Deck[] = [
   },
 ]
 
+/** Three sentences, so it derives three Lines — enough that "Lines" and
+ * "Passages" cannot be confused for each other in a count. */
+const PASSAGE: Passage = {
+  id: 'g1',
+  name: 'Le matin',
+  text: 'Il faisait beau ce matin. Le train est parti sans nous. Nous avons marché.',
+}
+
+/** Everything `collectDiagnostics` needs beyond the stores under test. */
+const AMBIENT = {
+  getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
+  getStorageEstimate: async () => ({ supported: false }) as const,
+  getRouteHold: () => NEVER_HELD,
+}
+
+/** A snapshot with nothing in it, for the formatter tests below to vary one
+ * field of at a time. */
+const EMPTY_SNAPSHOT: DiagnosticsSnapshot = {
+  build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
+  voice: null,
+  phrasesTotal: 0,
+  phrasesReady: 0,
+  passageLinesTotal: 0,
+  passageLinesReady: 0,
+  storage: { supported: false },
+  lastSyncAt: null,
+  routeHold: NEVER_HELD,
+  recentErrors: [],
+}
+
 describe('collectDiagnostics', () => {
-  it('counts Clips ready against total Phrases, using the pinned voice', async () => {
+  it('counts Phrases with Clips ready against total Phrases, using the pinned voice', async () => {
     const snapshot = await collectDiagnostics({
       deckStore: fakeDeckStore(DECKS),
+      passageStore: fakePassageStore([]),
       settingsStore: fakeSettingsStore({ voice: VOICE }),
       clipCache: fakeClipCache(new Set(['p1'])),
       errorLog: fakeErrorLog([]),
-      getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
-      getStorageEstimate: async () => ({ supported: false }),
-      getRouteHold: () => NEVER_HELD,
+      ...AMBIENT,
     })
 
     expect(snapshot.phrasesTotal).toBe(2)
-    expect(snapshot.clipsReady).toBe(1)
+    expect(snapshot.phrasesReady).toBe(1)
     expect(snapshot.voice).toEqual(VOICE)
   })
 
-  it('reports zero Clips ready, honestly, when no voice is pinned rather than guessing', async () => {
+  /**
+   * The reason this function grew a `passageStore` at all: a report whose
+   * readiness count silently ignores every Passage is the exact shape of an
+   * unanswerable bug report — the user says "it's not working", the report says
+   * everything is ready, and the Passage that has no audio is invisible.
+   */
+  it('counts Passage Lines as their own population, beside the Phrases', async () => {
+    const lineIds = splitPassageIntoLines(PASSAGE).map((line) => line.id)
+    expect(lineIds).toHaveLength(3)
+
     const snapshot = await collectDiagnostics({
       deckStore: fakeDeckStore(DECKS),
-      settingsStore: fakeSettingsStore({ voice: null }),
-      clipCache: fakeClipCache(new Set(['p1'])),
+      passageStore: fakePassageStore([PASSAGE]),
+      settingsStore: fakeSettingsStore({ voice: VOICE }),
+      clipCache: fakeClipCache(new Set(['p1', lineIds[0]!, lineIds[2]!])),
       errorLog: fakeErrorLog([]),
-      getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
-      getStorageEstimate: async () => ({ supported: false }),
-      getRouteHold: () => NEVER_HELD,
+      ...AMBIENT,
     })
 
-    expect(snapshot.clipsReady).toBe(0)
+    expect(snapshot.phrasesTotal).toBe(2)
+    expect(snapshot.phrasesReady).toBe(1)
+    expect(snapshot.passageLinesTotal).toBe(3)
+    expect(snapshot.passageLinesReady).toBe(2)
+  })
+
+  /** A merged number cannot tell "their Passage has no audio" from "their Deck has
+   * no audio", and that is the distinction the person reading their pasted
+   * report needs first. */
+  it('keeps the two populations apart even when one of them is entirely unready', async () => {
+    const snapshot = await collectDiagnostics({
+      deckStore: fakeDeckStore(DECKS),
+      passageStore: fakePassageStore([PASSAGE]),
+      settingsStore: fakeSettingsStore({ voice: VOICE }),
+      clipCache: fakeClipCache(new Set(['p1', 'p2'])),
+      errorLog: fakeErrorLog([]),
+      ...AMBIENT,
+    })
+
+    expect(snapshot.phrasesReady).toBe(2)
+    expect(snapshot.passageLinesReady).toBe(0)
+    expect(snapshot.passageLinesTotal).toBe(3)
+  })
+
+  it('reports zero ready in both populations, honestly, when no voice is pinned rather than guessing', async () => {
+    const snapshot = await collectDiagnostics({
+      deckStore: fakeDeckStore(DECKS),
+      passageStore: fakePassageStore([PASSAGE]),
+      settingsStore: fakeSettingsStore({ voice: null }),
+      clipCache: fakeClipCache(new Set(['p1', `${PASSAGE.id}#0`])),
+      errorLog: fakeErrorLog([]),
+      ...AMBIENT,
+    })
+
+    expect(snapshot.phrasesReady).toBe(0)
+    expect(snapshot.passageLinesReady).toBe(0)
+    // The totals are still the truth: nothing is ready, but the library is not
+    // empty, and a report that said "0 of 0" would hide that.
+    expect(snapshot.phrasesTotal).toBe(2)
+    expect(snapshot.passageLinesTotal).toBe(3)
     expect(snapshot.voice).toBeNull()
   })
 
   it('carries the last-sync fact through as-is', async () => {
     const snapshot = await collectDiagnostics({
       deckStore: fakeDeckStore([]),
+      passageStore: fakePassageStore([]),
       settingsStore: fakeSettingsStore({ lastSyncAt: 1_700_000_000_000 }),
       clipCache: fakeClipCache(new Set()),
       errorLog: fakeErrorLog([]),
-      getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
-      getStorageEstimate: async () => ({ supported: false }),
-      getRouteHold: () => NEVER_HELD,
+      ...AMBIENT,
     })
 
     expect(snapshot.lastSyncAt).toBe(1_700_000_000_000)
@@ -150,13 +235,12 @@ describe('collectDiagnostics', () => {
 
     const snapshot = await collectDiagnostics({
       deckStore: fakeDeckStore([]),
+      passageStore: fakePassageStore([]),
       settingsStore: fakeSettingsStore(),
       clipCache: fakeClipCache(new Set()),
       errorLog: fakeErrorLog(entries),
       recentErrorsLimit: 3,
-      getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
-      getStorageEstimate: async () => ({ supported: false }),
-      getRouteHold: () => NEVER_HELD,
+      ...AMBIENT,
     })
 
     expect(snapshot.recentErrors.map((e) => e.message)).toEqual(['entry-7', 'entry-8', 'entry-9'])
@@ -164,49 +248,53 @@ describe('collectDiagnostics', () => {
 })
 
 describe('formatDiagnosticsReport', () => {
-  it('never includes phrase content — counts only', () => {
+  it('never includes phrase or passage content — counts only', () => {
     const text = formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
+      ...EMPTY_SNAPSHOT,
       voice: VOICE,
       phrasesTotal: 2,
-      clipsReady: 1,
-      storage: { supported: false },
-      lastSyncAt: null,
-      routeHold: NEVER_HELD,
-      recentErrors: [],
+      phrasesReady: 1,
+      passageLinesTotal: 3,
+      passageLinesReady: 2,
     })
 
     expect(text).not.toContain('Bonjour')
     expect(text).not.toContain('Merci')
+    expect(text).not.toContain('Il faisait beau')
+    expect(text).not.toContain('Le matin')
     expect(text).toContain('2')
     expect(text).toContain('1')
   })
 
-  it('states storage as unavailable honestly rather than printing a fabricated zero', () => {
+  it('states both populations, so an all-Phrases-ready device with a silent Passage is visible', () => {
     const text = formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      voice: null,
-      phrasesTotal: 0,
-      clipsReady: 0,
-      storage: { supported: false },
-      lastSyncAt: null,
-      routeHold: NEVER_HELD,
-      recentErrors: [],
+      ...EMPTY_SNAPSHOT,
+      voice: VOICE,
+      phrasesTotal: 2,
+      phrasesReady: 2,
+      passageLinesTotal: 3,
+      passageLinesReady: 0,
     })
 
-    expect(text.toLowerCase()).toContain('unavailable')
+    expect(text).toContain('Clips ready: 2 of 2 Phrases')
+    expect(text).toContain('Clips ready: 0 of 3 Passage Lines')
+  })
+
+  /** Unconditional, even at zero: a report that dropped the line when the user has
+   * no Passages would be indistinguishable from a build that cannot count
+   * them, which is the question the reader is actually asking. */
+  it('states the Passage Lines line even for a library with no Passages at all', () => {
+    expect(formatDiagnosticsReport(EMPTY_SNAPSHOT)).toContain('Clips ready: 0 of 0 Passage Lines')
+  })
+
+  it('states storage as unavailable honestly rather than printing a fabricated zero', () => {
+    expect(formatDiagnosticsReport(EMPTY_SNAPSHOT).toLowerCase()).toContain('unavailable')
   })
 
   it('reports storage usage against quota when the estimate is available', () => {
     const text = formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      voice: null,
-      phrasesTotal: 0,
-      clipsReady: 0,
+      ...EMPTY_SNAPSHOT,
       storage: { supported: true, usageBytes: 1_048_576, quotaBytes: 10_485_760 },
-      lastSyncAt: null,
-      routeHold: NEVER_HELD,
-      recentErrors: [],
     })
 
     expect(text).toMatch(/1(\.0)? MB/)
@@ -214,44 +302,16 @@ describe('formatDiagnosticsReport', () => {
   })
 
   it('reports the build sha and timestamp so a build can be identified over the phone', () => {
-    const text = formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      voice: null,
-      phrasesTotal: 0,
-      clipsReady: 0,
-      storage: { supported: false },
-      lastSyncAt: null,
-      routeHold: NEVER_HELD,
-      recentErrors: [],
-    })
-
-    expect(text).toContain('abc1234')
+    expect(formatDiagnosticsReport(EMPTY_SNAPSHOT)).toContain('abc1234')
   })
 
   it('reports never for last sync when none has happened', () => {
-    const text = formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      voice: null,
-      phrasesTotal: 0,
-      clipsReady: 0,
-      storage: { supported: false },
-      lastSyncAt: null,
-      routeHold: NEVER_HELD,
-      recentErrors: [],
-    })
-
-    expect(text).toMatch(/never/i)
+    expect(formatDiagnosticsReport(EMPTY_SNAPSHOT)).toMatch(/never/i)
   })
 
   it('includes the last N captured errors, each with a timestamp', () => {
     const text = formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      voice: null,
-      phrasesTotal: 0,
-      clipsReady: 0,
-      storage: { supported: false },
-      lastSyncAt: null,
-      routeHold: NEVER_HELD,
+      ...EMPTY_SNAPSHOT,
       recentErrors: [{ id: 1, timestamp: 1_700_000_000_000, source: 'window.onerror', message: 'TypeError: boom' }],
     })
 
@@ -260,18 +320,7 @@ describe('formatDiagnosticsReport', () => {
   })
 
   it('states plainly when no errors have been captured, rather than an empty section', () => {
-    const text = formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      voice: null,
-      phrasesTotal: 0,
-      clipsReady: 0,
-      storage: { supported: false },
-      lastSyncAt: null,
-      routeHold: NEVER_HELD,
-      recentErrors: [],
-    })
-
-    expect(text.toLowerCase()).toMatch(/none|no errors/)
+    expect(formatDiagnosticsReport(EMPTY_SNAPSHOT).toLowerCase()).toMatch(/none|no errors/)
   })
 })
 
@@ -284,16 +333,7 @@ describe('formatDiagnosticsReport', () => {
  */
 describe('formatDiagnosticsReport — the Route hold line', () => {
   function report(routeHold: RouteHoldSummary): string {
-    return formatDiagnosticsReport({
-      build: { sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' },
-      voice: null,
-      phrasesTotal: 0,
-      clipsReady: 0,
-      storage: { supported: false },
-      lastSyncAt: null,
-      routeHold,
-      recentErrors: [],
-    })
+    return formatDiagnosticsReport({ ...EMPTY_SNAPSHOT, routeHold })
   }
 
   /** The one line, asserted whole — `toContain` cannot see a trailing typo. */
@@ -386,13 +426,15 @@ describe('formatDiagnosticsReport — the Route hold line', () => {
     }
   })
 
-  it('reads between Clips ready and storage — both are playback facts', () => {
+  it('reads below both Clips-ready lines and above storage — all three are playback facts', () => {
     const lines = report(NEVER_HELD).split('\n')
-    const clips = lines.findIndex((line) => line.startsWith('Clips ready:'))
+    const phrases = lines.findIndex((line) => line.endsWith('Phrases'))
+    const passageLines = lines.findIndex((line) => line.endsWith('Passage Lines'))
     const hold = lines.findIndex((line) => line.startsWith('Route hold:'))
     const storage = lines.findIndex((line) => line.startsWith('Storage:'))
 
-    expect(hold).toBe(clips + 1)
+    expect(passageLines).toBe(phrases + 1)
+    expect(hold).toBe(passageLines + 1)
     expect(storage).toBe(hold + 1)
   })
 })
@@ -409,11 +451,11 @@ describe('collectDiagnostics — the Route hold summary', () => {
 
     const snapshot = await collectDiagnostics({
       deckStore: fakeDeckStore([]),
+      passageStore: fakePassageStore([]),
       settingsStore: fakeSettingsStore(),
       clipCache: fakeClipCache(new Set()),
       errorLog: fakeErrorLog([]),
-      getBuildInfo: () => ({ sha: 'abc1234', builtAt: '2026-08-02T00:00:00.000Z' }),
-      getStorageEstimate: async () => ({ supported: false }),
+      ...AMBIENT,
       getRouteHold: () => held,
     })
 

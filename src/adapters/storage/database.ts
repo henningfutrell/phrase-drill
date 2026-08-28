@@ -37,15 +37,24 @@ export const ERRORS_STORE = 'errors'
  */
 export const MIXES_STORE = 'mixes'
 /**
+ * Long-form Passages (schema v7 — `indexed-db-passage-store.ts` owns the record
+ * shape). Keyed by the Passage's own id, in its own store for the same
+ * reason a Mix has one: a Passage is its own aggregate with its own
+ * lifetime, so deleting one cannot reach the `decks` store and deleting a
+ * Deck cannot reach this one. Its Lines are derived on read and never
+ * stored, so there is nothing here below the Passage itself.
+ */
+export const PASSAGES_STORE = 'passages'
+/**
  * What has been deleted, and when (T060 — `Tombstone` in the domain owns
- * why a deletion has to be data). One row per deleted Deck or Mix, keyed by
- * the id it names, carrying `kind` so a Deck's Tombstone can never reach a
- * Mix.
+ * why a deletion has to be data). One row per deleted Deck, Mix or Passage,
+ * keyed by the id it names, carrying `kind` so a Deck's Tombstone can never
+ * reach a Mix or a Passage.
  *
- * Written by both the deck store and the mix store, which is the one place
- * those two adapters share a store. Each writes only its own `kind`, and
- * neither ever reads or removes the other's rows, so "deleting a Mix never
- * touches a Deck" still holds.
+ * Written by the deck store, the mix store and the passage store, which is
+ * the one place those adapters share a store. Each writes only its own
+ * `kind`, and none ever reads or removes another's rows, so "deleting a Mix
+ * never touches a Deck" still holds.
  *
  * **Never garbage-collected, deliberately.** A Tombstone is what stops a
  * device that has been offline from pushing a deleted Deck back, so any
@@ -175,6 +184,17 @@ export function openDatabase(): Promise<IDBPDatabase> {
         // bounded chunks, resumably — and it owns this store anyway.
         db.createObjectStore(CLIP_META_STORE, { keyPath: 'hash' })
       }
+      if (!db.objectStoreNames.contains(PASSAGES_STORE)) {
+        // v6 -> v7, additive: long-form Passages land in their own store, so
+        // every existing Deck, Phrase, Mix, Tombstone and Clip passes through
+        // untouched (the branches above).
+        //
+        // Created EMPTY, and that is the truth rather than a gap: a phone
+        // that had no Passages has no Passages, and there is nothing of theirs
+        // anywhere in the old schema to derive one from. Nothing is
+        // backfilled here for the same reason nothing is invented.
+        db.createObjectStore(PASSAGES_STORE, { keyPath: 'id' })
+      }
     },
 
     /**
@@ -280,7 +300,7 @@ interface TransactionLike {
  * request pipeline aborts by itself when a request fires `error`, but
  * `DataCloneError` and `DataError` are thrown at request CREATION: no request
  * exists, nothing fires, and the transaction auto-commits whatever it has
- * already done. In `importAll` that is a `clear()` of all three stores plus
+ * already done. In `importAll` that is a `clear()` of all four record stores plus
  * however many Decks were written before the bad one — their library replaced by
  * a fragment. It is unreachable from app data today (`importAll` values come
  * from `JSON.parse`), and it is the one error class the rollback did not

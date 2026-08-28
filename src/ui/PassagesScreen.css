@@ -1,0 +1,112 @@
+/*
+ * Long form — the list of their Passages.
+ *
+ * Every rule is scoped under `.passage-*` and nothing here redefines a shared
+ * class: `.screen`, `.screen-header`, `.link-action`, `.empty-state`,
+ * `.btn-icon`, `.btn-danger` and `.btn-primary` come from styles.css and are
+ * left alone. That is the lesson MixSelectScreen.css records — two screens
+ * sharing a class name with different inner structure stacked their paddings.
+ *
+ * The row is a Deck chip's twin by intent: their own thing, so the script face
+ * carries the name and the actions stay in the muted register, and the one
+ * number on the row is set in the body face because the user reads it.
+ */
+
+@import '../styles/tokens.css';
+
+.passage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.passage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Only ever wraps in the confirming state below — a plain row's two controls
+     fit beside the name. */
+  flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--gilt-dim);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lift);
+  padding: 0 10px 0 0;
+}
+
+/*
+ * Delete armed. "Confirm delete" is roughly twice the width of "Delete", and
+ * beside Edit it leaves the name about 190px — a title in the script face
+ * breaks into three fragments there, which is the same failure
+ * `.phrase-row:has(.phrase-reorder)` fixes in styles.css and the same fix: the
+ * name takes the whole first line and the controls wrap under it, still ranged
+ * right so Confirm delete stays where their thumb already was.
+ */
+.passage-row--confirming .passage-row-main {
+  flex-basis: 100%;
+}
+
+.passage-row--confirming .passage-row-actions {
+  margin-left: auto;
+  /* The row's own padding is horizontal only; a wrapped second line needs the
+     bottom back. */
+  padding-bottom: 10px;
+}
+
+/* The Drill target: the whole left of the row, name and count together, so the
+   thing the user came to do is the largest thing on the row rather than a third
+   small button beside Edit and Delete. */
+.passage-row-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 13px 4px 13px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  transition: opacity 200ms var(--ease-out);
+}
+
+/* An entry whose text derives no Lines has nothing to play. Dimmed rather than
+   hidden — it is still theirs, and Edit beside it is how the user fixes it. */
+.passage-row-main:disabled {
+  opacity: 0.6;
+}
+
+.passage-name {
+  font-family: var(--font-script);
+  font-size: var(--text-lg);
+  line-height: 1.25;
+  color: var(--ink);
+  /* Pinyon's swashes overhang the em box; a long title clipped at the row's
+     edge otherwise. */
+  padding-right: 0.06em;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+.passage-lines {
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+}
+
+.passage-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The empty state's own line. `.empty-state` centres and dims; this only gives
+   the sentence a measure, because it is three clauses rather than the one line
+   every other empty state in this app carries — it has to say what a long-form
+   entry is, since nothing else on the screen can. */
+.passage-empty-copy {
+  margin: 0;
+  max-width: 42ch;
+  line-height: 1.5;
+}

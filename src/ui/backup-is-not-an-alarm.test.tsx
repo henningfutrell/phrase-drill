@@ -44,6 +44,7 @@ describe('the file backup is an affordance, not an alarm (T097)', () => {
           onRenameDeck={vi.fn()}
           onDeleteDeck={vi.fn()}
           onOpenDeck={vi.fn()}
+          onOpenPassages={vi.fn()}
           onOpenSettings={vi.fn()}
           onOpenMix={vi.fn()}
           onOpenImport={vi.fn()}

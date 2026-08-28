@@ -12,7 +12,7 @@ notes, disclosed here rather than silently skipped. `PRODUCT.md` at the repo roo
 records what was inferred and flags it as such.
 
 Every term below is the glossary's: Phrase, Deck, Cadence, Step, Rep, Drill,
-Shuffle, Mix, Scan, Draft Phrase. No synonyms.
+Shuffle, Mix, Scan, Draft Phrase, Passage, Line, Statement. No synonyms.
 
 ---
 
@@ -29,6 +29,17 @@ is deliberately not the flashcard/index-card visual language — no card flip, n
 front/back, no stack-of-cards affordance anywhere — because the domain model
 explicitly refuses the Anki-deck reading (T002, "Is not" column) and a card-flip
 motion would silently reintroduce it.
+
+**A Passage keeps the same idea at one beat.** A Line's Cadence is FR·pause —
+one reading, then room to say it back — so its bar is a single mark, and the
+beat row is derived from the Cadence being played rather than fixed at four
+(§3.1). Same instrument, fewer beats. A row of four marks of which only one
+can ever light would be a lie told in the most-read element on the screen.
+The pause scales exactly as a Phrase's does, 65 ms per character, but it is
+clamped to **20 s** rather than 5 s (`PASSAGE_PAUSE_MAX_MS`,
+`src/domain/cadence.ts`): a 300-character Line takes longer than 5 s to say,
+and a pause the user cannot finish speaking in defeats the only thing a pause is
+for.
 
 The rejected default, named so it stays rejected: a language-app card stack in a
 friendly rounded sans with a progress bar and a streak counter. That is the
@@ -105,10 +116,12 @@ no sidebar to look worse in). Everywhere else, fixed rem.
 
 Reused across every screen — a component built once is not rebuilt per screen.
 
-- **Beat row** — 4 marks (pill shape, 8×32px), one per Step of the current Rep's
-  Cadence. States: upcoming (dim outline), live (filled `--accent`, animating fill
-  if it is a Pause step), done (filled `--ink-dim`). Always exactly 4 — the Cadence
-  is fixed, so this never needs to be N-wide.
+- **Beat row** — one mark per Utterance-and-pause pair of the Cadence in play
+  (pill shape, 8×32px): 4 for a Phrase's eight Steps, 1 for a Line's two.
+  States: upcoming (dim outline), live (filled `--accent`, animating fill
+  if it is a Pause step), done (filled `--ink-dim`). **Not fixed at 4** — one
+  Drill is homogeneous, so the row is sized once off the Cadence it is about to
+  play (§3.1), never per Rep.
 - **Rep counter** — `Rep 7 of 23`, `--text-sm`, `--ink-dim`. A count, stated once,
   never a bar, never a percentage — a progress bar reads as a completion score and
   is exactly the framing the domain notes rule out.
@@ -145,17 +158,23 @@ Reused across every screen — a component built once is not rebuilt per screen.
 
 ## 3. Screens
 
-### 3.1 Drill — the screen that runs a Deck or a Mix
+### 3.1 Drill — the screen that runs a Deck, a Mix or a Passage
 
 The screen to get right; hands-free, arm's length, spoken aloud.
 
 **Layout, top to bottom:**
-1. Safe-area top inset, then a slim header: Deck/Mix name (`--text-sm`,
+1. Safe-area top inset, then a slim header: Deck/Mix/Passage name (`--text-sm`,
    `--ink-dim`) + a stop control (top-right, small — stopping is rare and
    deliberate, so it does not compete for thumb space with pause/skip below).
 2. **Beat row**, centered, large (48px marks on Drill, larger than the component
    default) — the single largest non-text element on the screen after the phrase
-   line itself. This is read before anything else.
+   line itself. This is read before anything else. **Its length is derived from
+   the Cadence being played** — `reps[0].cadence.length / 2` (`beatsOf`,
+   `src/ui/DrillScreen.tsx`): four marks for a Phrase's eight Steps, one for a
+   Line's two. Read off Rep 0 and never recomputed per Rep, because one Drill is
+   homogeneous — a Deck and a Mix are all Phrase Reps, a Passage is all Line
+   Reps. It was hard-coded `[0, 1, 2, 3]`, which showed a Passage three marks
+   that could never light.
 3. **Current line** — the text currently being spoken, at `--text-drill`. Shows
    French or English depending on which Step is live; switches with a 150ms
    cross-fade, never a slide (a slide implies "next card," the card metaphor this
@@ -165,8 +184,11 @@ The screen to get right; hands-free, arm's length, spoken aloud.
    `[ Skip ]  ( Pause/Resume — primary, center, largest )  [ Stop ]`.
 
 **Before starting — the tap that must happen, and the expectation it sets:** the
-Drill never auto-starts. It opens on a **start card**: Deck/Mix name, phrase count,
-and one primary button, `Start Drill`. Directly under the button, two short lines
+Drill never auto-starts. It opens on a **start card**: the Deck/Mix/Passage
+name, a count of what will play — `repNoun` chooses its word, so it reads
+`23 phrases` for a Deck or a Mix and `23 lines` for a Passage, and the skipped
+line below follows the same noun — and one primary button, `Start Drill`.
+Directly under the button, two short lines
 in `--text-sm`/`--ink-dim`, stated plainly, not as fine print:
 
 > Keep this screen on and open — the drill stops if your phone locks or you
@@ -205,8 +227,15 @@ are safe.`, and the skipped line reads `N phrases have no audio on this phone
 — skipped until you're online`. The last clause of the blocked line is the
 one that must never be dropped: the failure mode this whole change exists to
 prevent is their concluding that their phrases are gone. If the
-one-tap unlock itself fails, the start card stays up with `Couldn't start audio
-on this phone. Tap Start Drill to try again.` rather than moving on.
+one-tap unlock itself fails, the start card stays up rather than moving on, and
+what it shows is `Audio didn't start. Tap Start Drill to try again.` followed by
+a `<code>` detail line carrying the failure's own name and message —
+`<name>: <message>`, or `(no message)` where the DOMException has none
+(`src/ui/DrillScreen.tsx:584`, the `drill-unlock-error` block). The detail line
+earns its place on a screen that otherwise shows their no internals: it is the one
+channel back from their phone, and `NotAllowedError` versus `NotSupportedError` is
+the difference between a gesture that expired and audio this phone will never
+play.
 
 **The interrupted state — designed explicitly, not left as a dead screen.**
 iOS suspends playback of the shared `<audio>` element on screen lock or
@@ -253,8 +282,9 @@ first-class state, not an error:
 ### 3.2 Decks — contexts, pick, create/rename/delete
 
 - Header: `Decks`, `--text-lg`, and a `+ New Deck` link-style control (top-right).
-  What shipped also puts `Settings` and `Mix decks…` in this same header action
-  row, not as a secondary sub-list-line as originally sketched below.
+  What shipped also puts `Settings`, `Mix decks…`, `Scan a page` and
+  `Long form` — the only route to their Passages (§3.8) — in this same header
+  action row, not as a secondary sub-list-line as originally sketched below.
 - List of **Deck chips**, one per Deck, author order (Decks have no sort order of
   their own beyond creation — matches the domain model, §2, "the Deck keeps its
   author order"). Each chip: name, `--text-base`; phrase count, `--text-sm`
@@ -628,7 +658,13 @@ opens:
 - **Voice** — whether one is pinned, and which provider. (T041 dropped the
   "key presence" line this report used to carry — the device holds no
   provider key any more, so there is nothing to report presence of.)
-- **Clips ready vs total Phrases** — a count, never phrase text.
+- **Clips ready, as two populations** — `Clips ready: N of M Phrases` and
+  `Clips ready: N of M Passage Lines`, on their own lines, counts only and never
+  their text. One number over both would not distinguish "their Passage has no
+  audio" from "their Deck has no audio", which is the distinction the person
+  reading their pasted report needs. Both lines are printed even at zero: a
+  missing Passage Lines line is indistinguishable from a build that cannot count
+  them.
 - **Storage** — usage against quota via `navigator.storage.estimate()`,
   reported honestly as unavailable rather than a fabricated zero when the
   browser doesn't support it.
@@ -647,18 +683,82 @@ If the Clipboard API is unavailable or the copy itself fails, the screen says
 so plainly and leaves the report visible to select by hand, rather than
 failing silently.
 
-Never included, by design: phrase text (counts only), a provider key (the
-device does not hold one to include), and any third-party analytics or
+Never included, by design: their Phrase or Passage text (counts only), a provider
+key (the device does not hold one to include), and any third-party analytics or
 error-reporting service — everything here stays on-device until the user chooses
 to paste it somewhere.
+
+### 3.8 Long form — their Passages, and the sheet that holds a page
+
+Reached from `Long form` in the Decks list header (§3.2), which is the only
+route to it. Two components and no more: the list (`src/ui/PassagesScreen.tsx`)
+and the sheet (`src/ui/PassageSheet.tsx`).
+
+**The screen is titled `Long form`**, not "Passages". That is their own phrase for
+the feature; Passage, Line and Rep are the glossary's words for the code, and
+this is the one place the screen deliberately speaks theirs.
+
+- Header: `Long form`, with `Back` and `+ New` as link-style actions — the same
+  header shape as Decks.
+- One row per Passage, store order. The whole left of the row is one large
+  target that **starts the Drill** — the reason the user opened this screen — and it
+  carries two lines: the **name**, and the **Line count** (`23 lines`,
+  `1 line`, or `Nothing to read yet` when the text splits to nothing, which also
+  disables the row). Beside it, `Edit` and `Delete`.
+- **The Line count is the only number on the screen, and it is not progress.**
+  It is exactly how many pieces the Drill will play, so it tells a paragraph
+  from a page without opening either. No percentage, no last-practised, no
+  streak — the same ban §4 states for every other screen.
+- **No body text in the row.** A row of a page's first words is a preview
+  nobody asked for, it makes every row a different height, and the sheet shows
+  the text whole one tap away.
+- **Delete is two taps**, `Delete` turning into `Confirm delete` in place, as on
+  a Deck row — no sheet, no undo. A page the user typed is not recoverable from
+  inside the app: sync will carry the deletion to the other device and the only
+  way back is a backup file. Arming the row also widens the name column, because
+  `Confirm delete` is a much wider label than `Delete` and the name otherwise
+  breaks into fragments.
+- **Empty state (0 Passages):** the list is replaced by one paragraph that says
+  what the feature is in their terms — "a page of French you want to read aloud —
+  a poem, a letter, a chapter" — and what will happen to it: it plays back a
+  line at a time, leaving a gap after each one for them to say it back. Under it,
+  the one primary button, `Add a long-form entry`. The header's `+ New` is
+  **hidden** while the list is empty, so there is exactly one thing to tap.
+- **There is deliberately no per-Passage detail screen.** A Deck has one because
+  it holds many Phrases with per-Phrase controls — add, edit, reorder, delete,
+  redo audio. A Passage is one block of text with a name, and the sheet already
+  shows it whole; a detail screen would be a screen whose only content is the
+  thing the sheet is for.
+
+**The sheet** is the same component for add and edit (`New long form` /
+`Edit long form`), two fields — name, then text — with `Save` and `Cancel`. It
+is not a copy of the Phrase sheet, because a Phrase is two short lines and a
+Passage is a page. Its iOS specifics, and why each one is there:
+
+- **A real `<textarea>`, sized for a page**: `min-height: 40vh`,
+  `max-height: 52vh`, scrolling past that with `-webkit-overflow-scrolling:
+  touch`, so a pasted page reads as a paragraph and the momentum scroll stays
+  inside the field instead of dragging the sheet. The cap is what keeps `Save`
+  and `Cancel` in thumb reach; the text itself is not limited by what fits.
+- **Font size at or above 16px** (`--text-base`, 19px). Below 16px iOS Safari
+  zooms the whole viewport when a field takes focus, and the user has to pinch back
+  out to find the sheet's own buttons. This is the one thing in the sheet's CSS
+  that is a hard iOS floor rather than a taste decision.
+- `resize: none` — Safari's corner handle does nothing useful when the field is
+  already as tall as the sheet allows.
+- **A refused `Save` says why, in place**: `It needs a name — that's what
+  you'll see in the list.` or `There's nothing to read yet. Paste or type the
+  text, then save.` The message is derived from the current values, so filling
+  the missing field in clears it without a second tap to find out.
 
 ---
 
 ## 4. What was deliberately left out, and why
 
 - **No progress bar, streak, score, or due-count anywhere** — the domain notes
-  ban this outright (a Deck has no scheduler); the Rep counter and phrase counts
-  are the only quantities shown, and both describe material, not achievement.
+  ban this outright (a Deck has no scheduler); the Rep counter and the phrase
+  and Line counts are the only quantities shown, and all describe material, not
+  achievement.
 - ~~**No saved/named Mix**~~ — the owner answered the open question in T059
   ("make where you can save, edit and delete mixes"); saved Mixes shipped, and
   §3.4 describes what they look like. Kept here struck through because the

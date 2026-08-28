@@ -57,10 +57,11 @@ fields — `tombstones` above all — that only a client new enough to know abou
 them can carry. Their two devices do not update together, so for a window after
 a deploy one of them is running an older bundle whose `exportAll()` silently
 omits those fields; letting it write would strip the merge metadata off the
-server copy and resurrect every Deck the user had deleted. The server refuses that
-one case and nothing else: a push at the same version or newer is accepted as
-before. The refused device keeps its changes locally and syncs once it
-updates.
+server copy and resurrect every Deck the user had deleted. Since schema v7 it
+would also drop `passages`, and with it every long-form text the user has
+written. The server refuses that one case and nothing else: a push at the
+same version or newer is accepted as before. The refused device keeps its
+changes locally and syncs once it updates.
 
 ## The library is kept recoverable, not defended (T071)
 
@@ -148,8 +149,10 @@ the window took the lot, with two 204s and no log line.
 
 **`schemaVersion` is bounded, and what is stored is what was validated**
 (T082). A push is refused with 400 unless its `schemaVersion` is an integer
-in `1 .. LIBRARY_MAX_SCHEMA_VERSION` (`server/app.js`, kept equal to the
-client's `CURRENT_SCHEMA_VERSION` — they are one build and one deploy).
+in `1 .. LIBRARY_MAX_SCHEMA_VERSION` — `7` today (`server/app.js`, kept equal
+to the client's `CURRENT_SCHEMA_VERSION` — they are one build and one
+deploy). v7 is the Passage bump: the envelope carries `passages` alongside
+`decks`, `mixes`, `tombstones` and `voice`.
 
 Two things this closes. `1e999` is legal JSON, parses to `Infinity`, and
 `typeof Infinity === 'number'`, so the old shape test passed it; the row was
@@ -250,10 +253,11 @@ intact library on their phone could never go back up.
 **The device's side of the contract is narrower than the string (T094).**
 Unreadable to this server is not the same as empty: a row can fail
 `isLibraryEnvelope` on `format`, `schemaVersion`, or the shape of
-`mixes`/`tombstones`/`voice` and still hold every Deck the user has. So a phone that
-holds no Deck and no Mix — a fresh install, a wiped phone, a reinstall — reads
-this verdict and **declines** to push over the row, retrying instead. Nothing
-changes on this side; the log line stays the signal a human acts on.
+`mixes`/`tombstones`/`passages`/`voice` and still hold every Deck the user has. So
+a phone that holds no Deck and no Mix — a fresh install, a wiped phone, a
+reinstall — reads this verdict and **declines** to push over the row,
+retrying instead. Nothing changes on this side; the log line stays the signal
+a human acts on.
 
 So this string is load-bearing. Answering `404` here instead was considered
 and refused (T082, upheld T089): `404` means "no server copy", the device

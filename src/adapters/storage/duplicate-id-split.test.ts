@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DeckRecord, Library, MixRecord, Tombstone } from '../../domain'
+import type { DeckRecord, Library, MixRecord, PassageRecord, Tombstone } from '../../domain'
 import { LIBRARY_FORMAT, mergeLibraries } from '../../domain'
 import { resetFakeIdb } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 import { createIndexedDbMixStore } from './indexed-db-mix-store'
+import { createIndexedDbPassageStore } from './indexed-db-passage-store'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 /**
@@ -42,13 +43,23 @@ function mixRecord(id: string, name: string, deckIds: string[] = ['d1']): MixRec
   return { id, name, deckIds, createdAt: 1_000, updatedAt: 2_000 }
 }
 
-function library(parts: { decks?: DeckRecord[]; mixes?: MixRecord[]; tombstones?: Tombstone[] }): Library {
+function passageRecord(id: string, name: string, text = 'Lorsque j’avais six ans…'): PassageRecord {
+  return { id, name, text, createdAt: 1_000, updatedAt: 2_000 }
+}
+
+function library(parts: {
+  decks?: DeckRecord[]
+  mixes?: MixRecord[]
+  passages?: PassageRecord[]
+  tombstones?: Tombstone[]
+}): Library {
   return {
     format: LIBRARY_FORMAT,
     schemaVersion: CURRENT_SCHEMA_VERSION,
     exportedAt: 5_000,
     decks: parts.decks ?? [],
     mixes: parts.mixes ?? [],
+    passages: parts.passages ?? [],
     tombstones: parts.tombstones ?? [],
   }
 }
@@ -131,6 +142,52 @@ describe('two records under one id survive the store (T090)', () => {
       expect(stored.map((mix) => mix.name)).toEqual(['Morning', 'Evening'])
       expect(stored.map((mix) => mix.id)).toEqual(['m1', 'm1-2'])
     })
+
+    /**
+     * `passages` is keyed `{ keyPath: 'id' }` and written one `put` per record
+     * exactly like `decks` and `mixes`, so an unsplit duplicate is a whole
+     * Passage — a page of text the user typed — gone from disk with nothing said.
+     */
+    it('keeps both Passages under one id, for the same reason', async () => {
+      const deckStore = createIndexedDbDeckStore()
+      const passageStore = createIndexedDbPassageStore()
+
+      await deckStore.importAll(
+        library({
+          decks: [deckRecord('d1', 'Home')],
+          passages: [passageRecord('pg1', 'Chapitre 1', 'Le premier.'), passageRecord('pg1', 'Chapitre 2', 'Le second.')],
+        }),
+      )
+
+      const stored = await passageStore.loadAll()
+      expect(stored.map((passage) => passage.name)).toEqual(['Chapitre 1', 'Chapitre 2'])
+      expect(stored.map((passage) => passage.id)).toEqual(['pg1', 'pg1-2'])
+      expect(stored.map((passage) => passage.text)).toEqual(['Le premier.', 'Le second.'])
+    })
+
+    it('never lands a split Passage id on one the library already holds', async () => {
+      const deckStore = createIndexedDbDeckStore()
+      const passageStore = createIndexedDbPassageStore()
+
+      await deckStore.importAll(
+        library({
+          decks: [deckRecord('d1', 'Home')],
+          passages: [
+            passageRecord('pg1', 'Chapitre 1'),
+            passageRecord('pg1', 'Chapitre 2'),
+            passageRecord('pg1-2', 'Chapitre 3'),
+          ],
+        }),
+      )
+
+      // `loadAll` reads the store in KEY order, not the order of the file.
+      const stored = await passageStore.loadAll()
+      expect(stored.map((passage) => `${passage.id}:${passage.name}`)).toEqual([
+        'pg1:Chapitre 1',
+        'pg1-2:Chapitre 3',
+        'pg1-3:Chapitre 2',
+      ])
+    })
   })
 
   describe('updateAll — the write-back of the merged library', () => {
@@ -186,6 +243,21 @@ describe('two records under one id survive the store (T090)', () => {
       expect((await mixStore.loadAll()).map((mix) => mix.name)).toEqual(['Morning', 'Evening'])
     })
 
+    it('splits duplicated Passage ids on the write-back too', async () => {
+      const deckStore = createIndexedDbDeckStore()
+      const passageStore = createIndexedDbPassageStore()
+
+      const result = await deckStore.updateAll(() =>
+        library({
+          decks: [deckRecord('d1', 'Home')],
+          passages: [passageRecord('pg1', 'Chapitre 1'), passageRecord('pg1', 'Chapitre 2')],
+        }),
+      )
+
+      expect(result.library.passages?.map((passage) => passage.id)).toEqual(['pg1', 'pg1-2'])
+      expect((await passageStore.loadAll()).map((passage) => passage.name)).toEqual(['Chapitre 1', 'Chapitre 2'])
+    })
+
     it('still reports no change when the update returns what is already stored', async () => {
       const store = createIndexedDbDeckStore()
       await store.importAll(library({ decks: [deckRecord('d1', 'Home')] }))
@@ -231,6 +303,7 @@ describe('a split never lands on an id a Tombstone claims (T093)', () => {
 
   const deckTombstone: Tombstone = { id: 'd1-2', kind: 'deck', deletedAt: 9_000 }
   const mixTombstone: Tombstone = { id: 'm1-2', kind: 'mix', deletedAt: 9_000 }
+  const passageTombstone: Tombstone = { id: 'pg1-2', kind: 'passage', deletedAt: 9_000 }
 
   const home = () => deckRecord('d1', 'Home', [phrase('p1', 'Bonjour', 'Hello')])
   const work = () => deckRecord('d1', 'Work', [phrase('p2', 'Merci', 'Thank you')])
@@ -298,6 +371,41 @@ describe('a split never lands on an id a Tombstone claims (T093)', () => {
 
       expect(result.library.decks.map((deck) => deck.id)).toEqual(['d1', 'd1-2'])
     })
+
+    it('skips a candidate id a live Passage Tombstone names, and keeps the Passage through a second round-trip', async () => {
+      const deckStore = createIndexedDbDeckStore()
+      const passageStore = createIndexedDbPassageStore()
+      await deckStore.importAll(
+        library({ decks: [home()], passages: [passageRecord('pg1', 'Chapitre 1')], tombstones: [passageTombstone] }),
+      )
+
+      const remote = library({
+        decks: [home()],
+        passages: [passageRecord('pg1', 'Chapitre 1'), passageRecord('pg1', 'Chapitre 2')],
+        tombstones: [passageTombstone],
+      })
+      const first = await deckStore.updateAll((stored) => mergeLibraries(stored, remote, undefined))
+      expect(first.library.passages?.map((passage) => passage.id)).toEqual(['pg1', 'pg1-3'])
+
+      const second = await deckStore.updateAll((stored) => mergeLibraries(stored, first.library, first.library))
+
+      expect(second.library.passages?.map((passage) => passage.name)).toEqual(['Chapitre 1', 'Chapitre 2'])
+      expect((await passageStore.loadAll()).map((passage) => passage.name)).toEqual(['Chapitre 1', 'Chapitre 2'])
+    })
+
+    it('is not blocked by a Deck Tombstone under the same id as a Passage split candidate', async () => {
+      const store = createIndexedDbDeckStore()
+
+      const result = await store.updateAll(() =>
+        library({
+          decks: [home()],
+          passages: [passageRecord('pg1', 'Chapitre 1'), passageRecord('pg1', 'Chapitre 2')],
+          tombstones: [{ id: 'pg1-2', kind: 'deck', deletedAt: 9_000 }],
+        }),
+      )
+
+      expect(result.library.passages?.map((passage) => passage.id)).toEqual(['pg1', 'pg1-2'])
+    })
   })
 
   describe('importAll — a restore file that carries its own Tombstones', () => {
@@ -324,6 +432,21 @@ describe('a split never lands on an id a Tombstone claims (T093)', () => {
       )
 
       expect((await mixStore.loadAll()).map((mix) => mix.id)).toEqual(['m1', 'm1-3'])
+    })
+
+    it('skips a candidate id a Passage Tombstone in the same file names', async () => {
+      const deckStore = createIndexedDbDeckStore()
+      const passageStore = createIndexedDbPassageStore()
+
+      await deckStore.importAll(
+        library({
+          decks: [home()],
+          passages: [passageRecord('pg1', 'Chapitre 1'), passageRecord('pg1', 'Chapitre 2')],
+          tombstones: [passageTombstone],
+        }),
+      )
+
+      expect((await passageStore.loadAll()).map((passage) => passage.id)).toEqual(['pg1', 'pg1-3'])
     })
   })
 })

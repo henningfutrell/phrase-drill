@@ -2,7 +2,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import App from './App'
-import type { Deck, DeckStore, Library, MixStore, ScanReader, Translator } from './domain'
+import type { Deck, DeckStore, Library, MixStore, Passage, PassageStore, ScanReader, Translator } from './domain'
 import { LIBRARY_FORMAT } from './domain'
 import type { BoundedClipCache, DatabaseTroubleSource, Settings, SettingsStore } from './adapters/storage'
 import type { SynthClient } from './adapters/audio/server-synth-client'
@@ -153,6 +153,44 @@ function readableOnceDeckStore(deck: Deck): DeckStore {
   }
 }
 
+/** A deck store that reads whatever it was handed, as often as asked. */
+function readableDeckStore(decks: readonly Deck[]): DeckStore {
+  const refuse = () => Promise.reject(new Error('UnknownError: the database could not be opened'))
+  return {
+    loadAll: () => Promise.resolve([...decks]),
+    get: refuse as DeckStore['get'],
+    save: refuse as DeckStore['save'],
+    update: refuse as DeckStore['update'],
+    remove: refuse as DeckStore['remove'],
+    exportAll: () => Promise.resolve(emptyLibrary()),
+    importAll: refuse as DeckStore['importAll'],
+    updateAll: refuse as DeckStore['updateAll'],
+  }
+}
+
+function emptyPassageStore(): PassageStore {
+  return {
+    async loadAll() {
+      return []
+    },
+    async save() {},
+    async remove() {},
+  }
+}
+
+/**
+ * A passage store whose database cannot be read — the same `openDB` refusal
+ * `unreadableDeckStore` models, on the other half of the launch read.
+ */
+function unreadablePassageStore(): PassageStore {
+  const refuse = () => Promise.reject(new Error('UnknownError: the database could not be opened'))
+  return {
+    loadAll: refuse as () => Promise<Passage[]>,
+    save: refuse as PassageStore['save'],
+    remove: refuse as PassageStore['remove'],
+  }
+}
+
 function emptyMixStore(): MixStore {
   return {
     async loadAll() {
@@ -205,7 +243,7 @@ const noopClipCache: BoundedClipCache = {
   async has() {
     return false
   },
-  async readyPhraseIds() {
+  async readyUnitIds() {
     return new Set()
   },
   async usage() {
@@ -241,12 +279,18 @@ afterEach(() => {
   container.remove()
 })
 
-function render(deckStore: DeckStore, settingsStore: SettingsStore, syncEngine: SyncEngine): Promise<void> {
+function render(
+  deckStore: DeckStore,
+  settingsStore: SettingsStore,
+  syncEngine: SyncEngine,
+  passageStore: PassageStore = emptyPassageStore(),
+): Promise<void> {
   return act(async () => {
     root.render(
       <App
         deckStore={deckStore}
         mixStore={emptyMixStore()}
+        passageStore={passageStore}
         settingsStore={settingsStore}
         synthClient={noopSynth}
         generationQueue={noopQueue}
@@ -340,8 +384,8 @@ describe('T083 — a database that cannot be read at launch', () => {
     await settle()
     expect(container.textContent).toContain('Café')
 
-    // A merge landed, so the composition root re-reads both stores — and the
-    // database refuses this time.
+    // A merge landed, so the composition root re-reads every record store —
+    // and the database refuses this time.
     await act(async () => {
       syncEngine.emit({ state: 'idle', lastSyncAt: null, libraryRevision: 1 })
     })
@@ -352,5 +396,29 @@ describe('T083 — a database that cannot be read at launch', () => {
     // recovery screen would hide their library to report a failed refresh.
     expect(container.textContent).toContain('Café')
     expect(container.querySelector('[data-testid="library-unreadable"]')).toBeNull()
+  })
+
+  /**
+   * The Passage half of the same dead end. The launch read is one
+   * `Promise.all` over every record store, so a passage store that will not
+   * open rejects it — and if that rejection were not handled the way a deck
+   * store's is, `decks` stays `undefined` forever and the app renders a bare
+   * `<main>`: no words, no controls, and no Restore, on the app holding text
+   * that exists nowhere else. Decks that read perfectly do not save them from
+   * it, because nothing sets them.
+   */
+  it('is the same dead end when it is the Passages that cannot be read, and the same way out', async () => {
+    await render(
+      readableDeckStore([{ id: 'd1', name: 'Café', phrases: [] }]),
+      settings(),
+      drivableSyncEngine(),
+      unreadablePassageStore(),
+    )
+    await settle()
+
+    expect(container.querySelector('[data-testid="write-failure"]')).not.toBeNull()
+    const screen = container.querySelector('[data-testid="library-unreadable"]')
+    expect(screen).not.toBeNull()
+    expect(screen!.querySelector('[data-testid="restore-backup"]')).not.toBeNull()
   })
 })

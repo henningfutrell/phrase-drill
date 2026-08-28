@@ -5,6 +5,7 @@ import {
   buildLibrary,
   migrateLibraryDecks,
   migrateLibraryMixes,
+  migrateLibraryPassages,
   migrateLibraryTombstones,
   normalizeLibrary,
   parseLibraryFile,
@@ -13,30 +14,48 @@ import {
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 const MIX_RECORDS = [{ id: 'm1', name: 'Mornings', deckIds: ['d1'], createdAt: 2, updatedAt: 2 }]
+const PASSAGE_RECORDS = [
+  { id: 'pg1', name: 'Le Petit Prince', text: 'Lorsque j’avais six ans…', createdAt: 3, updatedAt: 3 },
+]
 const TOMBSTONES: Tombstone[] = [{ id: 'gone', kind: 'deck', deletedAt: 999 }]
 
 describe('buildLibrary', () => {
-  it('wraps deck records, mix records and Tombstones with the format, current schema version, and export time', () => {
+  it('wraps deck records, mix records, passage records and Tombstones with the format, current schema version, and export time', () => {
     const records = [
       { id: 'd1', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 },
     ]
 
-    expect(buildLibrary(records, MIX_RECORDS, TOMBSTONES, 12345)).toEqual({
+    expect(buildLibrary(records, MIX_RECORDS, PASSAGE_RECORDS, TOMBSTONES, 12345)).toEqual({
       format: LIBRARY_FORMAT,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       exportedAt: 12345,
       decks: records,
       mixes: MIX_RECORDS,
+      passages: PASSAGE_RECORDS,
       tombstones: TOMBSTONES,
     })
   })
 
   it('carries saved Mixes so they survive a new phone — the whole point of the sync envelope (T059)', () => {
-    expect(buildLibrary([], MIX_RECORDS, [], 1).mixes).toEqual(MIX_RECORDS)
+    expect(buildLibrary([], MIX_RECORDS, [], [], 1).mixes).toEqual(MIX_RECORDS)
+  })
+
+  it('carries long-form Passages so they survive a new phone too', () => {
+    expect(buildLibrary([], [], PASSAGE_RECORDS, [], 1).passages).toEqual(PASSAGE_RECORDS)
+  })
+
+  /**
+   * Always spread, even when empty, for the same reason `mixes` is: one shape
+   * for the envelope means a reader never has to distinguish "this build has
+   * no Passages" from "the user has none", and a backup that left the field off
+   * would lose them on restore.
+   */
+  it('always carries a passages field, even when there are none', () => {
+    expect(buildLibrary([], [], [], [], 1).passages).toEqual([])
   })
 
   it('carries Tombstones, so another device learns what was deleted rather than pushing it back (T060)', () => {
-    expect(buildLibrary([], [], TOMBSTONES, 1).tombstones).toEqual(TOMBSTONES)
+    expect(buildLibrary([], [], [], TOMBSTONES, 1).tombstones).toEqual(TOMBSTONES)
   })
 })
 
@@ -65,6 +84,31 @@ describe('migrateLibraryMixes', () => {
   })
 })
 
+describe('migrateLibraryPassages', () => {
+  it('returns the passage records of a current library unchanged', () => {
+    const library: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [],
+      passages: PASSAGE_RECORDS,
+    }
+
+    expect(migrateLibraryPassages(library)).toEqual(PASSAGE_RECORDS)
+  })
+
+  it('reads a pre-v7 backup, which has no passages field at all, as no Passages — never as an invalid file', () => {
+    const library: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: 6,
+      exportedAt: 1,
+      decks: [{ id: 'd1', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+
+    expect(migrateLibraryPassages(library)).toEqual([])
+  })
+})
+
 describe('normalizeLibrary', () => {
   it('brings an older library up to the current schema version, decks intact and every optional field filled in', () => {
     const older: Library = {
@@ -80,21 +124,24 @@ describe('normalizeLibrary', () => {
       exportedAt: 7,
       decks: older.decks,
       mixes: [],
+      passages: [],
       tombstones: [],
     })
   })
 
-  it('keeps the Mixes and Tombstones a current library already carries', () => {
+  it('keeps the Mixes, Passages and Tombstones a current library already carries', () => {
     const current: Library = {
       format: LIBRARY_FORMAT,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       exportedAt: 7,
       decks: [],
       mixes: MIX_RECORDS,
+      passages: PASSAGE_RECORDS,
       tombstones: TOMBSTONES,
     }
 
     expect(normalizeLibrary(current).mixes).toEqual(MIX_RECORDS)
+    expect(normalizeLibrary(current).passages).toEqual(PASSAGE_RECORDS)
     expect(normalizeLibrary(current).tombstones).toEqual(TOMBSTONES)
   })
 })
@@ -181,6 +228,26 @@ describe('parseLibraryFile', () => {
     expect(result).toEqual({ ok: false, reason: 'invalid' })
   })
 
+  it('accepts a pre-v7 backup that has no passages field — an old file is still a valid backup', () => {
+    const withoutPassages: Record<string, unknown> = { ...validLibrary, schemaVersion: 6 }
+    delete withoutPassages.passages
+    const result = parseLibraryFile(JSON.stringify(withoutPassages))
+    expect(result.ok).toBe(true)
+  })
+
+  it('accepts a library carrying long-form Passages', () => {
+    const withPassages = {
+      ...validLibrary,
+      passages: [{ id: 'pg1', name: 'Le Petit Prince', text: 'Lorsque j’avais six ans…', createdAt: 1, updatedAt: 1 }],
+    }
+    expect(parseLibraryFile(JSON.stringify(withPassages))).toEqual({ ok: true, library: withPassages })
+  })
+
+  it('refuses a library whose passages field is present but not an array', () => {
+    const result = parseLibraryFile(JSON.stringify({ ...validLibrary, passages: 'not-an-array' }))
+    expect(result).toEqual({ ok: false, reason: 'invalid' })
+  })
+
   it('never throws, whatever garbage it is given', () => {
     expect(() => parseLibraryFile('')).not.toThrow()
     expect(() => parseLibraryFile('null')).not.toThrow()
@@ -224,7 +291,10 @@ describe('parseLibraryFile — an envelope this build must not accept (T070)', (
   })
 
   it('refuses a file that would replace everything with nothing', () => {
-    expect(parseLibraryFile(file({ decks: [], mixes: [], tombstones: [] }))).toEqual({ ok: false, reason: 'empty' })
+    expect(parseLibraryFile(file({ decks: [], mixes: [], passages: [], tombstones: [] }))).toEqual({
+      ok: false,
+      reason: 'empty',
+    })
     expect(parseLibraryFile(file({ decks: [] }))).toEqual({ ok: false, reason: 'empty' })
   })
 
@@ -232,6 +302,53 @@ describe('parseLibraryFile — an envelope this build must not accept (T070)', (
     const withMix = { decks: [], mixes: [{ id: 'm1', name: 'Mornings', deckIds: [], createdAt: 1, updatedAt: 1 }] }
     expect(parseLibraryFile(file(withMix)).ok).toBe(true)
     expect(parseLibraryFile(file({ decks: [], tombstones: [{ id: 'd1', kind: 'deck', deletedAt: 2 }] })).ok).toBe(true)
+  })
+
+  /**
+   * A backup whose ONLY content is Passages carries something the user typed, so
+   * refusing it would refuse the very file that exists to rescue it. The
+   * `empty` refusal is about a file that carries NOTHING; `passages` is
+   * content, so it belongs in that condition beside `decks` and `mixes`.
+   */
+  it('accepts a backup whose only content is Passages', () => {
+    const passagesOnly = {
+      decks: [],
+      mixes: [],
+      tombstones: [],
+      passages: [{ id: 'pg1', name: 'Le Petit Prince', text: 'Lorsque j’avais six ans…', createdAt: 1, updatedAt: 1 }],
+    }
+    expect(parseLibraryFile(file(passagesOnly)).ok).toBe(true)
+  })
+
+  it('still refuses a passages-only backup written by a newer build', () => {
+    const passagesOnly = {
+      schemaVersion: CURRENT_SCHEMA_VERSION + 1,
+      decks: [],
+      passages: [{ id: 'pg1', name: 'Le Petit Prince', text: 'Lorsque j’avais six ans…', createdAt: 1, updatedAt: 1 }],
+    }
+    expect(parseLibraryFile(file(passagesOnly))).toEqual({ ok: false, reason: 'needs-update' })
+  })
+
+  it('refuses a passage that is not a passage record', () => {
+    const passage = { id: 'pg1', name: 'Le Petit Prince', text: 'Lorsque…', createdAt: 1, updatedAt: 1 }
+    expect(parseLibraryFile(file({ passages: [passage] })).ok).toBe(true)
+    expect(parseLibraryFile(file({ passages: [null] }))).toEqual({ ok: false, reason: 'invalid' })
+    expect(parseLibraryFile(file({ passages: [{ ...passage, text: undefined }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+    expect(parseLibraryFile(file({ passages: [{ ...passage, text: 7 }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+    expect(parseLibraryFile(file({ passages: [{ ...passage, updatedAt: 'later' }] }))).toEqual({
+      ok: false,
+      reason: 'invalid',
+    })
+  })
+
+  it('accepts a Tombstone for a Passage — the kind the passage store writes', () => {
+    expect(parseLibraryFile(file({ tombstones: [{ id: 'pg1', kind: 'passage', deletedAt: 2 }] })).ok).toBe(true)
   })
 
   it('refuses a deck that is not a deck record', () => {
@@ -302,9 +419,10 @@ describe('normalizeLibrary and the migration helpers — the version guard runs 
     expect(() => normalizeLibrary(fromTheFuture({}))).toThrow(/newer/)
   })
 
-  it('refuses a newer build\'s decks, mixes and tombstones by the same guard', () => {
+  it('refuses a newer build\'s decks, mixes, passages and tombstones by the same guard', () => {
     expect(() => migrateLibraryDecks(fromTheFuture({}))).toThrow(/newer/)
     expect(() => migrateLibraryMixes(fromTheFuture({}))).toThrow(/newer/)
+    expect(() => migrateLibraryPassages(fromTheFuture({}))).toThrow(/newer/)
     expect(() => migrateLibraryTombstones(fromTheFuture({}))).toThrow(/newer/)
   })
 
@@ -314,6 +432,7 @@ describe('normalizeLibrary and the migration helpers — the version guard runs 
     expect(() => migrateLibraryDecks(impossible)).toThrow(/schema version/)
     expect(() => migrateLibraryMixes(impossible)).toThrow(/schema version/)
     expect(() => migrateLibraryTombstones(impossible)).toThrow(/schema version/)
+    expect(() => migrateLibraryPassages(impossible)).toThrow(/schema version/)
   })
 
   it('still normalizes an empty library at a version this build wrote', () => {
@@ -325,6 +444,7 @@ describe('normalizeLibrary and the migration helpers — the version guard runs 
       exportedAt: 3,
       decks: [],
       mixes: [],
+      passages: [],
       tombstones: [],
     })
   })
@@ -386,12 +506,12 @@ describe('the pinned voice on the envelope (T067)', () => {
 
   /**
    * A restorable file, i.e. one holding something to restore. `base` is empty,
-   * and since T070 an envelope with no Decks, Mixes *or* Tombstones is refused
-   * as `empty` rather than parsed — restore clears all three stores first, so
-   * a truncated file would otherwise cost them everything the user still has. What
-   * these two tests pin is the VOICE surviving the round trip, so they carry a
-   * Deck to get past that guard; they are not a statement that an empty file
-   * should parse.
+   * and since T070 an envelope with no Decks, Mixes, Passages *or* Tombstones
+   * is refused as `empty` rather than parsed — restore clears every record
+   * store first, so a truncated file would otherwise cost them everything the user
+   * still has. What these two tests pin is the VOICE surviving the round trip,
+   * so they carry a Deck to get past that guard; they are not a statement that
+   * an empty file should parse.
    */
   const restorable: Library = {
     ...base,

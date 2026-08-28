@@ -9,8 +9,11 @@ import type {
   Library,
   Mix,
   MixStore,
+  Passage,
+  PassageStore,
   PhraseCandidate,
   ScanReader,
+  Statement,
   Tombstone,
   Translator,
 } from './domain'
@@ -208,21 +211,27 @@ function createFakeSynthClient(): SynthClient & { synthesize: ReturnType<typeof 
  * tests care about. `enqueue` never resolves, by design: it proves the
  * Phrase save itself is never gated on generation completing.
  *
+ * It records each unit's `statements`, not just its id, because that is where
+ * the Rep change is observable at all: a Phrase enqueues two Statements
+ * (French then English) and a Line enqueues one (French only). An id-only
+ * recording cannot tell those apart, so it would pass unchanged if the
+ * composition root handed the queue the wrong Rep entirely.
+ *
  * `suspensions` records Generation suspension in order rather than counting
  * it: the span is taken twice per Drill (the Start tap and the running-phase
  * effect) and released once, so only the sequence says whether the
  * composition root wired both ends of it. */
 function createFakeGenerationQueue(): GenerationQueue & {
-  enqueued: Array<{ id: string; french: string; english: string }>
+  enqueued: Array<{ id: string; statements: readonly Statement[] }>
   suspensions: Array<'suspend' | 'resume'>
 } {
-  const enqueued: Array<{ id: string; french: string; english: string }> = []
+  const enqueued: Array<{ id: string; statements: readonly Statement[] }> = []
   const suspensions: Array<'suspend' | 'resume'> = []
   return {
     enqueued,
     suspensions,
-    enqueue(phrase) {
-      enqueued.push({ id: phrase.id, french: phrase.french, english: phrase.english })
+    enqueue(unit) {
+      enqueued.push({ id: unit.id, statements: unit.statements })
     },
     statusFor() {
       return undefined
@@ -237,9 +246,31 @@ function createFakeGenerationQueue(): GenerationQueue & {
   }
 }
 
+/** In-memory PassageStore fake — the real IndexedDB store is exercised in
+ * src/adapters/storage; App's wiring to the port is what these tests care
+ * about. Keyed by id like the real one, so a save under an existing id
+ * replaces rather than appends. */
+function createFakePassageStore(
+  initial: readonly Passage[] = [],
+): PassageStore & { passages: Map<string, Passage> } {
+  const passages = new Map(initial.map((p) => [p.id, p]))
+  return {
+    passages,
+    async loadAll() {
+      return [...passages.values()]
+    },
+    async save(passage) {
+      passages.set(passage.id, passage)
+    },
+    async remove(id) {
+      passages.delete(id)
+    },
+  }
+}
+
 /** In-memory ClipCache fake — the real IndexedDB cache is exercised in
  * src/adapters/storage; App's wiring of the readiness gate is what these
- * tests care about. `readyIds`/`readyPhraseIds` default to "nothing ready",
+ * tests care about. `readyIds`/`readyUnitIds` default to "nothing ready",
  * which is the honest default for a fresh app. */
 function createFakeClipCache(
   readyIds: ReadonlySet<string> = new Set(),
@@ -253,8 +284,8 @@ function createFakeClipCache(
     async has() {
       return false
     },
-    async readyPhraseIds(phrases) {
-      return new Set(phrases.map((p) => p.id).filter((id) => readyIds.has(id)))
+    async readyUnitIds(units) {
+      return new Set(units.map((unit) => unit.id).filter((id) => readyIds.has(id)))
     },
     async usage() {
       return usage
@@ -315,6 +346,17 @@ function typeInto(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
   setter.call(input, value)
   input.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+/**
+ * The same, for a `<textarea>` — the Passage sheet's text field. React tracks
+ * the value on the element's own prototype, so the input setter above does
+ * nothing here.
+ */
+function typeIntoTextArea(textArea: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!
+  setter.call(textArea, value)
+  textArea.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
 function click(el: Element): void {
@@ -480,11 +522,15 @@ async function renderApp(
   databaseTrouble: DatabaseTroubleSource = createFakeDatabaseTrouble(),
   audioElement: AudioElementLike = fakeAudioElement(),
   routeHoldElement: RouteHoldElementLike = fakeRouteHoldElement(),
+  // Appended rather than slotted in beside `mixStore`, so the eighty-odd
+  // positional calls above keep meaning what they say.
+  passageStore: PassageStore = createFakePassageStore(),
 ) {
   await act(async () => {
     root.render(
       <App
         mixStore={mixStore}
+        passageStore={passageStore}
         deckStore={store}
         settingsStore={settingsStore}
         synthClient={synthClient}
@@ -591,7 +637,14 @@ describe('App wired to the audio generation queue', () => {
     const saved = store.decks.get('d1')!
     expect(saved.phrases).toHaveLength(1)
     expect(generationQueue.enqueued).toEqual([
-      { id: saved.phrases[0]!.id, french: 'Bonjour', english: 'Hello' },
+      {
+        id: saved.phrases[0]!.id,
+        // Two Statements, French first — a Phrase Rep. A Line Rep carries one.
+        statements: [
+          { text: 'Bonjour', lang: 'fr-FR' },
+          { text: 'Hello', lang: 'en-US' },
+        ],
+      },
     ])
   })
 
@@ -608,7 +661,15 @@ describe('App wired to the audio generation queue', () => {
     await act(async () => click(container.querySelector('[data-testid="phrase-save"]')!))
 
     expect(store.decks.get('d1')!.phrases[0]).toMatchObject({ french: 'Bonsoir', english: 'Hello' })
-    expect(generationQueue.enqueued).toEqual([{ id: 'p1', french: 'Bonsoir', english: 'Hello' }])
+    expect(generationQueue.enqueued).toEqual([
+      {
+        id: 'p1',
+        statements: [
+          { text: 'Bonsoir', lang: 'fr-FR' },
+          { text: 'Hello', lang: 'en-US' },
+        ],
+      },
+    ])
   })
 })
 
@@ -1150,7 +1211,12 @@ describe('App wired to Import', () => {
     const saved = [...store.decks.values()].find((d) => d.name === 'Scanned')
     expect(saved).toBeDefined()
     expect(saved!.phrases.map((p) => ({ french: p.french, english: p.english }))).toEqual(drafts)
-    expect(generationQueue.enqueued.map((p) => ({ french: p.french, english: p.english }))).toEqual(drafts)
+    expect(generationQueue.enqueued.map((rep) => rep.statements)).toEqual(
+      drafts.map((draft) => [
+        { text: draft.french, lang: 'fr-FR' },
+        { text: draft.english, lang: 'en-US' },
+      ]),
+    )
     // Import is left behind — the user lands somewhere that shows the result, not back on the capture screen.
     expect(container.querySelector('[data-testid="take-photo"]')).toBeNull()
   })
@@ -1209,9 +1275,15 @@ describe('App wired to translate-and-add candidates (T057 scope addition)', () =
       expect(formal.phrases).toEqual([
         expect.objectContaining({ french: 'Pouvez-vous venir?', english: 'Can you come?' }),
       ])
-      expect(generationQueue.enqueued.map((p) => ({ french: p.french, english: p.english }))).toEqual([
-        { french: 'Tu peux venir?', english: 'Can you come?' },
-        { french: 'Pouvez-vous venir?', english: 'Can you come?' },
+      expect(generationQueue.enqueued.map((rep) => rep.statements)).toEqual([
+        [
+          { text: 'Tu peux venir?', lang: 'fr-FR' },
+          { text: 'Can you come?', lang: 'en-US' },
+        ],
+        [
+          { text: 'Pouvez-vous venir?', lang: 'fr-FR' },
+          { text: 'Can you come?', lang: 'en-US' },
+        ],
       ])
     } finally {
       vi.useRealTimers()
@@ -2162,7 +2234,10 @@ describe('App wired to explicit re-generation (T067)', () => {
     act(() => click(container.querySelector('[data-testid="regenerate-deck-audio"]')!))
     await act(async () => click(container.querySelector('[data-testid="confirm-regenerate-deck-audio"]')!))
 
-    expect(generationQueue.enqueued.map((p) => p.id)).toEqual(['p1', 'p2'])
+    expect(generationQueue.enqueued.map((rep) => rep.id)).toEqual(['p1', 'p2'])
+    // Two Statements each: re-generation queues the same Phrase Reps a save
+    // does, not something narrower.
+    expect(generationQueue.enqueued.map((rep) => rep.statements.length)).toEqual([2, 2])
   })
 
   it('queues one Phrase when the user asks for that Phrase alone', async () => {
@@ -2172,7 +2247,230 @@ describe('App wired to explicit re-generation (T067)', () => {
 
     await act(async () => click(container.querySelector('[data-testid="regenerate-phrase-audio-p2"]')!))
 
-    expect(generationQueue.enqueued.map((p) => p.id)).toEqual(['p2'])
+    expect(generationQueue.enqueued.map((rep) => rep.id)).toEqual(['p2'])
+    expect(generationQueue.enqueued[0]!.statements).toEqual([
+      { text: 'Merci', lang: 'fr-FR' },
+      { text: 'Thanks', lang: 'en-US' },
+    ])
+  })
+})
+
+/**
+ * Long form (the Passage aggregate). What these pin is only the composition
+ * root's half: the store the screen is fed from, the domain functions its
+ * callbacks go through, the Reps the queue is handed, and the Drill it starts.
+ * `PassagesScreen`/`PassageSheet` own their own rendering tests, and the
+ * splitter and the Reps are pinned in src/domain.
+ */
+describe('App wired to Passages (Long form)', () => {
+  const TWO_LINES = 'Il faisait beau. Nous sommes sortis.'
+
+  async function openPassages(): Promise<void> {
+    await act(async () => click(container.querySelector('[data-testid="open-passages"]')!))
+  }
+
+  it('opens Long form from Decks', async () => {
+    await renderApp(createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: [] }]))
+
+    await openPassages()
+
+    expect(container.querySelector('[data-testid="passages-screen"]')).not.toBeNull()
+  })
+
+  it('creating a Passage persists it through PassageStore.save and queues one Rep per Line', async () => {
+    const passageStore = createFakePassageStore([])
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(
+      createFakeDeckStore([]),
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      generationQueue,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      passageStore,
+    )
+
+    await openPassages()
+    act(() => click(container.querySelector('[data-testid="passage-new"]')!))
+    act(() =>
+      typeInto(container.querySelector('[data-testid="passage-sheet-name"]') as HTMLInputElement, 'Chapitre 1'),
+    )
+    act(() =>
+      typeIntoTextArea(
+        container.querySelector('[data-testid="passage-sheet-text"]') as HTMLTextAreaElement,
+        TWO_LINES,
+      ),
+    )
+    await act(async () => click(container.querySelector('[data-testid="passage-sheet-save"]')!))
+    await flushMicrotasks()
+
+    expect(passageStore.passages.size).toBe(1)
+    const saved = [...passageStore.passages.values()][0]!
+    expect(saved.name).toBe('Chapitre 1')
+    expect(saved.text).toBe(TWO_LINES)
+    expect(saved.id.length).toBeGreaterThan(0)
+
+    // One Rep per Line, each carrying a SINGLE French Statement. That count is
+    // the whole point: a Phrase Rep would carry two, and an id-only assertion
+    // could not tell the difference.
+    expect(generationQueue.enqueued).toEqual([
+      { id: `${saved.id}#0`, statements: [{ text: 'Il faisait beau.', lang: 'fr-FR' }] },
+      { id: `${saved.id}#1`, statements: [{ text: 'Nous sommes sortis.', lang: 'fr-FR' }] },
+    ])
+  })
+
+  it('editing a Passage’s text re-queues the Lines the new text derives, not the old ones', async () => {
+    const passageStore = createFakePassageStore([{ id: 'pg1', name: 'Chapitre 1', text: TWO_LINES }])
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(
+      createFakeDeckStore([]),
+      createFakeSettingsStore(),
+      createFakeSynthClient(),
+      generationQueue,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      passageStore,
+    )
+
+    await openPassages()
+    act(() => click(container.querySelector('[data-testid="passage-edit-pg1"]')!))
+    act(() =>
+      typeIntoTextArea(
+        container.querySelector('[data-testid="passage-sheet-text"]') as HTMLTextAreaElement,
+        'Il pleuvait.',
+      ),
+    )
+    await act(async () => click(container.querySelector('[data-testid="passage-sheet-save"]')!))
+    await flushMicrotasks()
+
+    // Rewritten through `setPassageText`, so the name survives untouched.
+    expect(passageStore.passages.get('pg1')).toEqual({ id: 'pg1', name: 'Chapitre 1', text: 'Il pleuvait.' })
+    // One Line now, not two. The second Line of the old text is not re-queued:
+    // it no longer exists, and `pg1#1` would be a request for audio nothing
+    // will ever ask to play.
+    expect(generationQueue.enqueued).toEqual([
+      { id: 'pg1#0', statements: [{ text: 'Il pleuvait.', lang: 'fr-FR' }] },
+    ])
+  })
+
+  it('deleting a Passage removes it through PassageStore.remove and syncs, so the Tombstone reaches the server', async () => {
+    const deckStore = createFakeDeckStore([])
+    const passageStore = createFakePassageStore([{ id: 'pg1', name: 'Chapitre 1', text: TWO_LINES }])
+    const client = createFakeLibrarySyncClient()
+    await renderApp(
+      deckStore,
+      createFakeSettingsStore(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      client,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      passageStore,
+    )
+    await openPassages()
+    const pushesBefore = client.pushed.length
+
+    act(() => click(container.querySelector('[data-testid="passage-delete-pg1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="passage-delete-confirm-pg1"]')!))
+    await flushMicrotasks()
+
+    expect(passageStore.passages.has('pg1')).toBe(false)
+    expect(container.querySelector('[data-testid="passage-row-pg1"]')).toBeNull()
+    // A delete that never syncs is a delete their other phone undoes: the
+    // Tombstone only travels on a round-trip.
+    expect(client.pushed.length).toBeGreaterThan(pushesBefore)
+  })
+
+  it('drills a Passage over its Lines, titled with the Passage’s name', async () => {
+    const passageStore = createFakePassageStore([{ id: 'pg1', name: 'Chapitre 1', text: TWO_LINES }])
+    await renderApp(
+      createFakeDeckStore([]),
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue(),
+      createFakeClipCache(new Set(['pg1#0', 'pg1#1'])),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      passageStore,
+    )
+
+    await openPassages()
+    await act(async () => click(container.querySelector('[data-testid="passage-drill-pg1"]')!))
+
+    expect(container.querySelector('[data-testid="drill-title"]')?.textContent).toBe('Chapitre 1')
+    // Two Lines, and the noun says Lines — not "2 phrases", which is what a
+    // Passage handed to the Deck's own drill target shape would have said.
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('2 lines')
+
+    // Back lands on Long form, not on Decks: `passagesOpen` is left standing
+    // behind the Drill, the way Deck detail is.
+    await act(async () => click(container.querySelector('[data-testid="drill-back"]')!))
+    expect(container.querySelector('[data-testid="passages-screen"]')).not.toBeNull()
+  })
+
+  it('reads their Passages back from the store on a relaunch', async () => {
+    const passageStore = createFakePassageStore([{ id: 'pg1', name: 'Chapitre 1', text: TWO_LINES }])
+    const render = () =>
+      renderApp(
+        createFakeDeckStore([]),
+        createFakeSettingsStore(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        passageStore,
+      )
+
+    await render()
+    await openPassages()
+    expect(container.querySelector('[data-testid="passage-row-pg1"]')).not.toBeNull()
+
+    // A second mount is a relaunch: nothing is carried in memory, so what is
+    // on screen can only have come from the store's launch read.
+    act(() => root.unmount())
+    root = createRoot(container)
+    await render()
+    await openPassages()
+
+    expect(container.querySelector('[data-testid="passage-name-pg1"]')?.textContent).toBe('Chapitre 1')
   })
 })
 
@@ -2259,6 +2557,50 @@ describe('App when a local write fails (T069)', () => {
     expect(notice()?.textContent).toContain('Mornings')
     expect(notice()?.textContent).toContain('could not be saved')
     expect(container.querySelector('[data-testid^="mix-row-"]')).toBeNull()
+  })
+
+  it('says a Passage could not be saved, and takes it back off the screen', async () => {
+    const passageStore = createFakePassageStore([])
+    passageStore.save = async () => {
+      throw quotaError()
+    }
+    await renderApp(
+      createFakeDeckStore([]),
+      createFakeSettingsStore(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      passageStore,
+    )
+
+    await act(async () => click(container.querySelector('[data-testid="open-passages"]')!))
+    act(() => click(container.querySelector('[data-testid="passage-new"]')!))
+    act(() =>
+      typeInto(container.querySelector('[data-testid="passage-sheet-name"]') as HTMLInputElement, 'Chapitre 1'),
+    )
+    act(() =>
+      typeIntoTextArea(
+        container.querySelector('[data-testid="passage-sheet-text"]') as HTMLTextAreaElement,
+        'Il faisait beau.',
+      ),
+    )
+    await act(async () => click(container.querySelector('[data-testid="passage-sheet-save"]')!))
+    await flushMicrotasks()
+
+    expect(notice()?.textContent).toContain('Chapitre 1')
+    expect(notice()?.textContent).toContain('could not be saved')
+    // Rolled back off the screen by `reloadLibraryFromStores`, which reads the
+    // passage store too — the whole reason it has to.
+    expect(container.querySelector('[data-testid^="passage-row-"]')).toBeNull()
   })
 
   it('says a Mix could not be deleted, and puts it back on the screen', async () => {

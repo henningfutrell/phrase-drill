@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createDrillPlayer } from './drill-player'
-import type { Phrase } from './phrase'
+import { buildPhraseRep } from './rep'
 import {
   controllableSpeech,
   fakeClock,
@@ -8,8 +8,16 @@ import {
   instantSpeech,
 } from './drill-player.test-support'
 
-const bonjour: Phrase = { id: 'p1', french: 'Bonjour', english: 'Hello' }
-const merci: Phrase = { id: 'p2', french: 'Merci', english: 'Thank you' }
+const bonjourRep = buildPhraseRep({
+  id: 'p1',
+  french: 'Bonjour',
+  english: 'Hello',
+})
+const merciRep = buildPhraseRep({
+  id: 'p2',
+  french: 'Merci',
+  english: 'Thank you',
+})
 
 describe('DrillPlayer control: pause, resume, skip, stop', () => {
   beforeEach(() => {
@@ -23,7 +31,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('pause cancels the in-flight utterance and resume replays that same step', async () => {
     const speech = controllableSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour], { speech, clock })
+    const player = createDrillPlayer([bonjourRep], { speech, clock })
 
     const done = player.start()
     await flushMicrotasks()
@@ -48,10 +56,10 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
     expect(player.status).toBe('stopped')
   })
 
-  it('skip cancels a pending speak and moves straight to the next Phrase, with nothing orphaned', async () => {
+  it('skip cancels a pending speak and moves straight to the next Rep, with nothing orphaned', async () => {
     const speech = controllableSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour, merci], { speech, clock })
+    const player = createDrillPlayer([bonjourRep, merciRep], { speech, clock })
 
     const done = player.start()
     await flushMicrotasks()
@@ -72,7 +80,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('skip during a pause step clears the pending timer — no orphaned timer', async () => {
     const speech = instantSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour, merci], { speech, clock })
+    const player = createDrillPlayer([bonjourRep, merciRep], { speech, clock })
 
     const done = player.start()
     // Let the first utterance (instant) settle and the pause step's timer get scheduled.
@@ -92,7 +100,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('stop cancels the in-flight step immediately and leaves no pending timer', async () => {
     const speech = instantSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour], { speech, clock })
+    const player = createDrillPlayer([bonjourRep], { speech, clock })
 
     const done = player.start()
     await flushMicrotasks() // first utterance done, pause timer now pending
@@ -108,7 +116,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('pause is a no-op when not playing, and resume is a no-op when not paused', async () => {
     const speech = instantSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour], { speech, clock })
+    const player = createDrillPlayer([bonjourRep], { speech, clock })
 
     player.pause() // never started
     expect(player.status).toBe('stopped')
@@ -120,7 +128,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('skip is a no-op once the Drill has already stopped', async () => {
     const speech = instantSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour], { speech, clock })
+    const player = createDrillPlayer([bonjourRep], { speech, clock })
 
     const done = player.start()
     await vi.runAllTimersAsync()
@@ -137,7 +145,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('start() while paused is a no-op — it does not reset position or restart from the top', async () => {
     const speech = instantSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour, merci], { speech, clock })
+    const player = createDrillPlayer([bonjourRep, merciRep], { speech, clock })
 
     const done = player.start()
     await flushMicrotasks()
@@ -162,7 +170,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('skip while paused advances position without resuming playback, and does not throw', async () => {
     const speech = instantSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour, merci], { speech, clock })
+    const player = createDrillPlayer([bonjourRep, merciRep], { speech, clock })
 
     const done = player.start()
     await flushMicrotasks()
@@ -184,7 +192,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('skip past the final Rep while paused stops the Drill directly', async () => {
     const speech = instantSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour], { speech, clock })
+    const player = createDrillPlayer([bonjourRep], { speech, clock })
 
     const done = player.start()
     await flushMicrotasks()
@@ -201,7 +209,7 @@ describe('DrillPlayer control: pause, resume, skip, stop', () => {
   it('stop() before any start(), and after the Drill has already run to completion, does not throw', async () => {
     const speech = instantSpeech()
     const clock = fakeClock()
-    const player = createDrillPlayer([bonjour], { speech, clock })
+    const player = createDrillPlayer([bonjourRep], { speech, clock })
 
     expect(() => player.stop()).not.toThrow()
 

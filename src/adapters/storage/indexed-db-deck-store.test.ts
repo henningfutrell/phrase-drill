@@ -6,6 +6,7 @@ import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 import { createIndexedDbMixStore } from './indexed-db-mix-store'
+import { createIndexedDbPassageStore } from './indexed-db-passage-store'
 
 function makeDeck(overrides: Partial<Deck> = {}): Deck {
   return {
@@ -409,5 +410,110 @@ describe('createIndexedDbDeckStore', () => {
     const library = await store.exportAll()
 
     expect(JSON.stringify(library)).not.toContain('super-secret-anthropic-key')
+  })
+
+  it('carries long-form Passages through exportAll and importAll, so they survive a new phone', async () => {
+    const store = createIndexedDbDeckStore()
+    const passageStore = createIndexedDbPassageStore()
+    await store.save(makeDeck({ id: 'home', name: 'Home' }))
+    await passageStore.save({ id: 'pg1', name: 'Chapitre 1', text: 'Lorsque j’avais six ans…' })
+
+    const library = await store.exportAll()
+    expect(library.passages?.map((p) => p.id)).toEqual(['pg1'])
+
+    resetFakeIdb()
+    const freshDecks = createIndexedDbDeckStore()
+    const freshPassages = createIndexedDbPassageStore()
+    await freshDecks.importAll(library)
+
+    expect((await freshDecks.loadAll()).map((d) => d.id)).toEqual(['home'])
+    expect(await freshPassages.loadAll()).toEqual([
+      { id: 'pg1', name: 'Chapitre 1', text: 'Lorsque j’avais six ans…' },
+    ])
+  })
+
+  it('exports an empty passages field rather than no field, so a restore never has to guess', async () => {
+    const store = createIndexedDbDeckStore()
+    await store.save(makeDeck())
+
+    expect((await store.exportAll()).passages).toEqual([])
+  })
+
+  it('import replaces Passages wholesale, the same way it replaces Decks', async () => {
+    const store = createIndexedDbDeckStore()
+    const passageStore = createIndexedDbPassageStore()
+    await passageStore.save({ id: 'stale', name: 'Stale', text: 'Ancien.' })
+    const exported = await store.exportAll()
+
+    await store.importAll({
+      ...exported,
+      passages: [{ id: 'fresh', name: 'Fresh', text: 'Nouveau.', createdAt: 1, updatedAt: 1 }],
+    })
+
+    expect((await passageStore.loadAll()).map((p) => p.id)).toEqual(['fresh'])
+  })
+
+  /**
+   * A pre-v7 envelope has no `passages` field because Passages did not exist
+   * when it was written. That means "no Passages" — never "invalid file" — so
+   * the restore must go through, and it must not leave a stale one behind
+   * either.
+   */
+  it('restores a pre-v7 backup that carries no passages at all, leaving no Passages behind', async () => {
+    const store = createIndexedDbDeckStore()
+    const passageStore = createIndexedDbPassageStore()
+    await passageStore.save({ id: 'stale', name: 'Stale', text: 'Ancien.' })
+
+    await store.importAll({
+      format: 'phrase-drill-library',
+      schemaVersion: 6,
+      exportedAt: 1,
+      decks: [{ id: 'home', name: 'Home', phrases: [], createdAt: 1, updatedAt: 1 }],
+    })
+
+    expect((await store.loadAll()).map((d) => d.id)).toEqual(['home'])
+    expect(await passageStore.loadAll()).toEqual([])
+  })
+
+  it('sees the Passages too, and carries them back through updateAll', async () => {
+    const store = createIndexedDbDeckStore()
+    const passageStore = createIndexedDbPassageStore()
+    await passageStore.save({ id: 'pg1', name: 'Chapitre 1', text: 'Lorsque j’avais six ans…' })
+
+    const result = await store.updateAll((stored) => stored)
+
+    expect(result.library.passages!.map((p) => p.id)).toEqual(['pg1'])
+    expect((await passageStore.loadAll()).map((p) => p.id)).toEqual(['pg1'])
+  })
+
+  /**
+   * A merge that brought down only a Passage must not be mistaken for "nothing
+   * changed": the skip is decided by `sameLibraryContent`, so a fingerprint
+   * blind to `passages` would report `changed: false` and never write it.
+   */
+  it('writes a Passage an update brought down, rather than reporting no change', async () => {
+    const store = createIndexedDbDeckStore()
+    const passageStore = createIndexedDbPassageStore()
+    await store.save(makeDeck({ id: 'home', name: 'Home' }))
+
+    const result = await store.updateAll((stored) => ({
+      ...stored,
+      passages: [{ id: 'arrived', name: 'From the web', text: 'Un texte arrivé.', createdAt: 1, updatedAt: 1 }],
+    }))
+
+    expect(result.changed).toBe(true)
+    expect((await passageStore.loadAll()).map((p) => p.name)).toEqual(['From the web'])
+  })
+
+  it('records a Passage Tombstone in the envelope, so another device does not push it back', async () => {
+    const store = createIndexedDbDeckStore()
+    const passageStore = createIndexedDbPassageStore()
+    await passageStore.save({ id: 'pg1', name: 'Chapitre 1', text: 'Lorsque j’avais six ans…' })
+
+    await passageStore.remove('pg1')
+
+    const library = await store.exportAll()
+    expect(library.passages).toEqual([])
+    expect(library.tombstones).toEqual([{ id: 'pg1', kind: 'passage', deletedAt: expect.any(Number) }])
   })
 })

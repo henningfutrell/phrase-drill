@@ -8,8 +8,11 @@ import type {
   Mix,
   MixId,
   MixStore,
-  Phrase,
+  Passage,
+  PassageId,
+  PassageStore,
   PhraseId,
+  Rep,
   ScanReader,
   SpeechPort,
   Translator,
@@ -17,14 +20,20 @@ import type {
 } from './domain'
 import {
   addPhrase,
+  buildLineRep,
+  buildPhraseRep,
   createDeck,
   createMix,
+  createPassage,
   removePhrase,
   renameDeck,
   renameMix,
+  renamePassage,
   reorderPhrase,
   resolveMixPhrases,
   setMixDecks,
+  setPassageText,
+  splitPassageIntoLines,
   updatePhrase,
 } from './domain'
 import type {
@@ -55,6 +64,7 @@ import { createWakeLockPort } from './adapters/device/wake-lock'
 import { DecksScreen } from './ui/DecksScreen'
 import { DeckDetailScreen } from './ui/DeckDetailScreen'
 import { MixSelectScreen } from './ui/MixSelectScreen'
+import { PassagesScreen } from './ui/PassagesScreen'
 import { ImportScreen, type ImportTarget } from './ui/ImportScreen'
 import { DrillScreen, type DrillReadinessResult } from './ui/DrillScreen'
 import { SettingsScreen, type PreviewOutcome } from './ui/SettingsScreen'
@@ -207,13 +217,14 @@ const BLOB_URL_LIFETIME_MS = 60_000
 
 /**
  * Composition root — the only place allowed to import from both `domain/`
- * and `adapters/*` (AGENTS.md). Owns the in-memory Deck list and persists
- * every change through the injected `DeckStore` port; screens themselves
- * only see plain data and callbacks.
+ * and `adapters/*` (AGENTS.md). Owns the in-memory Deck, Mix and Passage
+ * lists and persists every change through the injected store ports; screens
+ * themselves only see plain data and callbacks.
  */
 function App({
   deckStore,
   mixStore,
+  passageStore,
   settingsStore,
   synthClient,
   generationQueue,
@@ -228,6 +239,7 @@ function App({
 }: {
   deckStore: DeckStore
   mixStore: MixStore
+  passageStore: PassageStore
   settingsStore: SettingsStore
   synthClient: SynthClient
   generationQueue: GenerationQueue
@@ -256,6 +268,11 @@ function App({
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [mixes, setMixes] = useState<Mix[]>([])
+  // Their Passages, read at launch alongside the Decks and the Mixes. A plain
+  // list, not `undefined`-until-read like `decks`: `decks` carries the
+  // "nothing has been read yet" state the whole app waits on, and a second
+  // flag saying the same thing could only ever disagree with it.
+  const [passages, setPassages] = useState<readonly Passage[]>([])
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -269,8 +286,14 @@ function App({
   const [backupFile, setBackupFile] = useState<File | undefined>(undefined)
   const [mixOpen, setMixOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [passagesOpen, setPassagesOpen] = useState(false)
+  // What a Drill is about to run over, already reduced to Reps (T019 §3): a
+  // Deck and a Mix contribute Phrase Reps, a Passage contributes Line Reps,
+  // and from here down nothing distinguishes them. `repNoun` is the one thing
+  // that does not survive the reduction and that the start card still has to
+  // say out loud — "12 phrases" or "12 lines" — so it rides along.
   const [drillTarget, setDrillTarget] = useState<
-    { title: string; phrases: readonly Phrase[] } | undefined
+    { title: string; reps: readonly Rep[]; repNoun: 'phrase' | 'line' } | undefined
   >(undefined)
   // A write to this phone's storage was refused, and the user has not read it yet
   // (T069). Holds the sentence naming what did not save; the standing
@@ -353,11 +376,19 @@ function App({
     let cancelled = false
     // Local first, always: what is on this device is shown without waiting
     // for a network round-trip that may never answer.
-    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(
-      ([loadedDecks, loadedMixes]) => {
+    //
+    // One `Promise.all` over all three record stores, not three independent
+    // reads: a refusal from ANY of them is the same fact — this phone's
+    // storage did not open — and it has to reach the one rejection handler
+    // below. A passage read left out of this would reject unhandled, leave
+    // `passages` empty with no explanation, and let the Long form screen
+    // claim the user has never written any.
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll(), passageStore.loadAll()]).then(
+      ([loadedDecks, loadedMixes, loadedPassages]) => {
         if (cancelled) return
         setDecks(loadedDecks)
         setMixes(loadedMixes)
+        setPassages(loadedPassages)
         setLibraryUnreadable(false)
       },
       () => {
@@ -374,7 +405,7 @@ function App({
     return () => {
       cancelled = true
     }
-  }, [deckStore, mixStore])
+  }, [deckStore, mixStore, passageStore])
 
   // Sync runs itself (T034): the engine syncs at launch, after every change
   // (debounced), on reconnect, and when the app is backgrounded. Nothing here
@@ -389,17 +420,19 @@ function App({
   }, [syncEngine])
 
   // A merge replaced the local library with one holding another device's
-  // work, so what is on screen is now stale. Re-read both stores; `revision`
-  // changes only when that actually happened, never on an ordinary sync.
+  // work, so what is on screen is now stale. Re-read every record store;
+  // `revision` changes only when that actually happened, never on an
+  // ordinary sync.
   const revision = sync.libraryRevision
   useEffect(() => {
     if (revision === 0) return
     let cancelled = false
-    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(
-      ([loadedDecks, loadedMixes]) => {
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll(), passageStore.loadAll()]).then(
+      ([loadedDecks, loadedMixes, loadedPassages]) => {
         if (cancelled) return
         setDecks(loadedDecks)
         setMixes(loadedMixes)
+        setPassages(loadedPassages)
         setLibraryUnreadable(false)
       },
       () => {
@@ -416,7 +449,7 @@ function App({
     return () => {
       cancelled = true
     }
-  }, [revision, deckStore, mixStore])
+  }, [revision, deckStore, mixStore, passageStore])
 
   /**
    * The database itself refusing to be usable, said out loud (T072).
@@ -502,7 +535,7 @@ function App({
     return () => {
       cancelled = true
     }
-  }, [syncedLibrary, decks, mixes, settings.voice])
+  }, [syncedLibrary, decks, mixes, passages, settings.voice])
 
   /**
    * Every write to this phone's storage goes through here (T069).
@@ -527,12 +560,19 @@ function App({
     )
   }
 
-  /** Make the screens show what the stores actually hold, not what was asked of them. */
+  /**
+   * Make the screens show what the stores actually hold, not what was asked
+   * of them. Every record store, Passages included: this runs after a REFUSED
+   * write, and the one thing it exists to prevent is a screen still showing a
+   * record that is not on disk. A Passage left out here is that exact defect
+   * with the notice on top of it saying nothing was saved.
+   */
   function reloadLibraryFromStores(): void {
-    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(
-      ([loadedDecks, loadedMixes]) => {
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll(), passageStore.loadAll()]).then(
+      ([loadedDecks, loadedMixes, loadedPassages]) => {
         setDecks(loadedDecks)
         setMixes(loadedMixes)
+        setPassages(loadedPassages)
       },
       () => {
         // The store cannot even be read. Nothing can be rolled back to, and
@@ -665,6 +705,84 @@ function App({
   }
 
   /**
+   * Queues the audio for a Passage the user has just saved — one Rep per Line.
+   *
+   * A Passage cannot be one Clip: `server/app.js` caps a single
+   * text-to-speech request far below a page of text, which is the whole
+   * reason Lines exist (see `LINE_MAX_CHARS`). So the queue is handed the
+   * Lines, not the Passage.
+   *
+   * Re-derived from the saved text every time rather than diffed against the
+   * previous Lines. Line ids are positional (`<passage id>#<index>`), so
+   * inserting one sentence renumbers every Line after it; the only honest
+   * answer after an edit is the whole new set. Clips already cached under a
+   * Line whose text did not change are found by content hash, so re-queueing
+   * them costs nothing — the queue skips what the cache already has.
+   *
+   * Same rule a Phrase gets, and for the same reason: generation is never on
+   * the critical path for the save. The text is already persisted by the time
+   * this runs.
+   */
+  function queuePassageGeneration(passage: Passage): void {
+    for (const line of splitPassageIntoLines(passage)) generationQueue.enqueue(buildLineRep(line))
+  }
+
+  /**
+   * A Passage that does not exist yet, into local state and the store — the
+   * same optimistic-write-then-`persistLocally` shape `persistNewDeck` uses,
+   * so a refused write raises the Write failure notice and re-reads the
+   * stores instead of leaving a Passage on screen that is nowhere on disk.
+   * `persistLocally`'s success path is also what syncs it to the server, so
+   * their other phone gets the text without their doing anything.
+   */
+  function handleCreatePassage(name: string, text: string): void {
+    const passage = createPassage(crypto.randomUUID(), name, text)
+    setPassages((current) => [...current, passage])
+    persistLocally(passageStore.save(passage), `“${passage.name}” could not be saved on this phone.`)
+    queuePassageGeneration(passage)
+  }
+
+  /**
+   * A Passage the user has edited. A whole-record put from React state, like
+   * `persistMix` and deliberately not the read-modify-write `mutateDeck` does
+   * (T075): what that protects is a Phrase written into a Deck by a merge
+   * between the render the user tapped and the write, and a Passage holds no
+   * sub-records for a merge to have added. The loser of a genuine Passage race
+   * is one whole Passage, named by this write, which the next merge resolves
+   * on `updatedAt`.
+   *
+   * Both fields go through the domain — `renamePassage` then `setPassageText`,
+   * never an object built here — so the sheet cannot save a Passage the domain
+   * would not have produced.
+   */
+  function handleUpdatePassage(id: PassageId, name: string, text: string): void {
+    const existing = passages.find((p) => p.id === id)
+    if (!existing) return
+    const updated = setPassageText(renamePassage(existing, name), text)
+    setPassages((current) => current.map((p) => (p.id === updated.id ? updated : p)))
+    persistLocally(passageStore.save(updated), `“${updated.name}” could not be saved on this phone.`)
+    queuePassageGeneration(updated)
+  }
+
+  /**
+   * Deleting a Passage reaches the `passages` store and nothing else — them
+   * Decks are a separate store, so that is structural rather than a promise.
+   *
+   * **A delete has to sync too, and for a reason a save does not.** The
+   * adapter writes a Tombstone in the same transaction as the removal, and the
+   * Tombstone is the only thing that tells their other phone this Passage was
+   * deleted rather than never seen. It travels on a sync and nowhere else: no
+   * round-trip, no Tombstone on the server, and the next time the other phone
+   * pushes, the Passage the user deleted comes straight back. `persistLocally`'s
+   * success path is what makes that round-trip happen.
+   */
+  function handleDeletePassage(id: PassageId) {
+    const name = passages.find((p) => p.id === id)?.name
+    setPassages((current) => current.filter((p) => p.id !== id))
+    persistLocally(passageStore.remove(id), `“${name ?? 'That text'}” could not be deleted on this phone.`)
+  }
+
+  /**
    * Puts the prepared backup File somewhere the user can keep it, and records that
    * it happened (T031).
    *
@@ -749,13 +867,17 @@ function App({
       // re-deleted the Deck the user had just restored. An empty baseline makes
       // every restored record outrank a stale deletion.
       .libraryRestored(() => syncedLibrary.writeLocal(library))
-      .then(() => Promise.all([deckStore.loadAll(), mixStore.loadAll(), settingsStore.load()]))
-      .then(([loadedDecks, loadedMixes, loadedSettings]) => {
-        // A restore replaces the whole library, saved Mixes included — read
-        // both back so the screens show what is actually stored, not what
+      .then(() =>
+        Promise.all([deckStore.loadAll(), mixStore.loadAll(), passageStore.loadAll(), settingsStore.load()]),
+      )
+      .then(([loadedDecks, loadedMixes, loadedPassages, loadedSettings]) => {
+        // A restore replaces the whole library — saved Mixes and Passages
+        // included, because `importAll` clears every record store first. Read
+        // them all back so the screens show what is actually stored, not what
         // was stored a moment ago.
         setDecks(loadedDecks)
         setMixes(loadedMixes)
+        setPassages(loadedPassages)
         // The file may have carried a pinned voice (T067); if it did, it is
         // pinned now, and the drill screen must be told.
         setSettings(loadedSettings)
@@ -764,9 +886,10 @@ function App({
         syncToServer()
       })
       .catch(() => {
-        // `importAll` is one transaction over all three stores, so a refusal
-        // rolls the whole restore back — nothing was replaced, and the Decks
-        // the user had are still the Decks the user has.
+        // `importAll` is one transaction over all four record stores — Decks,
+        // Mixes, Passages and Tombstones — so a refusal rolls the whole
+        // restore back: nothing was replaced, and the Decks the user had are still
+        // the Decks the user has.
         setWriteFailure({ message: 'That backup could not be restored on this phone.' })
         reloadLibraryFromStores()
       })
@@ -823,6 +946,10 @@ function App({
     setDiagnosticsOpen(true)
     void collectDiagnostics({
       deckStore,
+      // Required, not optional (see `CollectDiagnosticsDeps`): a readiness
+      // count that silently skipped every Passage would answer "it's not
+      // working" with "everything is ready".
+      passageStore,
       settingsStore,
       clipCache,
       errorLog,
@@ -844,10 +971,13 @@ function App({
    * is saved (add or edit). The text has already been persisted by
    * `withSelectedDeck` above by the time this runs — generation is never on
    * the critical path for the save.
+   *
+   * The queue takes Reps, not Phrases — the same unit a Line arrives as, which
+   * is why a Passage needed no second queue.
    */
   function queuePhraseGeneration(updated: Deck | undefined, phraseId: PhraseId): void {
     const phrase = updated?.phrases.find((p) => p.id === phraseId)
-    if (phrase) generationQueue.enqueue(phrase)
+    if (phrase) generationQueue.enqueue(buildPhraseRep(phrase))
   }
 
   /**
@@ -920,11 +1050,12 @@ function App({
        * cannot act on without picking the phone up, dropped over a screen
        * the user isn't looking closely at, competes with the cadence for nothing
        * the user can do about it mid-Rep. The failure itself never touches a
-       * Drill already running: it plays from an in-memory Phrase snapshot,
-       * untouched by a write to the deck/settings stores. `writeFailure`
-       * stays set, so the notice is never lost — it renders the moment the user
-       * is back on a screen where reading it costs them nothing the user is
-       * mid-sentence on (Stop, or the Drill ending on its own).
+       * Drill already running: it plays from an in-memory Rep snapshot,
+       * untouched by a write to the deck/passage/settings stores.
+       * `writeFailure` stays set, so the notice is never lost — it renders
+       * the moment the user is back on a screen where reading it costs them
+       * nothing the user is mid-sentence on (Stop, or the Drill ending on its
+       * own).
        */}
       {writeFailure !== undefined && drillTarget === undefined && (
         <WriteFailureNotice
@@ -1027,8 +1158,9 @@ function App({
       return (
         <DrillScreen
           title={drillTarget.title}
+          repNoun={drillTarget.repNoun}
           checkReadiness={(): Promise<DrillReadinessResult> =>
-            computeDrillReadiness(drillTarget.phrases, { clipCache, generationQueue, voice: settings.voice })
+            computeDrillReadiness(drillTarget.reps, { clipCache, generationQueue, voice: settings.voice })
           }
           speech={clipPlayer ?? NOOP_SPEECH}
           clock={systemClock}
@@ -1067,16 +1199,52 @@ function App({
           onBack={() => setMixOpen(false)}
           onStartMix={(mix: Mix) => {
             setMixOpen(false)
-            setDrillTarget({ title: mix.name, phrases: resolveMixPhrases(mix, decks) })
+            setDrillTarget({
+              title: mix.name,
+              reps: resolveMixPhrases(mix, decks).map(buildPhraseRep),
+              repNoun: 'phrase',
+            })
           }}
           onStartSelection={(selected) => {
             setMixOpen(false)
-            setDrillTarget({ title: 'Mix', phrases: selected.flatMap((deck) => deck.phrases) })
+            setDrillTarget({
+              title: 'Mix',
+              reps: selected.flatMap((deck) => deck.phrases).map(buildPhraseRep),
+              repNoun: 'phrase',
+            })
           }}
           onSaveMix={handleSaveMix}
           onRenameMix={handleRenameMix}
           onEditMixDecks={handleEditMixDecks}
           onDeleteMix={handleDeleteMix}
+        />
+      )
+    }
+
+    if (passagesOpen) {
+      return (
+        <PassagesScreen
+          passages={passages}
+          onBack={() => setPassagesOpen(false)}
+          onCreatePassage={handleCreatePassage}
+          onUpdatePassage={handleUpdatePassage}
+          onDeletePassage={handleDeletePassage}
+          onDrillPassage={(passage: Passage) => {
+            // `passagesOpen` is left true, unlike the Mix screen's Start:
+            // `drillTarget` is checked above this branch, so Back from the
+            // Drill lands on Long form again — the same way Deck detail
+            // stays behind a Deck's Drill.
+            //
+            // Never shuffled, and no switch to say so: a page read out of
+            // order is not the text. `DrillScreen` runs author order unless
+            // handed a `random`, and nothing here hands it one — for a Deck
+            // either.
+            setDrillTarget({
+              title: passage.name,
+              reps: splitPassageIntoLines(passage).map(buildLineRep),
+              repNoun: 'line',
+            })
+          }}
         />
       )
     }
@@ -1102,13 +1270,19 @@ function App({
           onBack={() => setSelectedDeckId(undefined)}
           onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
           onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
-          onDrillDeck={() => setDrillTarget({ title: selectedDeck.name, phrases: selectedDeck.phrases })}
+          onDrillDeck={() =>
+            setDrillTarget({
+              title: selectedDeck.name,
+              reps: selectedDeck.phrases.map(buildPhraseRep),
+              repNoun: 'phrase',
+            })
+          }
           onRegenerateDeckAudio={() => {
-            for (const phrase of selectedDeck.phrases) generationQueue.enqueue(phrase)
+            for (const phrase of selectedDeck.phrases) generationQueue.enqueue(buildPhraseRep(phrase))
           }}
           onRegeneratePhraseAudio={(id: PhraseId) => {
             const phrase = selectedDeck.phrases.find((p) => p.id === id)
-            if (phrase) generationQueue.enqueue(phrase)
+            if (phrase) generationQueue.enqueue(buildPhraseRep(phrase))
           }}
           onAddPhrase={(french, english) => {
             const id = crypto.randomUUID()
@@ -1148,6 +1322,7 @@ function App({
         onOpenSettings={handleOpenSettings}
         onOpenMix={() => setMixOpen(true)}
         onOpenImport={() => setImportOpen(true)}
+        onOpenPassages={() => setPassagesOpen(true)}
         onRestoreFileChosen={handleRestoreFileChosen}
         onConfirmRestore={handleConfirmRestore}
         onCancelRestore={handleCancelRestore}

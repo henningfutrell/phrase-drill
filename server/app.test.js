@@ -768,6 +768,127 @@ describe('server app (integration, fake upstreams)', () => {
       expect(res.status).toBe(400)
     })
 
+    /**
+     * Schema v7 adds Passages (long-form French texts) to the envelope as
+     * `passages`, alongside `decks`, `mixes` and `tombstones`.
+     *
+     * The server keeps the envelope opaque, so an unnamed `passages` field
+     * would already have round-tripped untouched. That is not the property
+     * under test. `isLibraryEnvelope` is run on the way OUT as well as in
+     * (`handleLibraryGet`), and a row that fails it answers 500
+     * `library-unreadable` — a state only `psql` gets them out of. So every
+     * field the envelope carries is named in the shape check, and refused at
+     * the door rather than stored and discovered later.
+     */
+    it('accepts a v7 envelope carrying passages', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          format: 'phrase-drill-library',
+          schemaVersion: 7,
+          exportedAt: 1,
+          decks: [],
+          mixes: [],
+          tombstones: [],
+          passages: [{ id: 'p1', name: 'Le Petit Prince', text: 'Dessine-moi un mouton.', createdAt: 1, updatedAt: 1 }],
+        }),
+      })
+      expect(res.status).toBe(204)
+    })
+
+    // The ceiling moved to 7; it did not disappear. One stored rogue version
+    // out-ranks every honest push forever (T082 finding 5), so the bound is
+    // asserted one above the new maximum, not merely at it.
+    it('still rejects a push one schema version above the new ceiling', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 8, exportedAt: 1, decks: [] }),
+      })
+      expect(res.status).toBe(400)
+    })
+
+    it('rejects a PUT whose passages field is present but not an array', async () => {
+      await boot()
+      for (const passages of ['nope', { id: 'p1' }]) {
+        const res = await fetch(`${baseUrl}/api/library`, {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 7, decks: [], passages }),
+        })
+        expect(res.status).toBe(400)
+      }
+    })
+
+    it('accepts a v7 envelope with no passages field at all — absent means no Passages, never invalid', async () => {
+      await boot()
+      const res = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 7, exportedAt: 1, decks: [] }),
+      })
+      expect(res.status).toBe(204)
+    })
+
+    it('serves a stored envelope carrying passages byte for byte, never 500 library-unreadable', async () => {
+      await boot()
+      const body = JSON.stringify({
+        format: 'phrase-drill-library',
+        schemaVersion: 7,
+        exportedAt: 1,
+        decks: [],
+        mixes: [],
+        tombstones: [],
+        passages: [{ id: 'p1', name: 'Le Petit Prince', text: 'Dessine-moi un mouton.', createdAt: 1, updatedAt: 1 }],
+      })
+      const put = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body,
+      })
+      expect(put.status).toBe(204)
+
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(get.status).toBe(200)
+      expect(await get.text()).toBe(body)
+    })
+
+    // The T060 gate is what stops the older of their two phones — a bundle that
+    // has never heard of a Passage — pushing a v6 export over a v7 row and
+    // silently deleting every long-form text the user has written.
+    it('refuses a v6 push over a stored v7 envelope with 409 stale-client, keeping their passages', async () => {
+      await boot()
+      const current = {
+        format: 'phrase-drill-library',
+        schemaVersion: 7,
+        exportedAt: 2,
+        decks: [],
+        mixes: [],
+        tombstones: [],
+        passages: [{ id: 'p1', name: 'Le Petit Prince', text: 'Dessine-moi un mouton.', createdAt: 1, updatedAt: 1 }],
+      }
+      const first = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify(current),
+      })
+      expect(first.status).toBe(204)
+
+      const fromOldClient = await fetch(`${baseUrl}/api/library`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 6, exportedAt: 3, decks: [], mixes: [], tombstones: [] }),
+      })
+      expect(fromOldClient.status).toBe(409)
+      expect(await fromOldClient.json()).toEqual({ error: 'stale-client' })
+
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(await get.json()).toEqual(current)
+    })
+
     it('rejects an oversized library payload with 413', async () => {
       await boot()
       const res = await fetch(`${baseUrl}/api/library`, {

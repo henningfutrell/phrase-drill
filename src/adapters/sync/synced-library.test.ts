@@ -5,7 +5,7 @@ import { createIndexedDbDeckStore } from '../storage/indexed-db-deck-store'
 import { createIndexedDbSettingsStore } from '../storage/settings-store'
 import { createSyncedLibrary } from './synced-library'
 import { computeDrillReadiness } from '../audio/drill-readiness'
-import { LIBRARY_FORMAT } from '../../domain'
+import { buildPhraseRep, LIBRARY_FORMAT } from '../../domain'
 import { CURRENT_SCHEMA_VERSION } from '../storage/migrations'
 
 type Library = import('../../domain').Library
@@ -66,8 +66,8 @@ describe('createSyncedLibrary (T067)', () => {
     const settings = await settingsStore.load()
     expect(settings.voice).toEqual(VOICE)
 
-    const readiness = await computeDrillReadiness([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], {
-      clipCache: { get: vi.fn(), put: vi.fn(), has: vi.fn(), readyPhraseIds: vi.fn().mockResolvedValue(new Set(['p1'])) },
+    const readiness = await computeDrillReadiness([buildPhraseRep({ id: 'p1', french: 'Bonjour', english: 'Hello' })], {
+      clipCache: { get: vi.fn(), put: vi.fn(), has: vi.fn(), readyUnitIds: vi.fn().mockResolvedValue(new Set(['p1'])) },
       generationQueue: { enqueue: vi.fn(), statusFor: vi.fn(), whenIdle: vi.fn().mockResolvedValue(undefined), suspend: vi.fn(), resume: vi.fn() },
       voice: settings.voice,
     })

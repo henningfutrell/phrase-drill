@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { DeckRecord, MixRecord, PhraseRecord } from '../../domain'
+import type { DeckRecord, MixRecord, PassageRecord, PhraseRecord } from '../../domain'
 import { CURRENT_SCHEMA_VERSION, DECK_MIGRATIONS } from './migrations'
 
 /**
@@ -30,6 +30,21 @@ const CANONICAL_MIX_RECORD: MixRecord = {
   id: 'm1',
   name: 'Mornings',
   deckIds: ['d1', 'd2'],
+  createdAt: 1_700_000_000_000,
+  updatedAt: 1_700_000_100_000,
+}
+
+/**
+ * The same, for a Passage (schema v7). Its whole content is `name` and
+ * `text` — no interior list, which is why nothing here nests. `text` is one
+ * field rather than a stored list of Lines: Lines are derived on read
+ * (`splitPassageIntoLines`), so a change to how a Line is cut is not a
+ * schema change to their data at all.
+ */
+const CANONICAL_PASSAGE_RECORD: PassageRecord = {
+  id: 'pg1',
+  name: 'Le Petit Prince, ch. 1',
+  text: 'Lorsque j’avais six ans j’ai vu, une fois, une magnifique image.',
   createdAt: 1_700_000_000_000,
   updatedAt: 1_700_000_100_000,
 }
@@ -86,6 +101,16 @@ describe('persisted MixRecord shape', () => {
       expect(describeShape(CANONICAL_MIX_RECORD)).toMatchSnapshot()
     } catch (error) {
       throw new Error(shapeChangedHelp('MixRecord'), { cause: error })
+    }
+  })
+})
+
+describe('persisted PassageRecord shape', () => {
+  it('pins the exact field names and types written to IndexedDB and to the export file', () => {
+    try {
+      expect(describeShape(CANONICAL_PASSAGE_RECORD)).toMatchSnapshot()
+    } catch (error) {
+      throw new Error(shapeChangedHelp('PassageRecord'), { cause: error })
     }
   })
 })

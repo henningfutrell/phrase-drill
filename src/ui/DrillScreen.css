@@ -96,9 +96,15 @@
 }
 
 /* ---- The cadence -------------------------------------------------------
-   Four beats: french · pause · english · pause. In lace terms each is a
-   bobbin thread with a picot at its head — a hairline, not a bar. Filled in
-   rose as it is spoken, thread-white once done. */
+   One thread per beat, and the row is as long as the Cadence being played:
+   four for a Phrase (french · pause · french · pause · english · pause ·
+   french · pause), one for a Line of a Passage, which is read once and then
+   held in silence. In lace terms each is a bobbin thread with a picot at its
+   head — a hairline, not a bar. Filled in rose as it is spoken, thread-white
+   once done.
+
+   `gap` and `justify-content: center` carry any count: a single centred thread
+   is the whole row for a Passage, and nothing here assumes four. */
 
 .drill-beat-row {
   display: flex;

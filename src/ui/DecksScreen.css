@@ -1,0 +1,36 @@
+/*
+ * Decks screen. One rule, and it exists because of a measurement.
+ *
+ * The header carries five actions now — Mix decks…, Long form, Scan a page,
+ * Settings, + New Deck. At --text-sm with `.link-action`'s 8px of side padding
+ * they run to roughly 480px, and an iPhone in portrait gives the screen about
+ * 350px inside `.screen`'s 20px gutters. `.screen-header-actions` in styles.css
+ * is a nowrap flex row, so without this the five labels shrink instead:
+ * "Mix decks…" breaks after "Mix", and a header of two-line stubs is exactly
+ * the thing shortening a label to "Text" would also have caused.
+ *
+ * So the actions take a row of their own under the title and wrap within it,
+ * right-aligned. Unconditional rather than a media query: five actions never
+ * fit beside the title on the one device this app runs on, and a layout that
+ * reflows at some width nobody holds is a layout nobody has seen.
+ *
+ * Scoped to `.decks-header`, not to `.screen-header`, because Settings, Deck
+ * detail and Import share that class with two actions apiece and have no
+ * reason to spend a second row — MixSelectScreen.css records what happens when
+ * one screen restyles another's classes.
+ */
+
+@import '../styles/tokens.css';
+
+.decks-header {
+  flex-wrap: wrap;
+}
+
+.decks-header .screen-header-actions {
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  /* Rows of 44px targets, so they need vertical air the single-row header
+     never did; the horizontal gap stays as tight as styles.css sets it. */
+  row-gap: 2px;
+}

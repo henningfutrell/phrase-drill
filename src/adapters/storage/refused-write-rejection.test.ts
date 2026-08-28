@@ -10,6 +10,7 @@ import {
 } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
 import { createIndexedDbMixStore } from './indexed-db-mix-store'
+import { createIndexedDbPassageStore } from './indexed-db-passage-store'
 
 /**
  * What a REFUSED write leaves behind (T077).
@@ -30,8 +31,8 @@ import { createIndexedDbMixStore } from './indexed-db-mix-store'
  *    and `DataError` are raised at request creation, so no request exists to
  *    fire `error`, nothing aborts on the app's behalf, and the transaction
  *    AUTO-COMMITS whatever it has already done. In `importAll` that is a
- *    `clear()` of all three stores plus the Decks written before the bad one:
- *    their library replaced by a fragment. It is not reachable from app data
+ *    `clear()` of all four record stores plus the Decks written before the bad
+ *    one: their library replaced by a fragment. It is not reachable from app data
  *    today — `importAll` values come from `JSON.parse` — and it is the one
  *    error class the rollback did not cover, so it is closed by the same
  *    `try`/`catch` rather than by machinery of its own.
@@ -49,6 +50,7 @@ function library(overrides: Partial<Library> = {}): Library {
     exportedAt: 1,
     decks: [],
     mixes: [],
+    passages: [],
     tombstones: [],
     ...overrides,
   }
@@ -155,6 +157,19 @@ describe('a write the database refuses leaves no rejection for the crash handler
 
     expect(await unhandledRejections()).toEqual([])
     expect((await mixStore.loadAll()).map((mix) => mix.id)).toEqual(['m1'])
+  })
+
+  it('the passage store rolls back the same way, and just as quietly', async () => {
+    const passageStore = createIndexedDbPassageStore()
+    await passageStore.save({ id: 'pg1', name: 'Chapitre 1', text: 'Lorsque j’avais six ans…' })
+
+    failNextWriteTo(TOMBSTONES_STORE)
+    await expect(passageStore.remove('pg1')).rejects.toThrow()
+
+    expect(await unhandledRejections()).toEqual([])
+    // The Passage is still there: a delete with no Tombstone is a delete every
+    // other device undoes, so the two roll back together or not at all (T060).
+    expect((await passageStore.loadAll()).map((passage) => passage.id)).toEqual(['pg1'])
   })
 })
 

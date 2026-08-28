@@ -2,6 +2,8 @@ import { useState } from 'react'
 import type { Deck, DeckId } from '../domain'
 import { NameSheet } from './NameSheet'
 import { RestoreControl, type RestoreFileResult } from './RestoreControl'
+import '../styles/tokens.css'
+import './DecksScreen.css'
 
 type SheetState = { kind: 'create' } | { kind: 'rename'; deckId: DeckId; name: string } | undefined
 
@@ -16,6 +18,7 @@ export function DecksScreen({
   onRenameDeck,
   onDeleteDeck,
   onOpenDeck,
+  onOpenPassages,
   onOpenSettings,
   onOpenMix,
   onOpenImport,
@@ -29,6 +32,12 @@ export function DecksScreen({
   onRenameDeck: (id: DeckId, name: string) => void
   onDeleteDeck: (id: DeckId) => void
   onOpenDeck: (id: DeckId) => void
+  /**
+   * Entry point to Long form (the Passages screen). Required, unlike Mix and
+   * Scan above: a Decks screen with no way through to their long-form texts is
+   * a Decks screen that has lost them, and this is the only route there.
+   */
+  onOpenPassages: () => void
   /** Entry point to Settings (docs/design.md §3.6) — omitted only in tests that don't exercise it. */
   onOpenSettings?: () => void
   /** Entry point to the Mix screen (docs/design.md §3.2, T006) — omitted only in tests that don't exercise it. */
@@ -65,7 +74,9 @@ export function DecksScreen({
 
   return (
     <main className="screen">
-      <header className="screen-header">
+      {/* `decks-header` carries nothing but the wrap rule — see DecksScreen.css.
+          Five actions do not fit across an iPhone in portrait. */}
+      <header className="screen-header decks-header">
         <h1>Decks</h1>
         <div className="screen-header-actions">
           {onOpenMix && (
@@ -78,6 +89,18 @@ export function DecksScreen({
               Mix decks…
             </button>
           )}
+          {/* Long form — their own word for a Passage, and the only route to
+              that screen, which is why it is not conditional the way Mix and
+              Scan are. Beside Mix on purpose: both are "go and look at
+              another set of things", where Scan and New Deck make one. */}
+          <button
+            type="button"
+            data-testid="open-passages"
+            className="link-action"
+            onClick={onOpenPassages}
+          >
+            Long form
+          </button>
           {onOpenImport && (
             <button
               type="button"

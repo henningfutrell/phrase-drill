@@ -2,31 +2,39 @@ import type { Deck, DeckId, DeckStore, Library } from '../../domain'
 import {
   DECKS_STORE,
   MIXES_STORE,
+  PASSAGES_STORE,
   TOMBSTONES_STORE,
   createDatabaseConnection,
   runTransaction,
 } from './database'
 import { splitDuplicateIds } from './duplicate-ids'
-import { buildLibrary, migrateLibraryDecks, migrateLibraryMixes, migrateLibraryTombstones } from './library'
+import {
+  buildLibrary,
+  migrateLibraryDecks,
+  migrateLibraryMixes,
+  migrateLibraryPassages,
+  migrateLibraryTombstones,
+} from './library'
 import { sameLibraryContent } from './library-identity'
 import { fromRecord, toRecord } from './mapping'
-import type { DeckRecord, MixRecord, Tombstone } from './migrations'
+import type { DeckRecord, MixRecord, PassageRecord, Tombstone } from './migrations'
 import { requestPersistence } from './persistence'
 
-/** The three object stores the whole `Library` envelope is written across. */
+/** The four object stores the whole `Library` envelope is written across. */
 interface LibraryStores {
   readonly deckStore: { clear(): Promise<void>; put(value: DeckRecord): Promise<unknown> }
   readonly mixStore: { clear(): Promise<void>; put(value: MixRecord): Promise<unknown> }
+  readonly passageStore: { clear(): Promise<void>; put(value: PassageRecord): Promise<unknown> }
   readonly tombstoneStore: { clear(): Promise<void>; put(value: Tombstone): Promise<unknown> }
 }
 
 /**
- * Replace the whole of their library — Decks, Mixes and Tombstones — on the
- * caller's transaction. Shared by `updateAll` and `importAll`, which write the
- * same three stores in the same order for the same reason: the envelope is one
- * fact, so a replacement that left the Mixes behind would leave their library in
- * a state the user never had. The caller owns the transaction and, through
- * `runTransaction`, the rollback.
+ * Replace the whole of their library — Decks, Mixes, Passages and Tombstones —
+ * on the caller's transaction. Shared by `updateAll` and `importAll`, which
+ * write the same four stores in the same order for the same reason: the
+ * envelope is one fact, so a replacement that left the Mixes or the Passages
+ * behind would leave their library in a state the user never had. The caller owns the
+ * transaction and, through `runTransaction`, the rollback.
  *
  * **One `put` per record, into stores keyed `{ keyPath: 'id' }`** — so two
  * records under one id would collapse here, silently, and this is the exact
@@ -35,16 +43,19 @@ interface LibraryStores {
  * hold an id twice.
  */
 async function replaceAll(
-  { deckStore, mixStore, tombstoneStore }: LibraryStores,
+  { deckStore, mixStore, passageStore, tombstoneStore }: LibraryStores,
   decks: readonly DeckRecord[],
   mixes: readonly MixRecord[],
+  passages: readonly PassageRecord[],
   tombstones: readonly Tombstone[],
 ): Promise<void> {
   await deckStore.clear()
   await mixStore.clear()
+  await passageStore.clear()
   await tombstoneStore.clear()
   for (const record of decks) await deckStore.put(record)
   for (const record of mixes) await mixStore.put(record)
+  for (const record of passages) await passageStore.put(record)
   for (const record of tombstones) await tombstoneStore.put(record)
 }
 
@@ -55,11 +66,11 @@ async function replaceAll(
  * (T075).
  *
  * `exportAll`/`importAll` are the exception, and deliberately so: the
- * `Library` envelope is the whole of their data, which since T059 means
- * Decks *and* saved Mixes. They read and write both stores — `importAll`
- * inside one transaction spanning the two, because a restore that replaced
- * the Decks and then failed before the Mixes would leave their library in a
- * state the user never had.
+ * `Library` envelope is the whole of their data, which since T059 means Decks
+ * *and* saved Mixes, and since schema v7 their long-form Passages as well. They read
+ * and write every one of those stores — `importAll` inside one transaction
+ * spanning them all, because a restore that replaced the Decks and then failed
+ * before the Passages would leave their library in a state the user never had.
  *
  * **Neither ever reads `settings`, and that is still the rule** — but the
  * reason has changed, so the old one is not left here to mislead. It used to
@@ -172,8 +183,9 @@ export function createIndexedDbDeckStore(): DeckStore {
       const db = await getDatabase()
       const decks = (await db.getAll(DECKS_STORE)) as DeckRecord[]
       const mixes = (await db.getAll(MIXES_STORE)) as MixRecord[]
+      const passages = (await db.getAll(PASSAGES_STORE)) as PassageRecord[]
       const tombstones = (await db.getAll(TOMBSTONES_STORE)) as Tombstone[]
-      return buildLibrary(decks, mixes, tombstones, Date.now())
+      return buildLibrary(decks, mixes, passages, tombstones, Date.now())
     },
 
     /**
@@ -192,15 +204,17 @@ export function createIndexedDbDeckStore(): DeckStore {
       update: (stored: Library) => Library,
     ): Promise<{ library: Library; changed: boolean }> {
       const db = await getDatabase()
-      const tx = db.transaction([DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
+      const tx = db.transaction([DECKS_STORE, MIXES_STORE, PASSAGES_STORE, TOMBSTONES_STORE], 'readwrite')
       const deckStore = tx.objectStore(DECKS_STORE)
       const mixStore = tx.objectStore(MIXES_STORE)
+      const passageStore = tx.objectStore(PASSAGES_STORE)
       const tombstoneStore = tx.objectStore(TOMBSTONES_STORE)
 
       return runTransaction(tx, async () => {
         const stored = buildLibrary(
           (await deckStore.getAll()) as DeckRecord[],
           (await mixStore.getAll()) as MixRecord[],
+          (await passageStore.getAll()) as PassageRecord[],
           (await tombstoneStore.getAll()) as Tombstone[],
           Date.now(),
         )
@@ -214,36 +228,45 @@ export function createIndexedDbDeckStore(): DeckStore {
         const next = splitDuplicateIds(update(stored))
         const migratedDecks = migrateLibraryDecks(next)
         const migratedMixes = migrateLibraryMixes(next)
+        const migratedPassages = migrateLibraryPassages(next)
         const migratedTombstones = migrateLibraryTombstones(next)
 
         if (sameLibraryContent(stored, next)) {
           return { library: next, changed: false }
         }
 
-        await replaceAll({ deckStore, mixStore, tombstoneStore }, migratedDecks, migratedMixes, migratedTombstones)
+        await replaceAll(
+          { deckStore, mixStore, passageStore, tombstoneStore },
+          migratedDecks,
+          migratedMixes,
+          migratedPassages,
+          migratedTombstones,
+        )
         return { library: next, changed: true }
       })
     },
 
     async importAll(incoming: Library): Promise<void> {
       // A backup file the user hand-edited is the one thing that mints a duplicated
-      // id, and a restore is the one path that clears all three stores first
-      // (T090). Split rather than refuse: the file is often the only copy of
-      // their phrases left, so the user gets both Decks and one tap of tidying.
+      // id, and a restore is the one path that clears all four record stores
+      // first (T090). Split rather than refuse: the file is often the only copy
+      // of their phrases left, so the user gets both Decks and one tap of tidying.
       const library = splitDuplicateIds(incoming)
       const migratedDecks = migrateLibraryDecks(library)
       const migratedMixes = migrateLibraryMixes(library)
+      const migratedPassages = migrateLibraryPassages(library)
       const migratedTombstones = migrateLibraryTombstones(library)
       const db = await getDatabase()
-      const tx = db.transaction([DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
+      const tx = db.transaction([DECKS_STORE, MIXES_STORE, PASSAGES_STORE, TOMBSTONES_STORE], 'readwrite')
       const stores = {
         deckStore: tx.objectStore(DECKS_STORE),
         mixStore: tx.objectStore(MIXES_STORE),
+        passageStore: tx.objectStore(PASSAGES_STORE),
         tombstoneStore: tx.objectStore(TOMBSTONES_STORE),
       }
 
       await runTransaction(tx, () =>
-        replaceAll(stores, migratedDecks, migratedMixes, migratedTombstones),
+        replaceAll(stores, migratedDecks, migratedMixes, migratedPassages, migratedTombstones),
       )
     },
   }

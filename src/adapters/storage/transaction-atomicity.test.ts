@@ -21,8 +21,8 @@
  *
  * - **Structural** — read back off `idbTransactions`: which transaction carried
  *   which operation, over which stores, in which mode. This is how "the read
- *   and the write are one transaction" and "it spans all three stores" are
- *   pinned; move the `getAll` out of the transaction and these go red
+ *   and the write are one transaction" and "it spans all four record stores"
+ *   are pinned; move the `getAll` out of the transaction and these go red
  *   immediately, whatever the timing happens to be that day.
  * - **Behavioural** — a concurrent write really issued while the read/merge/
  *   write is in flight, and then the store read back to show nothing was lost.
@@ -31,7 +31,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIBRARY_FORMAT, type Deck, type Library } from '../../domain'
 import { failNextWriteTo, idbOperations, idbTransactions, resetFakeIdb, settleIdb } from './idb.test-support'
 import { createIndexedDbDeckStore } from './indexed-db-deck-store'
-import { DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE, openDatabase } from './database'
+import { createIndexedDbPassageStore } from './indexed-db-passage-store'
+import { DECKS_STORE, MIXES_STORE, PASSAGES_STORE, TOMBSTONES_STORE, openDatabase } from './database'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 function library(overrides: Partial<Library> = {}): Library {
@@ -41,6 +42,7 @@ function library(overrides: Partial<Library> = {}): Library {
     exportedAt: 1,
     decks: [],
     mixes: [],
+    passages: [],
     tombstones: [],
     ...overrides,
   }
@@ -60,13 +62,13 @@ function transactionsTouching(store: string): number[] {
   return [...new Set(idbOperations.filter((op) => op.store === store).map((op) => op.transaction))]
 }
 
-describe('DeckStore.updateAll is one transaction over all three stores (T074)', () => {
+describe('DeckStore.updateAll is one transaction over all four record stores (T074)', () => {
   beforeEach(() => {
     resetFakeIdb()
     vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
   })
 
-  it('reads, merges and writes on ONE transaction, holding decks, mixes and tombstones', async () => {
+  it('reads, merges and writes on ONE transaction, holding decks, mixes, passages and tombstones', async () => {
     const store = createIndexedDbDeckStore()
     await store.save({ id: 'd1', name: 'Marché', phrases: [{ id: 'p1', french: 'le pain', english: 'the bread' }] })
     idbOperations.length = 0
@@ -78,7 +80,7 @@ describe('DeckStore.updateAll is one transaction over all three stores (T074)', 
     const carriers = [
       ...new Set(
         idbOperations
-          .filter((op) => [DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE].includes(op.store))
+          .filter((op) => [DECKS_STORE, MIXES_STORE, PASSAGES_STORE, TOMBSTONES_STORE].includes(op.store))
           .map((op) => op.transaction),
       ),
     ]
@@ -86,13 +88,20 @@ describe('DeckStore.updateAll is one transaction over all three stores (T074)', 
 
     const carrier = idbTransactions.get(carriers[0])
     expect(carrier?.mode).toBe('readwrite')
-    expect([...(carrier?.stores ?? [])].sort()).toEqual([DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE].sort())
+    expect([...(carrier?.stores ?? [])].sort()).toEqual(
+      [DECKS_STORE, MIXES_STORE, PASSAGES_STORE, TOMBSTONES_STORE].sort(),
+    )
 
     // The read is INSIDE it, which is the whole claim — not merely that the
     // writes share a transaction.
     const carried = operationsOn(carriers[0])
-    expect(carried.slice(0, 3).sort()).toEqual(
-      [`${DECKS_STORE}:getAll`, `${MIXES_STORE}:getAll`, `${TOMBSTONES_STORE}:getAll`].sort(),
+    expect(carried.slice(0, 4).sort()).toEqual(
+      [
+        `${DECKS_STORE}:getAll`,
+        `${MIXES_STORE}:getAll`,
+        `${PASSAGES_STORE}:getAll`,
+        `${TOMBSTONES_STORE}:getAll`,
+      ].sort(),
     )
     expect(carried).toContain(`${DECKS_STORE}:clear`)
     expect(carried).toContain(`${DECKS_STORE}:put`)
@@ -127,6 +136,42 @@ describe('DeckStore.updateAll is one transaction over all three stores (T074)', 
     expect(names).toContain('Marché (merged)')
   })
 
+  /**
+   * The same claim for a Passage, and it needs its own test rather than
+   * riding on the Deck's: the Passage lives in a different object store, so
+   * "their write cannot be computed away" only holds if THAT store is inside the
+   * merge's transaction too. A `passages` store left off the transaction's
+   * store list would pass every Deck assertion above and still lose a page of
+   * text the user typed while a round-trip was landing.
+   */
+  it('cannot compute away a Passage the user saves while the merge is in flight', async () => {
+    const store = createIndexedDbDeckStore()
+    const passageStore = createIndexedDbPassageStore()
+    await passageStore.save({ id: 'pg1', name: 'Chapitre 1', text: 'Le premier texte.' })
+
+    const herSave = passageStore.save({ id: 'theirs', name: 'Chapitre 2', text: 'Le texte qu’elle vient de taper.' })
+    const merge = store.updateAll((stored) =>
+      library({
+        passages: (stored.passages ?? []).map((p) => ({ ...p, name: `${p.name} (merged)` })),
+      }),
+    )
+    const [, merged] = await Promise.all([herSave, merge])
+    await settleIdb()
+
+    expect(merged.changed).toBe(true)
+    const stored = await passageStore.loadAll()
+    // Both survive, whichever way the two interleaved: their save either commits
+    // before the merge reads — and is merged in, so its name carries the
+    // suffix — or after the merge writes, and stands untouched. There is no
+    // third outcome, and the TEXT the user typed is intact either way. Assert on the
+    // ids and the text rather than on one interleaving's names, because which
+    // of the two orderings the event loop picks is not the property.
+    expect(stored.map((p) => p.id).sort()).toEqual(['theirs', 'pg1'])
+    expect(stored.find((p) => p.id === 'theirs')?.text).toBe('Le texte qu’elle vient de taper.')
+    expect(stored.find((p) => p.id === 'pg1')?.text).toBe('Le premier texte.')
+    expect(stored.find((p) => p.id === 'pg1')?.name).toBe('Chapitre 1 (merged)')
+  })
+
   it('holds the decks store for the whole of the merge, so no other writer can slip in', async () => {
     const store = createIndexedDbDeckStore()
     await store.save({ id: 'd1', name: 'Marché', phrases: [] })
@@ -135,7 +180,7 @@ describe('DeckStore.updateAll is one transaction over all three stores (T074)', 
     // The merge's transaction, with a read outstanding — which is the state
     // `updateAll` is in for the whole of its read/merge/write, since every
     // await it makes is on a request of this same transaction.
-    const merge = db.transaction([DECKS_STORE, MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
+    const merge = db.transaction([DECKS_STORE, MIXES_STORE, PASSAGES_STORE, TOMBSTONES_STORE], 'readwrite')
     const read = merge.objectStore(DECKS_STORE).getAll()
 
     // Their save, issued now. It is its own transaction over the same store, and
@@ -225,6 +270,9 @@ describe('the skip-when-unchanged path in updateAll misses no change (T074)', ()
           deckRecord('d2', 'Gare'),
         ],
         mixes: [{ id: 'm1', name: 'Mornings', deckIds: ['d1'], createdAt: 1, updatedAt: 1 }],
+        passages: [
+          { id: 'pg1', name: 'Chapitre 1', text: 'Le premier texte.', createdAt: 1, updatedAt: 1 },
+        ],
         tombstones: [{ id: 'gone', kind: 'deck' as const, deletedAt: 1 }],
       }),
     )
@@ -241,9 +289,15 @@ describe('the skip-when-unchanged path in updateAll misses no change (T074)', ()
     expect(result.changed).toBe(false)
     expect(idbOperations.filter((op) => op.op === 'clear' || op.op === 'put')).toEqual([])
     const after = await store.exportAll()
-    expect({ decks: after.decks, mixes: after.mixes, tombstones: after.tombstones }).toEqual({
+    expect({
+      decks: after.decks,
+      mixes: after.mixes,
+      passages: after.passages,
+      tombstones: after.tombstones,
+    }).toEqual({
       decks: before.decks,
       mixes: before.mixes,
+      passages: before.passages,
       tombstones: before.tombstones,
     })
   })
@@ -316,6 +370,32 @@ describe('the skip-when-unchanged path in updateAll misses no change (T074)', ()
       'a renamed Mix',
       (s) => ({ ...s, mixes: s.mixes!.map((m) => ({ ...m, name: 'Evenings' })) }),
       (s) => s.mixes?.[0]?.name,
+    ],
+    [
+      'a Passage whose text was rewritten',
+      (s) => ({ ...s, passages: s.passages!.map((p) => ({ ...p, text: 'Le texte réécrit.' })) }),
+      (s) => s.passages?.[0]?.text,
+    ],
+    [
+      'a renamed Passage',
+      (s) => ({ ...s, passages: s.passages!.map((p) => ({ ...p, name: 'Chapitre premier' })) }),
+      (s) => s.passages?.[0]?.name,
+    ],
+    [
+      'a Passage added',
+      (s) => ({
+        ...s,
+        passages: [
+          ...s.passages!,
+          { id: 'pg2', name: 'Chapitre 2', text: 'Le second texte.', createdAt: 2, updatedAt: 2 },
+        ],
+      }),
+      (s) => s.passages?.map((p) => p.id).sort(),
+    ],
+    [
+      'a Passage removed',
+      (s) => ({ ...s, passages: [] }),
+      (s) => s.passages?.length,
     ],
     [
       'a Tombstone added',

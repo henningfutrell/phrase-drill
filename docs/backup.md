@@ -190,6 +190,49 @@ it ever becomes a child-process argument (visible to `ps`) or a log field;
 server itself) redacts the database password out of every field on every log
 line this script writes, including error messages from a failed `pg_dump`.
 
+### What is inside the library blob (schema v7)
+
+`libraries.data` is one JSON document: the `Library` **envelope**. It is the
+same shape the device exports as a backup FILE, the same shape `PUT
+/api/library` stores, and the same shape the merge reads (`docs/sync.md`,
+`docs/server.md`). Its `schemaVersion` is **7**, and it carries `decks`,
+`mixes`, `passages` and `tombstones`, plus the pinned `voice`.
+
+`passages` is what schema v7 added: them **long-form** texts, one record each
+(`{ id, name, text, createdAt, updatedAt }`), hand-typed and exactly as
+irreplaceable as the Phrases. Their Lines are derived at read time and stored
+nowhere, so the text *is* the whole record — and a hand-merge ("Recovering a
+single library") has to carry `passages` across along with the Decks, or it
+restores a deck and drops a page.
+
+Four facts about that file, all load-bearing under stress:
+
+- **A backup whose only content is Passages is a valid file, and restores.**
+  It was not, and that was a real defect found and fixed while Passages were
+  built: `parseLibraryFile`'s "empty" check refused a file with no Decks, no
+  Mixes and no Tombstones — precisely the file a person who only writes
+  long-form entries produces — with the copy for a file that has nothing in it
+  ("Restoring it would have replaced everything on this phone with nothing"),
+  on the one backup the user had. `passages` now counts in that condition beside
+  `decks` and `mixes` (`src/adapters/storage/library.ts`).
+- **A restore still replaces the whole library and never merges.** Unchanged —
+  and it now replaces their Passages too. Restoring an older file over a newer
+  library discards every long-form entry written since that file, exactly as it
+  discards every Phrase.
+- **A backup written by an older build has no `passages` field at all.** Absent
+  means "no Passages" — never "invalid file", and never "clear theirs". A pre-v7
+  file restores exactly as it always did.
+- **The door opens one way only.** A v7 backup cannot be restored by a build
+  still on schema 6: `parseLibraryFile` refuses any file whose `schemaVersion`
+  is greater than that build's `CURRENT_SCHEMA_VERSION`, as `needs-update` —
+  "That backup was saved by a newer version of this app. Update the app on this
+  phone first — nothing on it has been changed." That is deliberate and correct
+  (reading a newer envelope down means writing a shape the build does not
+  understand over the one it does), and it is stated here because the person
+  holding an old phone in front of a good backup will look for it here:
+  **update the app first, then restore.** An old build is not a route back into
+  a v7 file.
+
 ### File naming
 
 `phrase-drill-<ISO-8601 UTC>.sql.gz`, e.g.
