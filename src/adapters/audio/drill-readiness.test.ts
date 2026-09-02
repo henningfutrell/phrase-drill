@@ -31,6 +31,7 @@ function fakeQueue(): GenerationQueue & { enqueue: Mock<GenerationQueue['enqueue
     whenIdle: vi.fn().mockResolvedValue(undefined),
     suspend: vi.fn(),
     resume: vi.fn(),
+    watchRefusals: vi.fn().mockReturnValue(() => {}),
   }
 }
 

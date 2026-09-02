@@ -29,18 +29,59 @@ export interface DrillReadinessResult {
 }
 
 /**
- * Why the Drill will not start, in their words. `none-ready` has two meanings
- * and they need opposite responses, so it has two lines (T036): online, the
- * audio is being made and waiting is right; offline, the audio was cleared to
- * keep the cache under its ceiling and waiting achieves nothing — it comes
- * back with the connection. Saying "still being made" with no network is a
- * promise the app cannot keep, and the one thing it must never leave in doubt
- * is that nothing of theirs was lost.
+ * A Generation refusal, mirrored from `GenerationRefusal`
+ * (adapters/audio/generation-queue.ts) as a plain union — no adapter type
+ * crosses into UI.
  */
-function blockedCopy(reason: 'no-voice' | 'none-ready', online: boolean): string {
+export type GenerationRefusal = 'unauthorized' | 'quota' | 'failed'
+
+/**
+ * What a refusal means for them, and what to do about it. Two of the three are
+ * nothing the user can act on — a refused credential and an exhausted provider
+ * quota both need the owner — so both point at the one control that carries
+ * the cause off the phone. An exhausted network is theirs to retry, so it says
+ * so and does not send them to Diagnostics for something a better signal
+ * fixes.
+ */
+function refusalCopy(refusal: GenerationRefusal): string {
+  if (refusal === 'failed') {
+    return (
+      "This drill's audio couldn't be made — the connection kept dropping. " +
+      'Try again where the signal is better; your phrases are safe.'
+    )
+  }
+  const cause =
+    refusal === 'quota'
+      ? 'the voice service has run out of credit'
+      : "the voice service wouldn't accept this app"
+  return (
+    `This drill's audio can't be made right now — ${cause}. ` +
+    'Waiting will not fix it: open Settings, then Diagnostics, and send the report. ' +
+    'Your phrases are safe.'
+  )
+}
+
+/**
+ * Why the Drill will not start, in their words. `none-ready` has three
+ * meanings and they need different responses. Online with generation still
+ * running, the audio is being made and waiting is right. Offline, the audio
+ * was cleared to keep the cache under its ceiling and waiting achieves
+ * nothing — it comes back with the connection (T036). And when generation was
+ * **refused**, nothing is being made at all: saying "still being made" there
+ * is a promise the app cannot keep, and it is the state that left an "it
+ * isn't playing" report with no way to tell a dead credential from an empty
+ * wallet from a bad signal (2026-09-02). The one thing it must never leave in
+ * doubt is that nothing of theirs was lost.
+ */
+function blockedCopy(
+  reason: 'no-voice' | 'none-ready',
+  online: boolean,
+  refusal: GenerationRefusal | undefined,
+): string {
   if (reason === 'no-voice') {
     return 'No voice has been chosen yet — pick one in Settings before drilling.'
   }
+  if (refusal) return refusalCopy(refusal)
   return online
     ? "This drill's audio isn't ready yet — it's still being made. Try again in a moment."
     : "This drill's audio isn't on this phone right now, and there's no connection to fetch it. " +
@@ -212,6 +253,18 @@ export interface DrillScreenProps {
    */
   readonly suspendGeneration?: () => void
   readonly resumeGeneration?: () => void
+  /**
+   * Subscribes to Generation refusal (docs/glossary.md) — the queue's verdict
+   * that nothing is being made and waiting will not help. Returns its own
+   * unsubscribe, and replays the refusal already settled, because it settles
+   * during the readiness sweep and this screen mounts after it.
+   *
+   * The screen states it rather than the readiness result carrying it: the
+   * sweep answers once, and the refusal for the Reps it just enqueued lands a
+   * moment later, so a value read at check time would be the stale
+   * "generating" in every case that matters.
+   */
+  readonly watchGenerationRefusal?: (listener: (refusal: GenerationRefusal) => void) => () => void
   /** Back to whatever screen launched this Drill (Deck detail or Mix). */
   readonly onExit: () => void
   /** Only used for the 'no-voice' blocked reason. */
@@ -259,6 +312,7 @@ export function DrillScreen({
   releaseAudioRoute,
   suspendGeneration,
   resumeGeneration,
+  watchGenerationRefusal,
   onExit,
   onOpenSettings,
 }: DrillScreenProps) {
@@ -291,6 +345,11 @@ export function DrillScreen({
     { text: string; lang: Language } | undefined
   >(undefined)
   const [, forceRender] = useState(0)
+  // The queue's Generation refusal verdict, or undefined while nothing has
+  // been refused. A render value, not a ref: it is what the blocked copy and
+  // the skipped-count note are built from, and it can arrive after either is
+  // already on screen.
+  const [refusal, setRefusal] = useState<GenerationRefusal | undefined>(undefined)
 
   useEffect(() => {
     let cancelled = false
@@ -338,6 +397,16 @@ export function DrillScreen({
     resumeGenerationRef.current = resumeGeneration
   })
   useEffect(() => () => releaseAudioRouteRef.current?.(), [])
+
+  // One subscription for the screen's life, held through a ref for the same
+  // reason as the pair above: the prop is a fresh arrow on every App render,
+  // and an effect keyed on it would unsubscribe and resubscribe — replaying
+  // the refusal each time — on every unrelated re-render during a Drill.
+  const watchGenerationRefusalRef = useRef(watchGenerationRefusal)
+  useEffect(() => {
+    watchGenerationRefusalRef.current = watchGenerationRefusal
+  })
+  useEffect(() => watchGenerationRefusalRef.current?.(setRefusal), [])
 
   // Generation suspension for the whole of the running phase — the second of
   // its two takes, and the only one that registers a release. Keyed on
@@ -522,7 +591,7 @@ export function DrillScreen({
           Back
         </button>
         <p data-testid="drill-blocked" className="drill-blocked">
-          {blockedCopy(phase.reason, phase.online)}
+          {blockedCopy(phase.reason, phase.online, refusal)}
         </p>
         {phase.reason === 'no-voice' && onOpenSettings && (
           <button
@@ -564,6 +633,15 @@ export function DrillScreen({
             {phase.online
               ? 'have no audio yet — skipped'
               : 'have no audio on this phone — skipped until you’re online'}
+          </p>
+        )}
+        {/* The partial case, and how a dead credential hides for weeks: most
+            of the Deck has audio from before, so the Drill starts and only
+            the skipped count moves. That count is true and says nothing about
+            why, so the refusal is stated under it. */}
+        {refusal && phase.skippedCount > 0 && (
+          <p data-testid="drill-refusal-note" className="drill-skipped">
+            {refusalCopy(refusal)}
           </p>
         )}
         <button

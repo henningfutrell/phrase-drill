@@ -51,6 +51,15 @@ export type GenerationStatus =
   | { kind: 'quota' }
   | { kind: 'failed' }
 
+/**
+ * The subset of `GenerationStatus` that means nothing is in flight and
+ * nothing will be: `generating` settles on its own and `ready` needs no
+ * telling. Derived from `GenerationStatus['kind']` rather than written out,
+ * so a fourth terminal verdict added above cannot be silently left out of
+ * what the screens are told.
+ */
+export type GenerationRefusal = Exclude<GenerationStatus['kind'], 'generating' | 'ready'>
+
 export interface GenerationQueueDeps {
   readonly synthClient: SynthClient
   readonly clipCache: ClipCache
@@ -128,6 +137,31 @@ export interface GenerationQueue {
    */
   suspend(): void
   resume(): void
+  /**
+   * Generation refusal: the three verdicts that mean nothing is being made
+   * and waiting changes nothing — the voice service refused the credential
+   * (`unauthorized`), the provider is out of credit (`quota`), or the
+   * network ran out of retries (`failed`).
+   *
+   * It exists because the verdict was previously reachable only through
+   * `statusFor(unitId)` — which needs the caller to already know which unit
+   * to ask about — and through the Diagnostic error log, which only the
+   * owner ever reads. The drill screen has neither: it knows only that no
+   * Rep is ready, so it said "it is still being made", which is false in all
+   * three cases and leaves their waiting on audio that is not coming.
+   *
+   * **Replays the most recent refusal on subscribe.** A refusal settles when
+   * the sweep runs — on the Decks screen, or at drill start — and the screen
+   * that states it mounts afterwards, so a subscription with no replay would
+   * miss the only refusal there was. One value, not a log: what a screen
+   * needs is the current verdict, and the per-unit history is already in the
+   * error log.
+   *
+   * Returns its own unsubscribe. The queue lives for the app's life
+   * (`main.tsx` `showApp`), so a watcher that is not released accumulates
+   * once per Drill.
+   */
+  watchRefusals(listener: (refusal: GenerationRefusal) => void): () => void
 }
 
 /**
@@ -166,9 +200,19 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   let suspended = false
   let resumeWaiters: Array<() => void> = []
 
+  /** The last refusal this queue settled, and who is listening for the next
+   * one — see the port's `watchRefusals()` doc. One value, replayed on
+   * subscribe, because a screen wants the current verdict rather than a
+   * history. */
+  let lastRefusal: GenerationRefusal | undefined
+  const refusalWatchers = new Set<(refusal: GenerationRefusal) => void>()
+
   function setStatus(unitId: string, status: GenerationStatus): void {
     statuses.set(unitId, status)
     deps.onStatusChange?.(unitId, status)
+    if (status.kind === 'generating' || status.kind === 'ready') return
+    lastRefusal = status.kind
+    for (const watcher of refusalWatchers) watcher(status.kind)
   }
 
   async function waitOutRateLimit(): Promise<void> {
@@ -317,6 +361,16 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
       const woken = resumeWaiters
       resumeWaiters = []
       for (const resolve of woken) resolve()
+    },
+
+    watchRefusals(listener) {
+      refusalWatchers.add(listener)
+      // The replay, and the reason this is a subscription with state rather
+      // than an event stream — the port's doc has why.
+      if (lastRefusal !== undefined) listener(lastRefusal)
+      return () => {
+        refusalWatchers.delete(listener)
+      }
     },
   }
 }

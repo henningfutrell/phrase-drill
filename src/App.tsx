@@ -1185,6 +1185,7 @@ function App({
           releaseAudioRoute={() => routeHold.release()}
           suspendGeneration={() => generationQueue.suspend()}
           resumeGeneration={() => generationQueue.resume()}
+          watchGenerationRefusal={(listener) => generationQueue.watchRefusals(listener)}
           onExit={() => setDrillTarget(undefined)}
           onOpenSettings={handleOpenSettings}
         />
