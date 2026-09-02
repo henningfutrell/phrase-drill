@@ -251,3 +251,162 @@ doc's. Fixing the design doc is out of scope for this document.
 navigation or labels. How the user reaches Diagnostics is unambiguous in `App.tsx`
 and `SettingsScreen.tsx` and is quoted above. What remains unknown is only what
 the trip is for: the actual behaviour on their hardware.
+
+---
+
+## Check 2 — 2026-09-02 — "it isn't playing"
+
+**Status:** written, not yet sent.
+
+**Reported:** phrase-drill does not play for the user. Nothing else — no screen, no message, no build.
+
+**What was ruled out from here first, so the script does not ask them about any
+of it.** Measured 2026-09-02:
+
+| Checked                              | Result                                                                                              |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| The service is up                    | `GET /` 200, `GET /api/health` `{"status":"ok"}`                                                     |
+| Postgres is up and readable          | `POST /api/login` with a nonexistent user → **401 `invalid-credentials`**, not 500 — the users table was read |
+| The live build                       | `/assets/index-DPoN12Or.js` carries build sha `5e5d9ae` and the string `Route hold` — the same commit as `origin/main` |
+| Playback of cached Clips in that build | Driven by hand in Chromium at `5e5d9ae`: 3-Phrase Deck, clips cached, `Start Drill` → the shared element plays ~1.2 s Clips with 1.5–5 s gaps, the Route hold's second element advancing beside it, zero console errors |
+| The provider                         | ElevenLabs `eleven_multilingual_v2` is current and not deprecated; status page shows August's TTS incidents all resolved, nothing open |
+
+So the server, the database, the deployed commit and the playback path are all
+working. What is left is on their phone or in the account: whether audio can be
+**made** (the credential and the credit behind it), whether the Clips the user had
+are still there, or whether the sound is being made and not heard.
+
+### Part 1 — the script
+
+> Copy everything between the rules below into a message to them, unchanged.
+
+---
+
+Hi — something isn't playing and I can't see your phone from here, so I need
+five short answers. All of it is on the phone, none of it needs the car, and it
+should take about five minutes.
+
+**Short answers are all I need**, and "nothing happens" is a real answer. Please
+don't try to work out why — that's my job.
+
+**1. When you open the app, does it ask you to log in?**
+Close the app completely first (swipe it away), then tap the icon again.
+
+> **Does a screen with **Username** and **Password** appear before you see your
+> decks — yes or no?**
+
+**2. Tap into a deck and start a drill.**
+Tap the deck you normally drill, then **Drill this Deck**. Tell me what you see
+*before* you tap anything else:
+
+> **Is there a **Start Drill** button, or is there a line of grey text instead?**
+>
+> - If there is grey text, **write it out word for word** (or send a
+>   screenshot — easier and better).
+> - If there is a **Start Drill** button, tap it once, wait five seconds, and
+>   answer question 3.
+
+**3. What does it do after you tap Start Drill?**
+Pick the closest one:
+
+> - **"no sound at all, and the screen looks stuck"** — nothing moves.
+> - **"no sound at all, but the words keep changing"** — the French line and the
+>   little dots move along as if it were playing.
+> - **"it plays"** — you hear the French.
+>
+> **Also: did any message appear — red text or grey text? If yes, word for word
+> or a screenshot.**
+
+**4. Now the same drill with the sound coming out of the phone itself.**
+Turn Bluetooth **off** in the phone's own **Settings** app (the grey gear icon,
+not the Settings inside the French app). Turn the phone's volume up with the
+side buttons, and make sure the little switch above them is **not** set to
+silent. Then start the same drill again.
+
+> **Do you hear the French now — yes or no?**
+
+Turn Bluetooth back on afterwards.
+
+**5. Send me the app's own report.**
+
+1. Go to the **Decks** screen (tap **Back** until you're there).
+2. Tap **Settings**, top right.
+3. Scroll to the bottom, to the card headed **Diagnostics**.
+4. Tap **Open diagnostics**.
+5. Tap **Copy report**. The word **Copied.** should appear under the button.
+6. Paste it into a message to me and send it.
+
+If you get **"Couldn't copy — select and copy the text below instead."**, just
+send me a screenshot of that block of text.
+
+> **Nothing to answer — just send the report.**
+
+That's everything. Five answers and one pasted report.
+
+---
+
+### Part 2 — why each step exists
+
+**The three hypotheses this check separates.** All three produce "it isn't
+playing" and all three need different fixes:
+
+1. **Audio cannot be made.** `/api/tts` is refusing: a dead or rotated
+   `ELEVENLABS_API_KEY`, or the provider out of credit. Every Rep then reports
+   unready, the Drill is blocked, and — in the build the user is on (`5e5d9ae`) —
+   the screen says *"This drill's audio isn't ready yet — it's still being made.
+   Try again in a moment."* whatever the real reason. That copy is a promise the
+   app cannot keep, and it is why this report arrived with no cause attached.
+   Fixed on `main` (`016ebc7` RED, `f835ae4` GREEN — Generation refusal) and
+   **not released**, so their build still says the old line.
+2. **Audio was made and is not being heard.** The ringer switch, the volume, or
+   the Bluetooth route — including the A2DP hypothesis Check 1 exists for, in
+   its worst form (silence rather than choppiness), which the Route hold shipped
+   unproven on 2026-08-24 and could itself cause if iOS refuses to play a second
+   element beside the Clip element.
+3. **The user is on the other build.** `https://<owner>.github.io/phrase-drill/`
+   still answered **200 on 2026-09-02**, serving `origin/gh-pages` @ `98062b4`
+   (`dist/` from `01e2869`, 202 commits behind). Its bundle
+   (`/phrase-drill/assets/index-BYC2Tj_Q.js`) was fingerprinted the same day:
+   **no `api/tts`, no `Log in`, no `api/library`, and a direct
+   `api.elevenlabs.io` call** — the pre-server build, which needs a provider key
+   *on the device* and has no server behind it. A phone on that URL can generate
+   nothing at all, so its Drill blocks exactly like hypothesis 1. The user said on
+   2026-08-24 that their icon is the Render build; that was nine days before this
+   symptom, so it is re-asked in the cheapest possible way rather than assumed.
+
+**Step → inference.**
+
+| Step | Observation                                            | What it settles                                                                                                                                                     |
+| ---- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1** | A **Username**/**Password** screen appears             | **Which build the user is on, definitively.** The Render build has a login screen (T050); the Pages build has none and opens straight on Decks. One yes/no kills hypothesis 3 either way, and no build sha has to be read aloud. |
+| **2** | Grey text instead of a **Start Drill** button          | The Drill is blocked, and the words say which block: *"No voice has been chosen yet"* is the pinned voice missing (a restore or a wiped device); *"still being made"* is every unready reason including a refusal (hypothesis 1); *"isn't on this phone right now, and there's no connection"* is offline with the Clips evicted. |
+| **3** | Sound vs the screen moving                             | Separates hypothesis 1 from hypothesis 2. **"No sound but the words keep changing"** is the Drill running correctly with nothing audible — the route, the ringer, or the volume, never generation, because only ready Reps enter a Drill. **"Stuck"** with no message is the unlock failure T001 was about, which produces silence with no error. |
+| **4** | The same Drill on the phone's own speaker              | If the French is audible with Bluetooth out of the path, the fault is the output route and the Route hold's own question becomes the live one. If it is silent on the speaker too, nothing about the car is implicated. |
+| **5** | The Diagnostic report                                  | Carries the build sha (confirms step 1 independently), the pinned voice, **Clips ready vs total Phrases**, storage used, last sync, and the last errors captured on the device — where a refusal appears verbatim as `generation unauthorized for phrase …` or `generation quota for phrase …`, and where the Route hold's `held`/`played` numbers appear. It is the one artefact that can distinguish a dead credential from an empty wallet without anyone reading a dashboard. |
+
+**What the owner should check in parallel, off their phone.** Neither is reachable
+from this machine, and either would answer hypothesis 1 outright:
+
+1. ElevenLabs — the account's remaining character credit and whether the key is
+   still valid: https://elevenlabs.io/app/settings/api-keys and
+   https://elevenlabs.io/app/usage
+2. Render — the `phrase-drill` service's logs, for `tts provider error` /
+   `not-configured` lines and for the value of `ELEVENLABS_API_KEY` in the
+   Environment tab: https://dashboard.render.com
+
+**What this script deliberately does not ask.** No build sha, no URL, no
+setting read aloud — step 5 carries all of it behind one control (Check 1's
+reasoning, unchanged). Nothing about the car: this symptom is silence, not
+choppiness, and Check 1 already owns the car trip. Nothing about `/api/tts`,
+IndexedDB eviction, or the Route hold; steps 3 and 4 get the same information
+out of actions the user can perform.
+
+**Where the script's wording came from.** Screen names and button labels read
+out of source at `f835ae4`: `src/ui/LoginScreen.tsx` (**Username**,
+**Password**, **Log in**), `src/ui/DecksScreen.tsx` (**Decks**, **Settings**),
+`src/ui/DeckDetailScreen.tsx` (**Drill this Deck**), `src/ui/DrillScreen.tsx`
+(**Start Drill**, and all three blocked lines quoted in the table above),
+`src/ui/SettingsScreen.tsx` (**Diagnostics**, **Open diagnostics**),
+`src/ui/DiagnosticsScreen.tsx` (**Copy report**, **Copied.**, and the copy
+failure line). The grey-vs-red distinction is `src/ui/DrillScreen.css`:
+`.drill-blocked` is `--ink-dim`, `.drill-unlock-error` is `--danger`.
