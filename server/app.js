@@ -377,6 +377,14 @@ export function createApp({
       ttsRequests.failed += 1
       lastTtsFailure = { kind: err.kind ?? 'network', at: Date.now() }
       logger.error('tts provider error', { kind: lastTtsFailure.kind, message: describeError(err) })
+      // A provider rate limit carries its own wait, and the device parks
+      // exactly that long — so the header is the whole point of answering
+      // 429 rather than something terminal. `sendRateLimited` is this
+      // server's one 429 shape, limiter or provider, so a client needs no
+      // second rule to read it.
+      if (err.kind === 'rate-limited') {
+        return sendRateLimited(res, { retryAfterMs: err.retryAfterMs ?? 1000 })
+      }
       sendJson(res, statusForProviderError(err), { error: err.kind ?? 'network' })
     }
   }
@@ -690,11 +698,14 @@ function statusForProviderError(err) {
   switch (err.kind) {
     case 'not-configured':
       return 503
-    // 402, not 429 (T035). A 429 from this server means one thing only —
-    // its own limiter, with a `Retry-After` and a remedy of waiting. The
-    // provider being out of credits is not a wait; it is a bill, and a
-    // client that retries it forever is burning battery on a call that
-    // cannot succeed until somebody pays.
+    // 402 for a bill, 429 for a wait (T035, corrected 2026-09-02). A 429
+    // from here used to mean one thing only — this server's own limiter —
+    // and the provider's 429 was folded into `quota`/402, which the device
+    // treats as terminal. Both statuses now mean exactly what they say to
+    // the device: 429 is "ask again in `Retry-After`", from either limiter,
+    // and 402 is "somebody must pay", which no wait fixes.
+    case 'rate-limited':
+      return 429
     case 'quota':
       return 402
     case 'unreadable':
