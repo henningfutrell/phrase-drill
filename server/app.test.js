@@ -289,7 +289,11 @@ describe('server app (integration, fake upstreams)', () => {
 
   it('says the credential is missing rather than probing with nothing', async () => {
     const upstream = fetchElevenLabsOk()
-    await boot({ elevenLabsFetch: upstream, elevenLabsKey: undefined })
+    // `''`, not `undefined`: an unset or cleared platform variable arrives as
+    // an empty string, which is the state this asserts about — and a
+    // destructuring default would swallow `undefined` and hand the probe the
+    // real key, so the test would pass while proving the opposite.
+    await boot({ elevenLabsFetch: upstream, elevenLabsKey: '' })
     const body = await (await fetch(`${baseUrl}/api/status`)).json()
 
     expect(body.tts.configured).toBe(false)
