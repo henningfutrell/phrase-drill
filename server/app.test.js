@@ -355,6 +355,66 @@ describe('server app (integration, fake upstreams)', () => {
     expect(body.tts.lastFailure).toBeUndefined()
   })
 
+  /**
+   * The other half of "why isn't it playing", and the one no probe can
+   * reach: whether their phone is talking to THIS server at all.
+   *
+   * It matters because a second, three-week-old build of this app is still
+   * live on GitHub Pages, has no server behind it, and calls the provider
+   * directly from the device — a phone on that URL cannot generate anything
+   * and cannot be distinguished from a phone with a broken credential by
+   * anything visible here. The sync engine fetches `/api/library` at launch,
+   * so a timestamp on that route answers it: the user opens the app, and either
+   * this number moves or the user is not on this build.
+   *
+   * Aggregate only — a count and a time. Never a user id, never per-device:
+   * there is one account, so "which device" is a question this endpoint has
+   * no business answering and no need to.
+   */
+  it('reports when a device last synced, so "is the user even on this build" is answerable', async () => {
+    await boot()
+
+    const before = await (await fetch(`${baseUrl}/api/status`)).json()
+    expect(before.library.reads).toBe(0)
+    expect(before.library.writes).toBe(0)
+    expect(before.library.lastAt).toBeUndefined()
+
+    const read = await fetch(`${baseUrl}/api/library`, {
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+    })
+    expect(read.status).toBe(200)
+
+    const after = await (await fetch(`${baseUrl}/api/status`)).json()
+    expect(after.library.reads).toBe(1)
+    expect(after.library.writes).toBe(0)
+    expect(typeof after.library.lastAt).toBe('number')
+  })
+
+  it('counts a push separately from a fetch, so a silent device is not read as an active one', async () => {
+    await boot()
+
+    const wrote = await fetch(`${baseUrl}/api/library`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ format: 'phrase-drill-library', schemaVersion: 1, decks: [] }),
+    })
+    expect(wrote.status).toBe(204)
+
+    const body = await (await fetch(`${baseUrl}/api/status`)).json()
+    expect(body.library.reads).toBe(0)
+    expect(body.library.writes).toBe(1)
+  })
+
+  it('keeps the account out of /api/status entirely', async () => {
+    await boot()
+    await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+
+    const raw = await (await fetch(`${baseUrl}/api/status`)).text()
+    expect(raw).not.toContain(SUB)
+    expect(raw).not.toContain(VALID_TOKEN)
+    expect(raw).not.toContain(VALID_USERNAME)
+  })
+
   it('rejects /api/* requests without a valid bearer token', async () => {
     await boot()
     const noAuth = await fetch(`${baseUrl}/api/library`)
