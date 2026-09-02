@@ -590,4 +590,101 @@ describe('createGenerationQueue', () => {
     await queue.whenIdle()
     expect(has).toHaveBeenCalled()
   })
+
+  /**
+   * Generation refusal (2026-09-02): a unit whose combined status settles to
+   * `unauthorized`, `quota` or `failed` is not "still being made", and the
+   * screen that says so has to hear about it. Before this the verdict lived
+   * only in `statusFor(unitId)` and in the Diagnostic error log, so the drill
+   * screen told them to wait for audio that was never coming — the state that
+   * made a "not playing" report from their impossible to triage.
+   */
+  it('notifies a watcher when a unit is refused, naming which refusal it was', async () => {
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(unauthorized())
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+    })
+    const seen: string[] = []
+    queue.watchRefusals((kind) => seen.push(kind))
+
+    queue.enqueue(PHRASE)
+    await queue.whenIdle()
+
+    expect(seen).toEqual(['unauthorized'])
+  })
+
+  it('tells a quota refusal apart from an unauthorized one', async () => {
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(quota())
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+    })
+    const seen: string[] = []
+    queue.watchRefusals((kind) => seen.push(kind))
+
+    queue.enqueue(PHRASE)
+    await queue.whenIdle()
+
+    expect(seen).toEqual(['quota'])
+  })
+
+  it('says nothing about a unit that generated normally', async () => {
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(8), durationMs: 500 })
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+    })
+    const seen: string[] = []
+    queue.watchRefusals((kind) => seen.push(kind))
+
+    queue.enqueue(PHRASE)
+    await queue.whenIdle()
+
+    expect(seen).toEqual([])
+  })
+
+  /**
+   * The refusal almost always lands BEFORE the screen that needs it exists:
+   * the sweep runs on the Decks screen and on drill start, and the blocked
+   * screen mounts a moment later. A subscription with no replay would
+   * therefore miss the only refusal there was, which is precisely the case
+   * this whole seam exists for.
+   */
+  it('replays the most recent refusal to a watcher that subscribes afterwards', async () => {
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(unauthorized())
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+    })
+
+    queue.enqueue(PHRASE)
+    await queue.whenIdle()
+
+    const seen: string[] = []
+    queue.watchRefusals((kind) => seen.push(kind))
+
+    expect(seen).toEqual(['unauthorized'])
+  })
+
+  it('stops notifying a watcher that has unsubscribed', async () => {
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(unauthorized())
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+    })
+    const seen: string[] = []
+    const unsubscribe = queue.watchRefusals((kind) => seen.push(kind))
+    unsubscribe()
+
+    queue.enqueue(PHRASE)
+    await queue.whenIdle()
+
+    expect(seen).toEqual([])
+  })
 })

@@ -221,7 +221,9 @@ function createFakeSynthClient(): SynthClient & { synthesize: ReturnType<typeof 
  * it: the span is taken twice per Drill (the Start tap and the running-phase
  * effect) and released once, so only the sequence says whether the
  * composition root wired both ends of it. */
-function createFakeGenerationQueue(): GenerationQueue & {
+function createFakeGenerationQueue(
+  refusal?: 'unauthorized' | 'quota' | 'failed',
+): GenerationQueue & {
   enqueued: Array<{ id: string; statements: readonly Statement[] }>
   suspensions: Array<'suspend' | 'resume'>
 } {
@@ -242,6 +244,12 @@ function createFakeGenerationQueue(): GenerationQueue & {
     },
     resume() {
       suspensions.push('resume')
+    },
+    // Replays on subscribe, like the real queue: the refusal is settled long
+    // before the screen that states it mounts.
+    watchRefusals(listener) {
+      if (refusal) listener(refusal)
+      return () => {}
     },
   }
 }
@@ -988,6 +996,32 @@ describe('App wired to the Drill screen', () => {
     expect(container.querySelector('[data-testid="drill-blocked"]')?.textContent).toContain(
       'No voice has been chosen yet',
     )
+  })
+
+  /**
+   * The composition root is the only place that can join the queue's verdict
+   * to the screen that states it, so this is where the join is pinned. A
+   * blocked Drill that reads "still being made" while the queue has already
+   * settled `unauthorized` is the exact state that made a "phrase-drill isn't
+   * playing" report untriageable on 2026-09-02.
+   */
+  it('states the queue\u2019s refusal on the blocked Drill instead of promising audio', async () => {
+    const store = createFakeDeckStore([
+      { id: 'd1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] },
+    ])
+    await renderApp(
+      store,
+      createFakeSettingsStore({ voice: FAKE_VOICE }),
+      createFakeSynthClient(),
+      createFakeGenerationQueue('unauthorized'),
+      createFakeClipCache(new Set()),
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+
+    const blocked = container.querySelector('[data-testid="drill-blocked"]')?.textContent ?? ''
+    expect(blocked).toMatch(/Diagnostics/i)
+    expect(blocked).not.toMatch(/still being made/i)
   })
 
   it('leaves Deck detail in place behind the Drill, so Back from the Drill returns to it', async () => {

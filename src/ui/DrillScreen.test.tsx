@@ -198,6 +198,190 @@ describe('DrillScreen — readiness gate', () => {
     expect(blocked).toMatch(/phrases are safe|nothing.*lost/i)
   })
 
+  /**
+   * Generation refusal (2026-09-02). "It's still being made. Try again in a
+   * moment." is a promise the app cannot keep once the voice service has
+   * refused the work: a dead key, an exhausted provider quota, or a network
+   * that ran out of retries. The user then waits on nothing, forever, and a
+   * report of "it isn't playing" carries no way to tell which of the three
+   * it was. The refusal is known on the device — `GenerationQueue` settles
+   * it per unit — so the screen states it.
+   */
+  it('names an unauthorized refusal instead of promising audio that is not coming', async () => {
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun="phrase"
+        checkReadiness={() =>
+          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready', online: true })
+        }
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        watchGenerationRefusal={(listener) => {
+          listener('unauthorized')
+          return () => {}
+        }}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    const blocked = textOf('drill-blocked') ?? ''
+    expect(blocked).not.toMatch(/still being made|in a moment/i)
+    // The one action that helps: the report is what carries the cause off the phone.
+    expect(blocked).toMatch(/Diagnostics/i)
+    expect(blocked).toMatch(/phrases are safe|nothing.*lost/i)
+  })
+
+  it('says the voice service is out of credit when that is the refusal', async () => {
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun="phrase"
+        checkReadiness={() =>
+          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready', online: true })
+        }
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        watchGenerationRefusal={(listener) => {
+          listener('quota')
+          return () => {}
+        }}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    const blocked = textOf('drill-blocked') ?? ''
+    expect(blocked).toMatch(/credit/i)
+    expect(blocked).not.toMatch(/still being made|in a moment/i)
+  })
+
+  /**
+   * A network refusal is the one of the three the user can act on themselves, so it
+   * gets a different instruction — trying again on a better signal is the
+   * remedy, and sending a report is not.
+   */
+  it('points an exhausted-network refusal at trying again, not at the report', async () => {
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun="phrase"
+        checkReadiness={() =>
+          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready', online: true })
+        }
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        watchGenerationRefusal={(listener) => {
+          listener('failed')
+          return () => {}
+        }}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    const blocked = textOf('drill-blocked') ?? ''
+    expect(blocked).toMatch(/connection|signal/i)
+    expect(blocked).toMatch(/again/i)
+    expect(blocked).not.toMatch(/Diagnostics/i)
+  })
+
+  /**
+   * The ordinary sequence on their phone: the sweep enqueues, the screen
+   * renders "still being made", and the refusal lands a second later. A
+   * screen that only read the refusal at mount would keep the stale promise
+   * on display for the whole of the visit.
+   */
+  it('replaces the promise when the refusal arrives after the screen is already blocked', async () => {
+    let notify: ((kind: 'unauthorized' | 'quota' | 'failed') => void) | undefined
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun="phrase"
+        checkReadiness={() =>
+          Promise.resolve({ ready: [], skippedCount: 2, canStart: false, reason: 'none-ready', online: true })
+        }
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        watchGenerationRefusal={(listener) => {
+          notify = listener
+          return () => {}
+        }}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    expect(textOf('drill-blocked')).toMatch(/still being made/i)
+
+    await act(async () => {
+      notify?.('unauthorized')
+      await flushMicrotasks()
+    })
+
+    expect(textOf('drill-blocked')).not.toMatch(/still being made/i)
+  })
+
+  /**
+   * The partial case, which is how a dying key hides for weeks: most of the
+   * Deck has audio from before, so the Drill starts and only the count of
+   * skipped Phrases moves. "have no audio yet — skipped" is true and says
+   * nothing about why, so the refusal is stated beside it.
+   */
+  it('states the refusal beside the skipped count when the Drill can still start', async () => {
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun="phrase"
+        checkReadiness={() => Promise.resolve(ready([bonjour], 3))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        watchGenerationRefusal={(listener) => {
+          listener('unauthorized')
+          return () => {}
+        }}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+
+    expect(testid('drill-start')).not.toBeNull()
+    expect(textOf('drill-refusal-note')).toMatch(/Diagnostics/i)
+  })
+
+  it('unsubscribes from refusals when the screen goes away', async () => {
+    const unsubscribe = vi.fn()
+    render(
+      <DrillScreen
+        title="Home"
+        repNoun="phrase"
+        checkReadiness={() => Promise.resolve(ready([bonjour]))}
+        speech={instantSpeech()}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        watchGenerationRefusal={() => unsubscribe}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    expect(unsubscribe).not.toHaveBeenCalled()
+
+    // Re-rendered away rather than unmounted, so `afterEach` still owns the
+    // one unmount of this root. Leaving the screen is what has to release the
+    // subscription: the queue lives for the app's life, so a watcher left
+    // behind by every Drill accumulates for the whole session.
+    act(() => {
+      root.render(<p>gone</p>)
+    })
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+
   it('says an excluded Phrase is waiting on a connection, not on generation, while offline', async () => {
     render(
       <DrillScreen
