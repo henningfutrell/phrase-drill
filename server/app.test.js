@@ -517,12 +517,33 @@ describe('server app (integration, fake upstreams)', () => {
       expect(res.status).toBe(503)
     })
 
-    // T035: 402, not 429. "The provider is out of credits" and "you are
-    // asking this server too fast" are different facts with different
-    // remedies, and collapsing them onto one status is what made a whole
-    // library's worth of Phrases die on our own limiter.
-    it('returns 402 when the upstream reports quota exhaustion after retrying', async () => {
-      await boot({ elevenLabsFetch: fetchThatFailsWith(429) })
+    /**
+     * **An upstream 429 is a wait, not a wall — and this used to answer 402.**
+     * T035 split "you are asking this server too fast" (our limiter, 429)
+     * from "the provider is out of credits" (402) at the device boundary, and
+     * that split is right. It was applied to the wrong signal here:
+     * ElevenLabs answers a rate limit with **429** and an exhausted account
+     * with **401 `quota_exceeded`**, so mapping 429 → 402 told the device
+     * "this will never succeed" about the one provider failure that always
+     * succeeds a second later. `generation-queue.ts` treats `quota` as
+     * terminal and never retries it, so a burst during a cold sweep marked
+     * Phrases permanently unready with no message — the same class of defect
+     * T035 fixed, re-introduced one layer up.
+     */
+    it('returns 429 with Retry-After when the upstream rate-limits us', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsRefusing(429, { detail: { status: 'too_many_concurrent_requests' } }) })
+      const res = await fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: ttsBody(),
+      })
+      expect(res.status).toBe(429)
+      expect(await res.json()).toEqual({ error: 'rate-limited' })
+      expect(Number(res.headers.get('retry-after'))).toBeGreaterThanOrEqual(1)
+    })
+
+    it('returns 402 only when the upstream says the account is exhausted', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsRefusing(401, { detail: { status: 'quota_exceeded' } }) })
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
         headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
@@ -530,7 +551,17 @@ describe('server app (integration, fake upstreams)', () => {
       })
       expect(res.status).toBe(402)
       expect(await res.json()).toEqual({ error: 'quota' })
-      expect(res.headers.get('retry-after')).toBe(null)
+    })
+
+    it('still returns 503 when the upstream rejects the key itself', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsRefusing(401, { detail: { status: 'invalid_api_key' } }) })
+      const res = await fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: ttsBody(),
+      })
+      expect(res.status).toBe(503)
+      expect(await res.json()).toEqual({ error: 'not-configured' })
     })
 
     // Defect 2 (F6 audit): a short body must not be cached as a complete
