@@ -13,6 +13,16 @@ const TRANSLATE_MAX_TEXT_CHARS = 500
 const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
+ * How long a credential probe's verdict is served before another is taken.
+ *
+ * Five minutes: long enough that polling `/api/status` cannot become a bill,
+ * short enough that a key rotated or a wallet topped up shows as fixed inside
+ * one coffee. A probe is a paid call (`elevenlabs-client.js` `probe()`), so
+ * this number is a cost decision, not a caching nicety.
+ */
+const PROBE_TTL_MS = 5 * 60 * 1000
+
+/**
  * The floor a synthesized clip's body must clear before it is trusted enough
  * to cache (F6 audit, defect 2). There was no floor at all: no minimum size,
  * no checksum, no MP3 validity check anywhere between what the provider
@@ -157,6 +167,62 @@ export function createApp({
 }) {
   const serveStatic = createStaticHandler(distDir)
 
+  /**
+   * What `/api/status` reports about `/api/tts`, kept in this process and
+   * nowhere else. In-memory on purpose: it is an operational reading, not a
+   * record, and the alternative is a table nobody prunes for a number that is
+   * only interesting while the process that took it is alive. A deploy resets
+   * it, which is honest — after a deploy nothing is known yet.
+   *
+   * `failed` counts every answer that was not a clip, and `lastFailure`
+   * carries the provider's kind and when it happened. No user id, no phrase
+   * text, no hash: a count and a kind are all an operator needs to know that
+   * their library has stopped filling.
+   */
+  const ttsRequests = { total: 0, failed: 0 }
+  let lastTtsFailure
+
+  /** The cached credential probe — see `probeCredential`. */
+  let credentialProbe
+  let credentialProbeInFlight
+
+  /**
+   * The provider probe, taken at most once per `PROBE_TTL_MS` and never
+   * concurrently.
+   *
+   * Both bounds exist because a probe is a real, paid synthesis call: without
+   * the TTL anything polling this endpoint spends the credit it is reporting
+   * on, and without the in-flight latch a burst of callers on a cold process
+   * each start their own.
+   */
+  async function probeCredential() {
+    const now = Date.now()
+    if (credentialProbe && now - credentialProbe.checkedAt < PROBE_TTL_MS) return credentialProbe
+    if (credentialProbeInFlight) return credentialProbeInFlight
+
+    credentialProbeInFlight = (async () => {
+      try {
+        const result = await elevenLabs.probe()
+        credentialProbe = { ...result, checkedAt: Date.now() }
+      } catch (err) {
+        // A probe that throws is still an answer about reachability, and it
+        // must never become a 500 on the one endpoint an operator reaches for
+        // when something is already broken.
+        credentialProbe = {
+          configured: true,
+          credential: 'unreachable',
+          detail: describeError(err),
+          checkedAt: Date.now(),
+        }
+      } finally {
+        credentialProbeInFlight = undefined
+      }
+      return credentialProbe
+    })()
+
+    return credentialProbeInFlight
+  }
+
   async function handleLogin(req, res) {
     let body
     try {
@@ -258,6 +324,13 @@ export function createApp({
 
     const hash = computeClipHash({ provider, modelId, voiceId, lang, text })
 
+    // Counted from here, once the request is known to be a real ask for a
+    // real clip: a malformed body or our own rate limit is not the provider
+    // answering, and folding either in would make `/api/status`'s numbers
+    // mean two things at once. A cache hit counts — it is a Clip their device
+    // asked for and got.
+    ttsRequests.total += 1
+
     const cached = await clipStore.get(hash)
     if (cached) return sendClip(res, cached)
 
@@ -284,6 +357,11 @@ export function createApp({
       }
       sendClip(res, clip)
     } catch (err) {
+      // The one place that knows a device asked for audio and did not get
+      // it. Kind and time only — never the text, the hash or the session.
+      ttsRequests.failed += 1
+      lastTtsFailure = { kind: err.kind ?? 'network', at: Date.now() }
+      logger.error('tts provider error', { kind: lastTtsFailure.kind, message: describeError(err) })
       sendJson(res, statusForProviderError(err), { error: err.kind ?? 'network' })
     }
   }
@@ -488,6 +566,39 @@ export function createApp({
 
       if (url.pathname === '/api/health') {
         sendJson(res, 200, { status: 'ok' })
+        return
+      }
+
+      /**
+       * Why audio is not being made, readable by anyone who can reach this
+       * service and without their phone.
+       *
+       * **Unauthenticated, deliberately.** The operator has no session — the
+       * only account is theirs — so an authenticated status endpoint answers
+       * only in the one situation where the answer is already available. What
+       * it discloses is bounded to that decision: a coarse verdict, the
+       * provider's own status word, two counters and two timestamps. No key,
+       * no account figures, no user id, no phrase text, no hash, nothing that
+       * distinguishes one device from another. It says "this deployment's
+       * voice credential is being refused", which is a fact about our
+       * operations, not about them.
+       *
+       * `/api/health` stays exactly `{"status":"ok"}` — it is the platform's
+       * liveness probe, it must not depend on a third party, and it must not
+       * pay for a synthesis call to answer.
+       */
+      if (url.pathname === '/api/status') {
+        const probe = await probeCredential()
+        sendJson(res, 200, {
+          tts: {
+            configured: probe.configured,
+            credential: probe.credential,
+            detail: probe.detail,
+            checkedAt: probe.checkedAt,
+            requests: { total: ttsRequests.total, failed: ttsRequests.failed },
+            ...(lastTtsFailure ? { lastFailure: lastTtsFailure } : {}),
+          },
+        })
         return
       }
 

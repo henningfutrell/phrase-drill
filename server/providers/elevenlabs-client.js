@@ -25,6 +25,17 @@ const OUTPUT_FORMAT = 'mp3_44100_128'
 const MP3_BYTES_PER_MS_AT_128KBPS = 16 // must match OUTPUT_FORMAT above
 
 /**
+ * What `probe()` sends: one character, in the pinned model, to a voice from
+ * the app's own catalogue (`src/adapters/audio/voice-catalogue.ts` — Rachel).
+ * A probe has to go down the paid path to be worth anything, so it is made
+ * as small as a paid call can be. The voice matters only in that it must
+ * exist; nothing keys a Clip off a probe.
+ */
+const PROBE_VOICE_ID = '21m00Tcm4TlvDq8ikWAM'
+const PROBE_MODEL_ID = 'eleven_multilingual_v2'
+const PROBE_TEXT = '.'
+
+/**
  * The only module that holds `ELEVENLABS_API_KEY` or names ElevenLabs'
  * endpoint shape — the server-side swap seam, same discipline the device
  * adapter it replaces (`src/adapters/audio/eleven-labs-synth-client.ts`)
@@ -50,6 +61,76 @@ export function createElevenLabsProvider({ apiKey, fetchImpl = fetch, queue, ret
         }),
       )
     },
+
+    /**
+     * Asks ElevenLabs whether the key this process holds still works, and
+     * why not when it does not.
+     *
+     * **Down the synthesis path, not a metadata endpoint.** The key is
+     * scoped to synthesis only — `GET /v1/voices` answers 401
+     * `missing_permissions` (verified 2026-08-02, `voice-catalogue.ts`) — so
+     * a subscription or voices call cannot tell a dead key from an
+     * under-privileged one. One character against the endpoint the app
+     * actually uses answers the question that was asked, and costs one
+     * character of their credit, which is why `/api/status` caches it.
+     *
+     * **The body decides, not the status.** An exhausted account and a bad
+     * key are both 401; `detail.status` is `quota_exceeded` for the first and
+     * `invalid_api_key` (or similar) for the second, and the two need
+     * different actions from a human. Reported verbatim rather than
+     * re-worded, because the provider's own word is the fact and any synonym
+     * of ours is a guess about their taxonomy.
+     *
+     * Never throws and never retries: a verdict, including
+     * `credential: 'unreachable'`, is the answer. Retrying would turn one
+     * probe into several charges against the thing being measured.
+     */
+    async probe({ voiceId = PROBE_VOICE_ID, modelId = PROBE_MODEL_ID, text = PROBE_TEXT } = {}) {
+      if (!apiKey) return { configured: false, credential: 'unknown', detail: 'ELEVENLABS_API_KEY is not set' }
+
+      let response
+      try {
+        response = await fetchImpl(`${API_URL}/${voiceId}?output_format=${OUTPUT_FORMAT}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'xi-api-key': apiKey },
+          body: JSON.stringify({ text, model_id: modelId }),
+        })
+      } catch {
+        return { configured: true, credential: 'unreachable', detail: 'network error contacting ElevenLabs' }
+      }
+
+      if (response.ok) return { configured: true, credential: 'ok', detail: `HTTP ${response.status}` }
+
+      const detail = (await readProviderStatus(response)) ?? `HTTP ${response.status}`
+      if (detail === 'quota_exceeded') return { configured: true, credential: 'no-credit', detail }
+      if (response.status === 401 || response.status === 403) {
+        return { configured: true, credential: 'rejected', detail }
+      }
+      if (response.status === 429) return { configured: true, credential: 'rate-limited', detail }
+      return { configured: true, credential: 'unreachable', detail }
+    },
+  }
+}
+
+/**
+ * ElevenLabs' own word for what went wrong, out of an error body shaped
+ * `{"detail": {"status": "quota_exceeded", ...}}` — or `{"detail": "..."}`,
+ * which some of their errors use instead.
+ *
+ * Returns `undefined` rather than throwing on anything unexpected: the
+ * caller has a status code to fall back on, and a probe that failed to read
+ * an error body must not become an error of its own. Only the `status` word
+ * is taken — never `message`, which can quote request content.
+ */
+async function readProviderStatus(response) {
+  try {
+    const body = await response.json()
+    const detail = body?.detail
+    if (typeof detail === 'string') return detail
+    if (typeof detail?.status === 'string') return detail.status
+    return undefined
+  } catch {
+    return undefined
   }
 }
 
