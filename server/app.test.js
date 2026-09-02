@@ -111,6 +111,20 @@ function fetchElevenLabsOk() {
   return impl
 }
 
+/**
+ * An ElevenLabs upstream that refuses with a status AND a body — the body is
+ * the point: `quota_exceeded` and `invalid_api_key` both arrive as 401, and
+ * only the body says which.
+ */
+function fetchElevenLabsRefusing(status, body) {
+  const impl = async () => {
+    impl.calls += 1
+    return { ok: false, status, json: async () => body, text: async () => JSON.stringify(body) }
+  }
+  impl.calls = 0
+  return impl
+}
+
 function fetchAnthropicOk(phrases) {
   return async (url, init) => {
     if (init.headers['x-api-key'] !== SECRET_ANTHROPIC_KEY) throw new Error('wrong key used against fake upstream')
@@ -157,7 +171,14 @@ describe('server app (integration, fake upstreams)', () => {
   /** The counting fake upstream this boot wired in — `.calls` is what the T063 tests assert on. */
   let elevenLabsUpstream
 
-  async function boot({ elevenLabsFetch = fetchElevenLabsOk(), anthropicFetch = fetchAnthropicOk([]) } = {}) {
+  async function boot({
+    elevenLabsFetch = fetchElevenLabsOk(),
+    anthropicFetch = fetchAnthropicOk([]),
+    // `undefined` is a real deployment state — the local dev stack and any
+    // machine without the secret — and `/api/status` must say so rather than
+    // probe with nothing. Passed explicitly so the default stays "configured".
+    elevenLabsKey = SECRET_ELEVENLABS_KEY,
+  } = {}) {
     elevenLabsUpstream = elevenLabsFetch
     libraryStore = await newLibraryStore()
     clipStore = await newClipStore()
@@ -168,7 +189,7 @@ describe('server app (integration, fake upstreams)', () => {
 
     logger = collectingLogger()
     const elevenLabs = createElevenLabsProvider({
-      apiKey: SECRET_ELEVENLABS_KEY,
+      apiKey: elevenLabsKey,
       fetchImpl: elevenLabsFetch,
       queue: createBoundedQueue({ concurrency: 4 }),
       retries: 1,
@@ -216,6 +237,118 @@ describe('server app (integration, fake upstreams)', () => {
     const res = await fetch(`${baseUrl}/api/health`)
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ status: 'ok' })
+  })
+
+  /**
+   * `/api/status` (2026-09-02). Generation failing is invisible from outside
+   * this process: `/api/tts` needs her session, the provider's verdict is
+   * mapped to a lossy HTTP status on the way to the device, and the only
+   * record is a log line on a host nobody watches. So "phrase-drill isn't
+   * playing" cost a round trip through a non-technical user in another
+   * country to answer at all. This endpoint answers it with one unauthenticated
+   * GET: does the credential this server holds still work, and what has
+   * `/api/tts` actually been doing.
+   *
+   * Deliberately public and deliberately coarse — a verdict and the
+   * provider's own status word, never a key, never a number about the
+   * account, never anything of hers.
+   */
+  it('GET /api/status needs no auth and reports a working credential', async () => {
+    await boot()
+    const res = await fetch(`${baseUrl}/api/status`)
+
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.tts.configured).toBe(true)
+    expect(body.tts.credential).toBe('ok')
+    expect(typeof body.tts.checkedAt).toBe('number')
+    expect(JSON.stringify(body)).not.toContain(SECRET_ELEVENLABS_KEY)
+  })
+
+  it('reports a rejected credential, with the provider’s own word for it', async () => {
+    await boot({ elevenLabsFetch: fetchElevenLabsRefusing(401, { detail: { status: 'invalid_api_key' } }) })
+    const body = await (await fetch(`${baseUrl}/api/status`)).json()
+
+    expect(body.tts.credential).toBe('rejected')
+    expect(body.tts.detail).toBe('invalid_api_key')
+  })
+
+  /**
+   * The distinction that matters most and is the easiest to lose: ElevenLabs
+   * answers an exhausted account with **401**, the same status as a bad key.
+   * "Rotate the key" and "pay the bill" are different actions, so the body's
+   * own `status` decides, not the HTTP code.
+   */
+  it('tells an exhausted account apart from a bad key, though both are 401', async () => {
+    await boot({ elevenLabsFetch: fetchElevenLabsRefusing(401, { detail: { status: 'quota_exceeded' } }) })
+    const body = await (await fetch(`${baseUrl}/api/status`)).json()
+
+    expect(body.tts.credential).toBe('no-credit')
+    expect(body.tts.detail).toBe('quota_exceeded')
+  })
+
+  it('says the credential is missing rather than probing with nothing', async () => {
+    const upstream = fetchElevenLabsOk()
+    await boot({ elevenLabsFetch: upstream, elevenLabsKey: undefined })
+    const body = await (await fetch(`${baseUrl}/api/status`)).json()
+
+    expect(body.tts.configured).toBe(false)
+    expect(body.tts.credential).toBe('unknown')
+    expect(upstream.calls).toBe(0)
+  })
+
+  /**
+   * A probe costs one character of her credit, so it is taken once and
+   * reused. Without this, anything watching the endpoint on a loop would
+   * spend the account it exists to report on.
+   */
+  it('probes the provider once and serves the cached verdict afterwards', async () => {
+    const upstream = fetchElevenLabsOk()
+    await boot({ elevenLabsFetch: upstream })
+
+    const first = await (await fetch(`${baseUrl}/api/status`)).json()
+    const second = await (await fetch(`${baseUrl}/api/status`)).json()
+
+    expect(upstream.calls).toBe(1)
+    expect(second.tts.checkedAt).toBe(first.tts.checkedAt)
+  })
+
+  /**
+   * The counters are the half a probe cannot cover: they say what her device
+   * actually got, so "generation has been failing for two days" is readable
+   * without her phone and without a log console.
+   */
+  it('counts what /api/tts really answered, so a failing library sweep is visible', async () => {
+    await boot({ elevenLabsFetch: fetchThatFailsWith(401) })
+
+    const refused = await fetch(`${baseUrl}/api/tts`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+      body: ttsBody(),
+    })
+    expect(refused.status).toBe(503)
+
+    const body = await (await fetch(`${baseUrl}/api/status`)).json()
+    expect(body.tts.requests.total).toBe(1)
+    expect(body.tts.requests.failed).toBe(1)
+    expect(body.tts.lastFailure.kind).toBe('not-configured')
+    expect(typeof body.tts.lastFailure.at).toBe('number')
+  })
+
+  it('counts a served clip as served', async () => {
+    await boot()
+
+    const ok = await fetch(`${baseUrl}/api/tts`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+      body: ttsBody(),
+    })
+    expect(ok.status).toBe(200)
+
+    const body = await (await fetch(`${baseUrl}/api/status`)).json()
+    expect(body.tts.requests.total).toBe(1)
+    expect(body.tts.requests.failed).toBe(0)
+    expect(body.tts.lastFailure).toBeUndefined()
   })
 
   it('rejects /api/* requests without a valid bearer token', async () => {
