@@ -182,6 +182,21 @@ export function createApp({
   const ttsRequests = { total: 0, failed: 0 }
   let lastTtsFailure
 
+  /**
+   * Whether a device is talking to this server at all, and when it last did.
+   * `/api/library` is the route the sync engine touches at launch, after a
+   * change, and on reconnect, so it is the one signal that separates "her
+   * phone is on this build and something else is wrong" from "her phone is
+   * not on this build" — the second is a live possibility while the old
+   * Pages deploy, which has no server behind it, still answers.
+   *
+   * Aggregate, never per-device: there is one account, so a breakdown would
+   * add nothing an operator can act on and would put her usage pattern on a
+   * public endpoint.
+   */
+  const libraryCalls = { reads: 0, writes: 0 }
+  let lastLibraryAt
+
   /** The cached credential probe — see `probeCredential`. */
   let credentialProbe
   let credentialProbeInFlight
@@ -467,6 +482,11 @@ export function createApp({
   async function handleLibraryGet(req, res, key) {
     const budget = libraryLimiter.allow(key)
     if (!budget.ok) return sendRateLimited(res, budget)
+    // Counted before the row is looked at: a 404 (no library stored yet) is
+    // still a device that reached this server, which is the whole question
+    // these two numbers answer.
+    libraryCalls.reads += 1
+    lastLibraryAt = Date.now()
     const row = await libraryStore.get(key)
     if (!row) return sendJson(res, 404, { error: 'not-found' })
 
@@ -492,6 +512,8 @@ export function createApp({
   async function handleLibraryPut(req, res, key) {
     const budget = libraryLimiter.allow(key)
     if (!budget.ok) return sendRateLimited(res, budget)
+    libraryCalls.writes += 1
+    lastLibraryAt = Date.now()
 
     let body
     try {
@@ -597,6 +619,11 @@ export function createApp({
             checkedAt: probe.checkedAt,
             requests: { total: ttsRequests.total, failed: ttsRequests.failed },
             ...(lastTtsFailure ? { lastFailure: lastTtsFailure } : {}),
+          },
+          library: {
+            reads: libraryCalls.reads,
+            writes: libraryCalls.writes,
+            ...(lastLibraryAt ? { lastAt: lastLibraryAt } : {}),
           },
         })
         return

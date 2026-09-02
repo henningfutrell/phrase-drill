@@ -382,7 +382,11 @@ describe('server app (integration, fake upstreams)', () => {
     const read = await fetch(`${baseUrl}/api/library`, {
       headers: { authorization: `Bearer ${VALID_TOKEN}` },
     })
-    expect(read.status).toBe(200)
+    // 404 — this account has pushed nothing yet — and that is the point: a
+    // device that reached this server is a device that reached this server,
+    // whatever the row says. Counting only successful reads would report a
+    // freshly restored phone as absent.
+    expect(read.status).toBe(404)
 
     const after = await (await fetch(`${baseUrl}/api/status`)).json()
     expect(after.library.reads).toBe(1)
