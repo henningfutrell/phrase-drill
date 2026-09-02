@@ -70,11 +70,51 @@ describe('createElevenLabsProvider', () => {
     })
   })
 
-  it('maps a persistent 429 to quota after retrying', async () => {
+  /**
+   * Corrected 2026-09-02: a persistent 429 is `rate-limited`, not `quota`.
+   * The device never retries `quota` by design, so calling a rate limit a
+   * quota marked Phrases permanently unready for a failure that clears on
+   * its own. It carries the wait it asks for, defaulting to a second when
+   * the response has no usable `Retry-After`.
+   */
+  it('maps a persistent 429 to rate-limited, with the wait it asks for', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 429 })
     const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
-    await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({ kind: 'quota' })
+    await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
+      kind: 'rate-limited',
+      retryAfterMs: 1000,
+    })
     expect(fetchImpl).toHaveBeenCalledTimes(3)
+  })
+
+  it('honours an upstream Retry-After, in seconds', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: { get: (name) => (name === 'retry-after' ? '4' : null) },
+    })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+    await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
+      kind: 'rate-limited',
+      retryAfterMs: 4000,
+    })
+  })
+
+  /**
+   * The half a status code cannot carry: ElevenLabs answers an exhausted
+   * account with 401 and the body says which 401 it is. `quota` here is
+   * terminal on purpose — a wait does not buy credit — so it must not be
+   * reached by anything a wait would fix.
+   */
+  it('maps 401 quota_exceeded to quota, and never retries it', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ detail: { status: 'quota_exceeded' } }),
+    })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
+    await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({ kind: 'quota' })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   it('retries a 429 and succeeds if a later attempt is ok', async () => {

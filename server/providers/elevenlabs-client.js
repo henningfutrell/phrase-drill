@@ -35,6 +35,9 @@ const PROBE_VOICE_ID = '21m00Tcm4TlvDq8ikWAM'
 const PROBE_MODEL_ID = 'eleven_multilingual_v2'
 const PROBE_TEXT = '.'
 
+/** The wait used when a 429 carries no usable `Retry-After` (one second). */
+const DEFAULT_RETRY_AFTER_MS = 1000
+
 /**
  * The only module that holds `ELEVENLABS_API_KEY` or names ElevenLabs'
  * endpoint shape — the server-side swap seam, same discipline the device
@@ -57,7 +60,10 @@ export function createElevenLabsProvider({ apiKey, fetchImpl = fetch, queue, ret
           // a failure reading its response body (F6 audit, defect 3) — both
           // are transient by nature, unlike 'not-configured' (a bad key) or
           // an unrecognized non-ok status, neither of which a retry can fix.
-          isRetryable: (err) => err.kind === 'quota' || err.kind === 'network',
+          // 'rate-limited' replaced 'quota' here on 2026-09-02: a 429 is
+          // transient and worth another attempt, while an account genuinely
+          // out of credit is not — retrying a bill only spends battery.
+          isRetryable: (err) => err.kind === 'rate-limited' || err.kind === 'network',
         }),
       )
     },
@@ -146,11 +152,25 @@ async function callOnce({ apiKey, fetchImpl, text, voiceId, modelId }) {
     throw providerError('network', 'network error contacting ElevenLabs')
   }
 
+  // The body decides, not the status. ElevenLabs answers an exhausted
+  // account with **401 `quota_exceeded`** and a rate limit with **429**, so
+  // the status alone cannot tell "somebody must pay" from "ask again in a
+  // second" — and those two reach the device as a terminal verdict and a
+  // wait respectively. Read once here, where the response still is one.
+  const status = await readProviderStatus(response)
+
   if (response.status === 401 || response.status === 403) {
+    if (status === 'quota_exceeded') {
+      throw providerError('quota', 'ElevenLabs reports the account is out of credit')
+    }
     throw providerError('not-configured', 'ElevenLabs rejected the configured key')
   }
   if (response.status === 429) {
-    throw providerError('quota', 'ElevenLabs rate limit')
+    // Not `quota` (which it was until 2026-09-02, and which the device never
+    // retries): a 429 is this provider pacing us, and the remedy is the wait
+    // it names. `retryAfterMs` rides along so the device is told how long
+    // rather than guessing.
+    throw rateLimitedError(retryAfterMsFrom(response))
   }
   if (!response.ok) {
     throw providerError('network', `ElevenLabs responded ${response.status}`)
@@ -176,4 +196,32 @@ function providerError(kind, message) {
   const err = new Error(message)
   err.kind = kind
   return err
+}
+
+/**
+ * A rate limit, carrying how long to wait. Separate from `providerError`
+ * because `retryAfterMs` is load-bearing: `app.js` puts it in the response's
+ * `Retry-After`, and the device parks exactly that long
+ * (`server-synth-client.ts`) instead of guessing or giving up.
+ */
+function rateLimitedError(retryAfterMs) {
+  const err = new Error(`ElevenLabs is rate limiting this key; retry in ${retryAfterMs}ms`)
+  err.kind = 'rate-limited'
+  err.retryAfterMs = retryAfterMs
+  return err
+}
+
+/**
+ * The wait an upstream 429 asks for, in ms. `Retry-After` in seconds is the
+ * RFC 9110 field; a second is the floor, because a `Retry-After: 0` is an
+ * invitation to hammer, and `DEFAULT_RETRY_AFTER_MS` covers a response with
+ * no usable header — including a fake in a test and a middlebox that ate it.
+ * Tolerates a response with no `headers` at all rather than throwing inside
+ * an error path.
+ */
+function retryAfterMsFrom(response) {
+  const raw = response.headers?.get?.('retry-after')
+  const seconds = Number(raw)
+  if (!Number.isFinite(seconds) || seconds <= 0) return DEFAULT_RETRY_AFTER_MS
+  return Math.max(1000, Math.round(seconds * 1000))
 }
