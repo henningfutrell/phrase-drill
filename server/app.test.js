@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApp } from './app.js'
 import { createLibraryStore, createClipStore } from './db.js'
-import { fakeLibraryPool, fakeClipPool } from './pool.test-support.js'
+import { fakeLibraryPool, fakeClipPool, fakeClipStorage } from './pool.test-support.js'
 import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
@@ -155,7 +155,7 @@ async function newLibraryStore() {
 }
 
 async function newClipStore(options) {
-  const store = createClipStore(fakeClipPool(), options)
+  const store = createClipStore(fakeClipPool(), { storage: fakeClipStorage(), ...options })
   await store.init()
   return store
 }

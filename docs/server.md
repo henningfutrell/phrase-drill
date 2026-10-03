@@ -157,7 +157,7 @@ her next honest push is accepted and archives the bad bytes on the way past.
 
 There is no endpoint and no CLI for this yet — it is a `psql` session
 against the database (Render dashboard → the database → Connect, or
-`docker compose exec postgres psql -U phrase_drill`). Her `library_key` is
+`psql postgresql://postgres:postgres@127.0.0.1:54322/postgres`). Her `library_key` is
 the `users.id` of her account.
 
 ```sql
@@ -841,9 +841,11 @@ when unset, because an unavailable database is a missing environment, not a
 broken change:
 
 ```sh
-docker compose up -d postgres
-# a scratch database this may DROP tables in — never the real one
-SMOKE_DATABASE_URL=postgres://user:pass@host:5432/scratch npm test
+npx supabase start
+# the local stack (it creates and drops its own schema and bucket); key from `npx supabase status -o env`
+SMOKE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres \
+SMOKE_SUPABASE_URL=http://127.0.0.1:54321 \
+SMOKE_SUPABASE_SECRET_KEY=<secret key> npm test
 ```
 
 It also runs the clip job store's contract against the real SQL — the same
@@ -869,11 +871,16 @@ normal redeploy.
 ## Run locally, no cloud account
 
 ```sh
-docker compose up --build
+npx supabase start        # Postgres 54322, API (Auth + Storage) 54321, the `clips` bucket
+docker compose up --build # the app, on http://localhost:8080
 ```
 
-Two services: Postgres and the app. Serves the app at
-`http://localhost:8080`.
+Local dev uses the Supabase CLI stack: Postgres, Auth and Storage in Docker.
+`docker-compose.yml` runs only the app and points it at that stack
+(`DATABASE_URL` to the host's 54322, `SUPABASE_URL` to 54321, through
+`host.docker.internal`). The `clips` bucket is created from
+`supabase/config.toml` on `supabase start`. The Clip bytes live in that
+bucket; the `clips` table holds only metadata and each object's key.
 
 With no provider keys set, the PWA, drilling cached Clips, and the phrase
 library all work once logged in; Speech and Scan return a "not set up" state
@@ -882,14 +889,13 @@ until keys are added. Put real values in a git-ignored `.env` file next to
 
 ```sh
 cp .env.example .env
-# edit .env: real POSTGRES_PASSWORD, ELEVENLABS_API_KEY, ANTHROPIC_API_KEY,
-# SUPABASE_URL, SUPABASE_SECRET_KEY
+# edit .env: ELEVENLABS_API_KEY, ANTHROPIC_API_KEY
+npx supabase start
 docker compose up --build
 ```
 
-There is no non-Docker path any more: Postgres is a real service, not
-embeddable the way `node:sqlite` was, so `docker compose up` is the only
-supported way to run this server locally.
+There is no non-Docker path: the stack needs Docker for Supabase either way.
+`npx supabase status -o env` prints the local URLs and keys.
 
 ## Deploy to production
 
