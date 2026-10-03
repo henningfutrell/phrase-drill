@@ -909,7 +909,7 @@ describe('sslConfigFor', () => {
  * library; staying up through a database blip is the whole point.
  */
 describe('createPool — a dead idle connection must not kill the process (T088)', () => {
-  const URL_WITH_PASSWORD = 'postgres://phrase_drill:s3cr3t-pw@db.example:5432/phrase_drill'
+  const URL_WITH_PASSWORD = 'postgres://phrase_drill:s3cr3t-pw@localhost:5432/phrase_drill'
 
   it('handles the pool error event instead of letting Node rethrow it', async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
