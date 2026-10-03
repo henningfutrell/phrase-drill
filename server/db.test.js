@@ -449,10 +449,15 @@ describe('createClipStore — the growth bound (T071)', () => {
       clock.now = DAY
       await store.get('a')
       await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(pool.rows.get('a').lastUsedAt).toBe(DAY)
+      expect(pool.rows.get('a').lastUsedAt, 'exactly a day: not yet more than one').toBe(0)
 
-      const bump = pool.queries.find((q) => q.text.includes('SET last_used_at = $2'))
-      expect(bump.params).toEqual(['a', DAY, 0])
+      clock.now = DAY + 1
+      await store.get('a')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(pool.rows.get('a').lastUsedAt).toBe(DAY + 1)
+
+      const bump = pool.queries.findLast((q) => q.text.includes('SET last_used_at = $2'))
+      expect(bump.params).toEqual(['a', DAY + 1, 1])
     })
 
     it('serves the hit without waiting for the bump', async () => {

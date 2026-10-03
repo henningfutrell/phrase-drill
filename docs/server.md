@@ -332,7 +332,7 @@ makes no provider call at all. One table:
 ```
 clips (hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL, mime TEXT NOT NULL,
        duration_ms BIGINT NOT NULL, created_at BIGINT NOT NULL,
-       byte_size BIGINT)
+       byte_size BIGINT, last_used_at BIGINT)
 ```
 
 **Why.** Before this the route was a straight proxy, so the same phrase in the
@@ -680,11 +680,18 @@ with one `error` line at boot naming what was provided. It does not refuse to
 boot: this process holds the only off-device copy of her library, and serving
 `GET /api/library` is exactly what a misconfigured deploy must not take away.
 
-**Oldest-first, on the `created_at` the table already carried.** Least
-recently *played* is better policy and would cost a column plus a write on
-every cache hit. On the server a wrongly evicted Clip is one regeneration; on
-the device it is a drill that cannot start offline — which is why the
-device's cache is the LRU one (`docs/scale.md` §6) and this one is not.
+**Least recently used, on `last_used_at` (S8b).** T071 shipped
+oldest-first on `created_at`, on the grounds that LRU costs a column plus a
+write per hit and a wrongly evicted Clip is one regeneration. Both premises
+changed: since S5 a regeneration is a *billed* call against a two-a-day cap,
+and oldest-first evicts exactly the Clips she has drilled longest (her first
+Decks) while keeping one she tried once. The write is not per hit: `get`
+bumps `last_used_at` at most once a day per Clip (`UPDATE … WHERE hash = $1
+AND last_used_at < now − 1 day`), fire-and-forget — the hit never waits on
+it, and a failed bump is a `warn` line, never a failed request. `put` stamps
+it with `created_at`; existing rows are backfilled from `created_at` at boot
+(`ADD COLUMN IF NOT EXISTS` + `WHERE last_used_at IS NULL`, the same shape as
+`byte_size`). A day is the right grain for a ceiling weeks away.
 
 **It cannot reach `libraries`.** Every statement the Clip store issues names
 `clips` literally, and no identifier is ever interpolated, so the set of
@@ -840,7 +847,7 @@ These are deliberate stopping points, not gaps someone forgot to close:
 | ----------------------- | ------------------------------------------------------------ | -------------------------------------------------- |
 | `PORT`                  | `8080`                                                        | HTTP port. Parsed, not coerced (T088): anything that is not a whole number in 1–65535 — including an empty or cleared value, which `Number('')` reads as `0` and `listen(0)` turns into a RANDOM free port — logs an error and falls back to `8080`. |
 | `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `library_versions`, `users`, `sessions`, `clips`. |
-| `CLIP_STORE_MAX_BYTES`  | `314572800` (300 MB)                                          | Ceiling on the shared Clip store; crossing it evicts oldest-first to 90%. Raise it with the database plan, never above what leaves `libraries` room. |
+| `CLIP_STORE_MAX_BYTES`  | `314572800` (300 MB)                                          | Ceiling on the shared Clip store; crossing it evicts least-recently-used to 90%. Raise it with the database plan, never above what leaves `libraries` room. |
 | `DIST_DIR`               | `../dist` (relative to `server/`)                             | Built PWA to serve statically.               |
 | `ELEVENLABS_API_KEY`     | unset                                                         | Speech generation returns `not-configured` if unset.|
 | `ANTHROPIC_API_KEY`      | unset                                                         | Scan reading returns `not-configured` if unset.      |
@@ -903,6 +910,11 @@ already-deployed database on its next restart with no manual step:
   byte_size BIGINT` followed by `UPDATE clips SET byte_size =
   octet_length(bytes) WHERE byte_size IS NULL`. The backfill matches every
   pre-T071 row on the first boot and nothing on every boot after it.
+
+S8b added `clips.last_used_at` the same way: `ADD COLUMN IF NOT EXISTS
+last_used_at BIGINT`, then `UPDATE clips SET last_used_at = created_at WHERE
+last_used_at IS NULL`. `db.postgres.test.js` runs it against a table of the
+pre-S8b shape with a row in it.
 
 **Verifying the SQL before it reaches her.** Every other server test runs
 against `db.test.js`'s `fakePool`, which proves this code issues the SQL it
