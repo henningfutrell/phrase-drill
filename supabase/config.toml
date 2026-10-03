@@ -118,7 +118,12 @@ enabled = true
 # The maximum file size allowed (e.g. "5MB", "500KB").
 file_size_limit = "50MiB"
 
-# Uncomment to configure local storage buckets
+# The Clip store's bucket: private, no policies; only the secret key reads or writes it.
+[storage.buckets.clips]
+public = false
+file_size_limit = "1MiB"
+
+# Uncomment to configure other local storage buckets
 # [storage.buckets.images]
 # public = false
 # file_size_limit = "50MiB"

@@ -1,46 +1,32 @@
 # phrase-drill server (T041/T050) — LOCAL DEV ONLY. Production runs on
 # Render from render.yaml (T053), which this file has no bearing on: Render
-# does not run docker-compose. `docker compose up --build` runs the whole
-# stack locally with no cloud account: the app and Postgres, nothing else —
-# the app authenticates its one user itself (T050), so there is no third
-# service to run or an account with a vendor to hold. Set provider keys in a
-# `.env` file next to this one (git-ignored) — `.env.example` documents
-# every variable.
+# does not run docker-compose. Local dev runs on the Supabase stack, not on a
+# database container of its own: start it first with `npx supabase start`
+# (Postgres on 54322, Auth and Storage on 54321, the `clips` bucket from
+# supabase/config.toml), then `docker compose up --build` runs the app
+# against it. The app reaches the host's stack through host.docker.internal.
+# Set provider keys in a `.env` file next to this one (git-ignored) —
+# `.env.example` documents every variable.
 #
 # `docker compose down` alone leaves a container running if its service has
 # since been deleted from this file — pass `--remove-orphans` (or use `down
 # --remove-orphans` habitually) to actually stop everything.
 
 services:
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: '${POSTGRES_USER:-phrase_drill}'
-      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:-phrase_drill}'
-      POSTGRES_DB: '${POSTGRES_DB:-phrase_drill}'
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    restart: unless-stopped
-
   phrase-drill:
     build:
       context: .
     ports:
       - '8080:8080'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     environment:
       PORT: '8080'
-      DATABASE_URL: 'postgres://${POSTGRES_USER:-phrase_drill}:${POSTGRES_PASSWORD:-phrase_drill}@postgres:5432/${POSTGRES_DB:-phrase_drill}'
+      # `npx supabase start` defaults. The secret key is the local demo key
+      # (`npx supabase status -o env`), public and valid on this laptop only.
+      DATABASE_URL: 'postgresql://postgres:postgres@host.docker.internal:54322/postgres'
+      SUPABASE_URL: 'http://host.docker.internal:54321'
+      SUPABASE_SECRET_KEY: '${SUPABASE_SECRET_KEY:-sb_secret_N7UND0UgjKTVK-Uodkm0Hg_xSvEMPvz}'
       ELEVENLABS_API_KEY: '${ELEVENLABS_API_KEY:-}'
       ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
-    depends_on:
-      postgres:
-        condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  postgres-data:
