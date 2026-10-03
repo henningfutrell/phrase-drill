@@ -13,7 +13,11 @@
  *
  * **The order matters.** `server.close()` stops accepting NEW connections and
  * waits for the in-flight ones, so the pool is ended only once no request can
- * still need it. `closeIdleConnections()` is what makes that terminate: HTTP
+ * still need it. The clip job runner (S5) stops alongside it: it claims no
+ * more jobs, answers every request waiting on one with a 202 at once (so the
+ * HTTP drain is not held for a generation), and then waits for the provider
+ * calls already made — they are paid for, and their clips and job rows are
+ * written through the pool, so the pool ends after them too. `closeIdleConnections()` is what makes that terminate: HTTP
  * keep-alive sockets with no request on them hold `close` open indefinitely
  * otherwise, and an idle socket has nothing to drain.
  *
@@ -26,7 +30,7 @@
  * Signals arrive more than once (a deploy that is retried, SIGTERM then
  * SIGINT), so this runs once and every later call awaits the same drain.
  */
-export function createShutdown({ server, pool, logger, timeoutMs = SHUTDOWN_TIMEOUT_MS, exit = defaultExit }) {
+export function createShutdown({ server, pool, logger, runner, timeoutMs = SHUTDOWN_TIMEOUT_MS, exit = defaultExit }) {
   let running = null
 
   return function shutdown(signal) {
@@ -47,10 +51,12 @@ export function createShutdown({ server, pool, logger, timeoutMs = SHUTDOWN_TIME
     deadline.unref?.()
 
     try {
+      const runnerStopped = runner.stop()
       await new Promise((resolve) => {
         server.close(() => resolve())
         server.closeIdleConnections()
       })
+      await runnerStopped
       await pool.end()
       logger.info('shutdown complete', { signal })
     } catch (err) {

@@ -1,5 +1,3 @@
-import { withRetry } from '../retry.js'
-
 const API_URL = 'https://api.elevenlabs.io/v1/text-to-speech'
 
 /**
@@ -37,10 +35,11 @@ const PROBE_TEXT = '.'
 
 /**
  * How long one synthesis attempt may take, connect to last body byte. An
- * unbounded fetch holds one of the queue's four slots forever on a stalled
- * connection, and the device waits with it. 30s is far past a phrase's normal
- * latency. An abort is 'network' (nothing was received, so retryable); one
- * that lands mid-body, after a 2xx, is a 'billed-failure' like any other.
+ * unbounded fetch holds one of the clip job runner's slots forever on a
+ * stalled connection, and the device waits with it. 30s is far past a
+ * phrase's normal latency. An abort is 'network' (nothing was received, so
+ * retryable); one that lands mid-body, after a 2xx, is a 'billed-failure'
+ * like any other.
  */
 const DEFAULT_TIMEOUT_MS = 30_000
 
@@ -51,22 +50,22 @@ const DEFAULT_RETRY_AFTER_MS = 1000
  * The only module that holds `ELEVENLABS_API_KEY` or names ElevenLabs'
  * endpoint shape — the server-side swap seam, same discipline the device
  * adapter it replaces (`src/adapters/audio/eleven-labs-synth-client.ts`)
- * used to keep. Every call goes through `queue` (a bounded-concurrency
- * limiter, T041's fix for the "2n simultaneous calls" defect in
- * `docs/scale.md`) and retries a 429 with backoff instead of failing it
- * permanently on the first attempt (the other defect that doc names).
+ * used to keep.
+ *
+ * **One call per `synthesize`, no retries, no queue of its own (S5).** The
+ * clip job runner (`server/clip-job-runner.js`) is the only caller, and it
+ * owns both: it bounds concurrency (T041's fix for the "2n simultaneous
+ * calls" defect in `docs/scale.md`, which this provider's bounded queue used
+ * to be) and decides which failures are retried, because it is the one place
+ * that also knows what each attempt cost. A retry here as well multiplied
+ * the runner's attempts by its own — the 2026-09 bill, one layer down. What
+ * this module still owns is classification: every failure leaves with a
+ * `.kind` saying whether ElevenLabs can have billed it.
  */
-export function createElevenLabsProvider({
-  apiKey,
-  fetchImpl = fetch,
-  queue,
-  retries = 2,
-  backoffMs = 500,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-}) {
-  // Every synthesis attempt, retries included, never probes: ElevenLabs
-  // bills per attempt that gets a 2xx, so `/api/status` needs this number
-  // to set against the clips actually stored. In-process, like its siblings.
+export function createElevenLabsProvider({ apiKey, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+  // Every synthesis call, never probes: ElevenLabs bills per call that gets
+  // a 2xx, so `/api/status` needs this number to set against the clips
+  // actually stored. In-process, like its siblings.
   let attempts = 0
 
   return {
@@ -76,34 +75,8 @@ export function createElevenLabsProvider({
     async synthesize({ text, voiceId, modelId }) {
       if (!apiKey) throw providerError('not-configured', 'ELEVENLABS_API_KEY is not set')
 
-      return queue.run(() =>
-        withRetry(
-          () => {
-            attempts += 1
-            return callOnce({
-              apiKey,
-              fetchImpl,
-              text,
-              voiceId,
-              modelId,
-              timeoutMs,
-            })
-          },
-          {
-            retries,
-            baseMs: backoffMs,
-            // Retried only where ElevenLabs cannot have billed us: 'network'
-            // (nothing came back, or the attempt timed out), 'upstream' (a
-            // 5xx) and 'rate-limited'. NOT 'billed-failure' — a failure after
-            // a 2xx, which ElevenLabs charges for — nor 'not-configured' (a
-            // bad key) nor 'rejected-request' (a 4xx a retry cannot fix).
-            // 'rate-limited' replaced 'quota' here on 2026-09-02: a 429 is
-            // transient and worth another attempt, while an account genuinely
-            // out of credit is not — retrying a bill only spends battery.
-            isRetryable: (err) => err.kind === 'rate-limited' || err.kind === 'network' || err.kind === 'upstream',
-          },
-        ),
-      )
+      attempts += 1
+      return callOnce({ apiKey, fetchImpl, text, voiceId, modelId, timeoutMs })
     },
 
     /**
@@ -236,7 +209,8 @@ async function callOnce({ apiKey, fetchImpl, text, voiceId, modelId, timeoutMs }
   // A 5xx is the provider failing before it produced audio — transient, and
   // not billed. Any other non-ok status (a 400/404/422 for a request we
   // built wrong) is the same answer every time: 'rejected-request', which
-  // `statusForProviderError` leaves at 502 and `isRetryable` never retries.
+  // `statusForProviderError` answers 422 (terminal on the device) and the
+  // clip job runner never retries.
   if (response.status >= 500) {
     throw providerError('upstream', `ElevenLabs responded ${response.status}`)
   }

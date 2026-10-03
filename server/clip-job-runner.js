@@ -1,5 +1,5 @@
 /**
- * Runs the clip generation queue (`clip-job-store.js`): the only code that
+ * Runs the clip job queue (`clip-job-store.js`): the only code that
  * calls `elevenLabs.synthesize`, and so the only code that decides what
  * happens after a failure (S5).
  *

@@ -6,6 +6,9 @@ import { createSessionAuth } from './session-auth.js'
 import { createLogger } from './logger.js'
 import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
+import { createClipJobStore } from './clip-job-store.js'
+import { createClipJobRunner } from './clip-job-runner.js'
+import { validateClip } from './clip-validation.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
 import { createAnthropicProvider } from './providers/anthropic-client.js'
 import { createShutdown } from './shutdown.js'
@@ -66,10 +69,18 @@ export async function buildServer(env = process.env) {
   // same flat, mismatched object as both arguments and every login 500'd.
   const sessionAuth = createSessionAuth({ userStore: authStore.users, sessionStore: authStore.sessions })
 
-  const elevenLabsQueue = createBoundedQueue({ concurrency: 4 })
   const anthropicQueue = createBoundedQueue({ concurrency: 2 })
-  const elevenLabs = createElevenLabsProvider({ apiKey: elevenLabsApiKey, queue: elevenLabsQueue })
+  const elevenLabs = createElevenLabsProvider({ apiKey: elevenLabsApiKey })
   const anthropic = createAnthropicProvider({ apiKey: anthropicApiKey, queue: anthropicQueue })
+
+  // S5: every ElevenLabs synthesis goes through the clip job queue. The
+  // table is created like the others (`CREATE TABLE IF NOT EXISTS`, nothing
+  // existing touched). The runner's four slots are the provider concurrency
+  // bound the provider's own bounded queue used to be; it is started by the
+  // caller with the server, and stopped by `createShutdown`.
+  const clipJobStore = createClipJobStore(pool)
+  await clipJobStore.init()
+  const clipJobRunner = createClipJobRunner({ jobStore: clipJobStore, clipStore, elevenLabs, validateClip, logger, concurrency: 4 })
 
   // Limits (T041 "rate-limit the proxy endpoints"): tts is the busy path
   // (generation-queue.ts can enqueue two calls per phrase across a whole
@@ -93,6 +104,8 @@ export async function buildServer(env = process.env) {
     libraryStore,
     clipStore,
     elevenLabs,
+    clipJobStore,
+    clipJobRunner,
     anthropic,
     ttsLimiter,
     scanLimiter,
@@ -108,7 +121,7 @@ export async function buildServer(env = process.env) {
   // `pool` is returned because its lifetime is this function's, not any
   // store's (T088, see `createPool`): one owner builds it and one owner ends
   // it, on the way out.
-  return { server, port, logger, pool, libraryStore, authStore, clipStore }
+  return { server, port, logger, pool, libraryStore, authStore, clipStore, clipJobRunner }
 }
 
 /**
@@ -144,11 +157,12 @@ export const DEFAULT_PORT = 8080
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`
 if (isMain) {
-  const { server, port, logger, pool } = await buildServer()
+  const { server, port, logger, pool, clipJobRunner } = await buildServer()
   // T088: without this, Render's SIGTERM on every deploy and restart killed
   // the process outright, cutting any push in flight.
-  const shutdown = createShutdown({ server, pool, logger })
+  const shutdown = createShutdown({ server, pool, logger, runner: clipJobRunner })
   process.on('SIGTERM', () => shutdown('SIGTERM'))
   process.on('SIGINT', () => shutdown('SIGINT'))
   server.listen(port, () => logger.info('server listening', { port }))
+  clipJobRunner.start()
 }
