@@ -193,6 +193,7 @@ const noopSynth: SynthClient = {
 }
 const noopQueue: GenerationQueue = {
   enqueue() {},
+  regenerate() {},
   statusFor() {
     return undefined
   },

@@ -27,6 +27,7 @@ function fakeClipCache(ready: readonly string[]): ClipCache {
 function fakeQueue(): GenerationQueue & { enqueue: ReturnType<typeof vi.fn<GenerationQueue['enqueue']>> } {
   return {
     enqueue: vi.fn<GenerationQueue['enqueue']>(),
+    regenerate: vi.fn(),
     statusFor: vi.fn(),
     whenIdle: vi.fn().mockResolvedValue(undefined),
     suspend: vi.fn(),
