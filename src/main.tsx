@@ -110,6 +110,7 @@ function showApp(): void {
   const synthClient = {
     ...rawSynthClient,
     synthesize: withAdapterErrorLogging('synth', rawSynthClient.synthesize.bind(rawSynthClient), errorLog),
+    regenerate: withAdapterErrorLogging('regenerate', rawSynthClient.regenerate.bind(rawSynthClient), errorLog),
   }
   const generationQueue = createGenerationQueue({
     synthClient,

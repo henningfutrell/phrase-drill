@@ -187,7 +187,10 @@ function drivableSyncEngine(): SyncEngine & { emit: (snapshot: SyncSnapshot) => 
   }
 }
 
-const noopSynth: SynthClient = { async synthesize() { return { bytes: new ArrayBuffer(0), durationMs: 0 } } }
+const noopSynth: SynthClient = {
+  async synthesize() { return { bytes: new ArrayBuffer(0), durationMs: 0 } },
+  async regenerate() { return { bytes: new ArrayBuffer(0), durationMs: 0 } },
+}
 const noopQueue: GenerationQueue = {
   enqueue() {},
   statusFor() {
