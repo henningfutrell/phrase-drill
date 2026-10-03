@@ -383,6 +383,77 @@ describe('server app (integration, fake upstreams)', () => {
   })
 
   /**
+   * The month-long failure (2026-09-02 to 2026-10-03) was invisible because
+   * `requests.total` could not tell cache hits from misses, nor count
+   * provider calls: 65 successes looked like a working service while every
+   * miss was billed and dropped. Hits, misses, attempts and billed failures
+   * make that readable at a glance: misses far above stored clips is the bug.
+   */
+  describe('GET /api/status — the clip store and provider spend', () => {
+    const post = (body = ttsBody()) =>
+      fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body,
+      })
+    const status = async () => (await (await fetch(`${baseUrl}/api/status`)).json()).tts
+
+    it('starts at zero, with an empty store', async () => {
+      await boot()
+      const tts = await status()
+      expect(tts.clips).toEqual({ hits: 0, misses: 0, storeBytes: 0 })
+      expect(tts.provider).toEqual({ calls: 0, billedFailures: 0 })
+    })
+
+    it('counts a miss, then a hit, one provider call, and the stored bytes', async () => {
+      await boot()
+      await post()
+      await post()
+      const tts = await status()
+      expect(tts.clips).toEqual({ hits: 1, misses: 1, storeBytes: 1600 })
+      expect(tts.provider).toEqual({ calls: 1, billedFailures: 0 })
+      expect(tts.requests).toEqual({ total: 2, failed: 0 })
+    })
+
+    it('counts every attempt including retries, and a retried 5xx is not a billed failure', async () => {
+      await boot({ elevenLabsFetch: fetchThatFailsWith(500) }) // retries: 1 in this harness
+      await post()
+      const tts = await status()
+      expect(tts.provider).toEqual({ calls: 2, billedFailures: 0 })
+    })
+
+    it('does not count the credential probe as a provider call', async () => {
+      await boot()
+      await status() // runs the probe
+      expect((await status()).provider.calls).toBe(0)
+    })
+
+    it('counts a body that failed after a 2xx as a billed failure', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsBodyFails() })
+      await post()
+      const tts = await status()
+      expect(tts.provider).toEqual({ calls: 1, billedFailures: 1 })
+      expect(tts.clips.storeBytes).toBe(0)
+    })
+
+    it('counts a clip that failed validation as a billed failure', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsSending({ contentType: 'application/json', bytes: Buffer.alloc(2000) }) })
+      await post()
+      expect((await status()).provider).toEqual({ calls: 1, billedFailures: 1 })
+    })
+
+    it('reports storeBytes as null, not an error, when the store cannot be summed', async () => {
+      await boot()
+      clipStore.totalBytes = async () => {
+        throw new Error('db down')
+      }
+      const res = await fetch(`${baseUrl}/api/status`)
+      expect(res.status).toBe(200)
+      expect((await res.json()).tts.clips.storeBytes).toBeNull()
+    })
+  })
+
+  /**
    * The other half of "why isn't it playing", and the one no probe can
    * reach: whether her phone is talking to THIS server at all.
    *
