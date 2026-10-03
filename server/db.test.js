@@ -16,6 +16,7 @@ import {
   createPool,
 } from './db.js'
 import { fakeLibraryPool as fakePool, fakeClipPool } from './pool.test-support.js'
+import { createClipJobStore } from './clip-job-store.js'
 
 describe('createLibraryStore (Postgres)', () => {
   it('creates its table idempotently, on init, before any read', async () => {
@@ -407,6 +408,75 @@ describe('createClipStore — the growth bound (T071)', () => {
     // more than either device can hold (200 MB ceiling, T036) — and leaves
     // ~65% of the disk for `libraries`, `library_versions`, WAL and overhead.
     expect(DEFAULT_CLIP_STORE_MAX_BYTES).toBe(300 * 1024 * 1024)
+  })
+})
+
+/**
+ * S5. `clip_jobs` lives on the same 1 GB instance as their phrases, and the
+ * runner drives it on a timer with no request in sight. The same closure the
+ * clip store has: every statement names `clip_jobs` literally, so the set of
+ * tables it can reach is closed — and this asserts it over every branch the
+ * store has (fresh insert, cap, requeue, claim, each outcome, reap, counts).
+ * The SQL itself is exercised against a real Postgres in `db.postgres.test.js`.
+ */
+describe('createClipJobStore — the tables it can reach (S5)', () => {
+  function recordingPool(row) {
+    const queries = []
+    const query = async (text) => {
+      queries.push(text)
+      // INSERT … ON CONFLICT DO NOTHING finds the row already there, so the
+      // locked read-and-plan path runs too.
+      if (/ON CONFLICT/i.test(text)) return { rows: [], rowCount: 0 }
+      return { rows: [row], rowCount: 1 }
+    }
+    return { queries, query, connect: async () => ({ query, release() {} }) }
+  }
+
+  const row = (overrides) => ({
+    hash: 'h',
+    provider: 'elevenlabs',
+    modelId: 'm',
+    voiceId: 'v',
+    lang: 'fr-FR',
+    text: 'bonjour',
+    state: 'done',
+    attempts: 0,
+    billedCalls: '0',
+    windowStartedAt: '1',
+    nextAttemptAt: '1',
+    lastErrorKind: null,
+    createdAt: '1',
+    updatedAt: '1',
+    ...overrides,
+  })
+
+  it('never issues a statement naming any table but clip_jobs', async () => {
+    const fields = { hash: 'h', provider: 'elevenlabs', modelId: 'm', voiceId: 'v', lang: 'fr-FR', text: 'bonjour' }
+    const capped = recordingPool(row({ billedCalls: '2' }))
+    const requeued = recordingPool(row())
+
+    const cappedStore = createClipJobStore(capped)
+    await cappedStore.init()
+    expect(await cappedStore.request(fields, 10)).toEqual({ capped: true })
+
+    const store = createClipJobStore(requeued)
+    expect((await store.request(fields, 10)).capped).toBe(false)
+    await store.claim(10)
+    await store.complete('h', 10)
+    await store.retryLater('h', { nextAttemptAt: 20, kind: 'network' }, 10)
+    await store.fail('h', 'quota', 10, { billed: false })
+    await store.fail('h', 'unreadable', 10, { billed: true })
+    await store.reapStale(10)
+    await store.counts()
+
+    const statements = [...capped.queries, ...requeued.queries].filter((text) => !/^\s*(BEGIN|COMMIT|ROLLBACK)\s*$/i.test(text))
+    expect(statements.length).toBeGreaterThan(8)
+    for (const text of statements) {
+      expect(text).toMatch(/\bclip_jobs\b/)
+      expect(text).not.toMatch(/librar/i)
+      expect(text).not.toMatch(/\busers\b|\bsessions\b/i)
+      expect(text, 'the queue never writes the clip store; the runner does, through its own store').not.toMatch(/\bclips\b/)
+    }
   })
 })
 
