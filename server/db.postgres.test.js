@@ -107,9 +107,9 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(await lastUsed(), 'under a day: no write').toBe(100)
 
-    clock.now = 100 + DAY
+    clock.now = 100 + DAY + 1
     await clips.get('played')
-    await vi.waitFor(async () => expect(await lastUsed()).toBe(100 + DAY))
+    await vi.waitFor(async () => expect(await lastUsed()).toBe(100 + DAY + 1))
   })
 
   it('evicts least-recently-used, so a played old clip outlives an unplayed newer one', async () => {

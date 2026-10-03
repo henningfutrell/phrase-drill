@@ -299,7 +299,15 @@ export const LIBRARY_VERSION_MAX_BYTES = 32 * 1024 * 1024
  * stored clip requires already knowing all five fields, so sharing the row
  * discloses nothing a caller did not already have.
  */
-export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES, evictBatchSize = CLIP_EVICT_BATCH_SIZE } = {}) {
+/**
+ * `logger` receives the one warning this store emits itself (a failed
+ * last-used bump); `console` for a caller that has no structured logger —
+ * a CLI script, a test. `now` is the clock the bump reads.
+ */
+export function createClipStore(
+  pool,
+  { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES, evictBatchSize = CLIP_EVICT_BATCH_SIZE, logger = console, now = Date.now } = {},
+) {
   const evictTo = Math.floor(maxBytes * CLIP_EVICT_TO_FRACTION)
 
   async function totalBytes() {
@@ -308,7 +316,8 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
   }
 
   /**
-   * Brings `clips` back under the ceiling by deleting the oldest rows (T071).
+   * Brings `clips` back under the ceiling by deleting the least recently
+   * used rows (T071, S8b).
    *
    * **Why a bound at all.** docs/scale.md §1 models ~89 KB of audio per
    * Phrase. A 5,000-Phrase library is ~425 MB, a 10,000-Phrase one ~848 MB,
@@ -319,12 +328,16 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
    * server while the sync line still says "waiting". Audio is derived and
    * regenerable; the phrases are not, so the growth has to be cut here.
    *
-   * **Oldest-first, on the `created_at` the table already has.** Least
-   * recently *played* is better policy and would cost a column plus a write
-   * on every cache hit. On the server a wrongly evicted clip is one
-   * regeneration; on the device it is a drill that cannot start offline,
-   * which is why the device's cache is the LRU one (docs/scale.md §6) and
-   * this one is not.
+   * **Least recently used, on `last_used_at` (S8b).** T071 chose
+   * oldest-first on `created_at` because LRU "would cost a column plus a
+   * write on every cache hit" and a wrongly evicted clip is "one
+   * regeneration". Both premises changed. Since S5 a regeneration is a
+   * *billed* call counted against a two-a-day cap, and oldest-first evicts
+   * exactly the Clips the user has drilled longest — the first Decks the user built,
+   * which a new device sweeps first — while keeping a Deck tried once
+   * yesterday. And the write is not per hit: `get` bumps `last_used_at` at
+   * most once a day per Clip, off the request path. A day is the right
+   * grain for a ceiling that takes weeks to reach.
    *
    * **It cannot reach `libraries`.** Every statement here names `clips`
    * literally and no identifier is ever interpolated, so the set of tables
@@ -335,7 +348,7 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
     if ((await totalBytes()) <= maxBytes) return
     let remaining = (await totalBytes()) - evictTo
     while (remaining > 0) {
-      const { rows } = await pool.query('SELECT hash, byte_size AS "byteSize" FROM clips ORDER BY created_at ASC, hash ASC LIMIT $1', [evictBatchSize])
+      const { rows } = await pool.query('SELECT hash, byte_size AS "byteSize" FROM clips ORDER BY last_used_at ASC, hash ASC LIMIT $1', [evictBatchSize])
       if (rows.length === 0) return
       const doomed = []
       for (const row of rows) {
@@ -345,6 +358,24 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
       }
       await pool.query('DELETE FROM clips WHERE hash = ANY($1::text[])', [doomed])
     }
+  }
+
+  /**
+   * Records a hit as a use, at most once a day per Clip: the `WHERE` matches
+   * only a row last stamped more than a day ago, so a drill replaying the same
+   * Clips writes nothing after the first hit of the day.
+   *
+   * Fire-and-forget, deliberately. A hit is audio the user is waiting for; the
+   * bump is bookkeeping for a ceiling weeks away. Awaiting it would put a
+   * write on the read path, and failing on it would turn a stored Clip into
+   * an error. A failed bump is a warning — no hash, which is phrase-derived —
+   * and the cost is one Clip evicted a little early.
+   */
+  function bumpLastUsed(hash) {
+    const at = now()
+    pool
+      .query('UPDATE clips SET last_used_at = $2 WHERE hash = $1 AND last_used_at < $3', [hash, at, at - LAST_USED_GRAIN_MS])
+      .catch((err) => logger.warn('could not record a clip as last used', { message: err instanceof Error ? err.message : String(err) }))
   }
 
   return {
@@ -363,6 +394,13 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
      * `octet_length(bytes)` would detoast every clip on every cache miss,
      * and `pg_total_relation_size` does not shrink after a DELETE until
      * VACUUM, which would make the eviction loop empty the table.
+     *
+     * `last_used_at` (S8b) is the second, same shape. Its backfill is
+     * `created_at`: for a row written before the column existed, when it
+     * was made is the most anything can say about when it was last used.
+     * A row an older instance writes during a deploy overlap has it NULL
+     * until the next boot's backfill; Postgres sorts NULL last, so for that
+     * window such a row is evicted last, which is right for a fresh Clip.
      */
     async init() {
       await pool.query(`
@@ -372,16 +410,20 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
           mime TEXT NOT NULL,
           duration_ms BIGINT NOT NULL,
           created_at BIGINT NOT NULL,
-          byte_size BIGINT
+          byte_size BIGINT,
+          last_used_at BIGINT
         )
       `)
       await pool.query('ALTER TABLE clips ADD COLUMN IF NOT EXISTS byte_size BIGINT')
       await pool.query('UPDATE clips SET byte_size = octet_length(bytes) WHERE byte_size IS NULL')
+      await pool.query('ALTER TABLE clips ADD COLUMN IF NOT EXISTS last_used_at BIGINT')
+      await pool.query('UPDATE clips SET last_used_at = created_at WHERE last_used_at IS NULL')
     },
 
     async get(hash) {
       const { rows } = await pool.query('SELECT bytes, mime, duration_ms AS "durationMs" FROM clips WHERE hash = $1', [hash])
       if (rows.length === 0) return null
+      bumpLastUsed(hash)
       return { bytes: rows[0].bytes, mime: rows[0].mime, durationMs: Number(rows[0].durationMs) }
     },
 
@@ -393,9 +435,9 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
      */
     async put({ hash, bytes, mime, durationMs, createdAt }) {
       await pool.query(
-        `INSERT INTO clips (hash, bytes, mime, duration_ms, created_at, byte_size) VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO clips (hash, bytes, mime, duration_ms, created_at, byte_size, last_used_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (hash) DO NOTHING`,
-        [hash, bytes, mime, durationMs, createdAt, bytes.byteLength],
+        [hash, bytes, mime, durationMs, createdAt, bytes.byteLength, createdAt],
       )
       await evictIfOverBudget()
     },
@@ -464,6 +506,8 @@ export function clipStoreMaxBytesFrom(raw, logger) {
 const MIN_CLIP_STORE_MAX_BYTES = 128 * 1024
 /** Evict past the ceiling, not to it — the same 90% hysteresis the device's cache uses (docs/scale.md §6), so one sweep is not one delete per put. */
 const CLIP_EVICT_TO_FRACTION = 0.9
+/** How stale `last_used_at` may get before a hit writes it again: one day (S8b). */
+const LAST_USED_GRAIN_MS = 24 * 60 * 60 * 1000
 /** Rows read per eviction sweep: bounded so a badly over-budget table is drained in passes rather than one unbounded result set. */
 const CLIP_EVICT_BATCH_SIZE = 200
 

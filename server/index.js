@@ -59,7 +59,7 @@ export async function buildServer(env = process.env) {
   // (`''`), and the first of those ends with `libraryStore.put` as the write
   // that fails. `clipStoreMaxBytesFrom` falls back to the default, loudly.
   const clipStoreMaxBytes = clipStoreMaxBytesFrom(env.CLIP_STORE_MAX_BYTES, logger)
-  const clipStore = createClipStore(pool, { maxBytes: clipStoreMaxBytes })
+  const clipStore = createClipStore(pool, { maxBytes: clipStoreMaxBytes, logger })
   await clipStore.init()
 
   // T050: identity is a session row in Postgres, not a Keycloak-issued
