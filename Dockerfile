@@ -28,6 +28,9 @@ ENV DIST_DIR=/app/dist
 COPY --from=builder /app/dist ./dist
 COPY server ./server
 COPY scripts/useradd.mjs ./scripts/useradd.mjs
+# clip-delete imports describeTarget from useradd.mjs, copied above; the rest
+# of what it needs is server/.
+COPY scripts/clip-delete.mjs ./scripts/clip-delete.mjs
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 

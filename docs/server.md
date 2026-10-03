@@ -547,6 +547,49 @@ its row lock, and the answer is `422` with the old Clip already deleted. It
 needs a second billed generation of one phrase inside those milliseconds and
 costs one regeneration the next day.
 
+### Deleting a broken Clip by hash (R2)
+
+`scripts/clip-delete.mjs` is the operator's version of Regenerate, for when
+their phone is not to hand. Run it from the Render service Shell (the service
+env carries `DATABASE_URL`):
+
+```sh
+node scripts/clip-delete.mjs <hash> [<hash> ...]   # or: npm run clip-delete -- <hash>
+```
+
+It prints one line per hash — `<hash> deleted (clip: yes, job: yes)` or
+`<hash> absent` — and exits `1` on no argument, an argument that is not 64
+lowercase hex characters (the whole run is refused, nothing deleted), a missing
+`DATABASE_URL`, or a database it cannot reach in 3 tries. It touches `clips`
+and `clip_jobs` only, through their stores.
+
+**Finding the hash.** It is SHA-256 of `provider|modelId|voiceId|lang|text`.
+From `/app` in the Render Shell (or the repo root locally), fill in the five
+fields — the voice is the pinned one in the device's Diagnostics, `lang` is
+`fr-FR` for the French side and `en-US` for the English side, `text` is that
+side exactly as stored:
+
+```sh
+node -e "import('./server/clip-hash.js').then(({ computeClipHash }) => console.log(computeClipHash({ provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: '21m00Tcm4TlvDq8ikWAM', lang: 'fr-FR', text: 'Bonjour' })))"
+```
+
+**When to use it.**
+- A Clip is broken and the user cannot tap *Redo audio* (or it was refused by the
+  billing cap and must be replaced today).
+- **After changing a voice's settings in the ElevenLabs dashboard** (stability,
+  similarity, style). `voice_settings` are not part of the content address,
+  so every stored Clip in that voice keeps its address and keeps being served
+  in the old settings. Delete the Clips that matter; the next ask regenerates
+  them. Their devices also hold their own copies: *Redo audio* on the device
+  replaces those.
+
+**It deletes the `clip_jobs` row too — deliberately.** That row is the hash's
+billing count; removing it opens a fresh 24 h window, so the next request may
+bill up to twice more today. It is the point (a capped hash becomes
+regenerable now) and the cost, and it is an operator action, one named hash at
+a time: nothing the app does by itself can reach it, so the cap still bounds
+every automatic path.
+
 ### Reading `/api/status`
 
 No auth, no secrets, no per-device data; counters are in-process and reset on

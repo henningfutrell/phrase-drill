@@ -404,10 +404,12 @@ export function createClipStore(pool, { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES,
      * Takes one Clip out of the store on purpose — the server half of
      * **Regenerate** (R1, `app.js` `handleTtsRegenerate`). The only other
      * way a row leaves is eviction. Absent is not an error: the caller wants
-     * the hash empty, and it is.
+     * the hash empty, and it is. Resolves `true` when a row was there —
+     * `scripts/clip-delete.mjs` reports it to the operator.
      */
     async delete(hash) {
-      await pool.query('DELETE FROM clips WHERE hash = $1', [hash])
+      const { rowCount } = await pool.query('DELETE FROM clips WHERE hash = $1', [hash])
+      return rowCount > 0
     },
 
     /** Live size of the store, for the eviction loop and for anyone asking how close the ceiling is. */

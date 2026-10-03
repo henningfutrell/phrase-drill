@@ -13,6 +13,7 @@
     "format": "prettier --write .",
     "deploy": "scripts/deploy.sh",
     "useradd": "node scripts/useradd.mjs",
+    "clip-delete": "node scripts/clip-delete.mjs",
     "backup": "node scripts/backup.mjs",
     "restore-drill": "node scripts/restore-drill.mjs"
   },
