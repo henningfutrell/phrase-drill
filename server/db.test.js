@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import {
   createLibraryStore,
   createClipStore,
@@ -800,23 +801,36 @@ describe('extractPassword', () => {
   })
 })
 
-describe('sslConfigFor (T053: Render deploy)', () => {
+describe('sslConfigFor', () => {
+  const supabaseCa = readFileSync(new URL('./certs/supabase-prod-ca.crt', import.meta.url), 'utf8')
+
   it('requires no SSL for the local docker-compose hostname', () => {
     expect(sslConfigFor('postgres://phrase_drill:phrase_drill@postgres:5432/phrase_drill')).toBeUndefined()
   })
 
-  it('requires no SSL for localhost', () => {
+  it('requires no SSL for localhost and loopback addresses', () => {
     expect(sslConfigFor('postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill')).toBeUndefined()
+    expect(sslConfigFor('postgresql://postgres:postgres@127.0.0.1:54322/postgres')).toBeUndefined()
   })
 
-  it('requires no SSL for a Render internal hostname (private network, no domain suffix)', () => {
-    expect(sslConfigFor('postgres://user:pw@dpg-abc123-a:5432/phrase_drill')).toBeUndefined()
+  it('verifies a Supabase session-pooler host against the pinned Supabase CA', () => {
+    expect(sslConfigFor('postgres://postgres.abcdefgh:pw@aws-0-eu-west-3.pooler.supabase.com:5432/postgres')).toEqual({ ca: supabaseCa })
   })
 
-  it('relaxes certificate verification, scoped to the connection, for a Render external hostname', () => {
-    expect(sslConfigFor('postgres://user:pw@dpg-abc123-a.oregon-postgres.render.com:5432/phrase_drill')).toEqual({
-      rejectUnauthorized: false,
-    })
+  it('verifies a direct Supabase database host against the same CA', () => {
+    expect(sslConfigFor('postgres://postgres:pw@db.abcdefgh.supabase.co:5432/postgres')).toEqual({ ca: supabaseCa })
+  })
+
+  it('pins a real certificate, not an empty or placeholder file', () => {
+    expect(supabaseCa).toContain('-----BEGIN CERTIFICATE-----')
+  })
+
+  it('no longer relaxes verification for a Render external hostname', () => {
+    expect(() => sslConfigFor('postgres://user:pw@dpg-abc123-a.oregon-postgres.render.com:5432/phrase_drill')).toThrow(/no TLS trust rule/)
+  })
+
+  it('refuses an unknown remote host rather than connecting without verification', () => {
+    expect(() => sslConfigFor('postgres://user:pw@db.example.com:5432/app')).toThrow(/db\.example\.com/)
   })
 
   it('returns undefined for an unparsable connection string, rather than throwing', () => {
@@ -837,7 +851,7 @@ describe('sslConfigFor (T053: Render deploy)', () => {
  * library; staying up through a database blip is the whole point.
  */
 describe('createPool — a dead idle connection must not kill the process (T088)', () => {
-  const URL_WITH_PASSWORD = 'postgres://phrase_drill:s3cr3t-pw@db.example:5432/phrase_drill'
+  const URL_WITH_PASSWORD = 'postgres://phrase_drill:s3cr3t-pw@localhost:5432/phrase_drill'
 
   it('handles the pool error event instead of letting Node rethrow it', async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
