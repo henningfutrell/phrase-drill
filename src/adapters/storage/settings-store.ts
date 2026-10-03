@@ -10,8 +10,8 @@ import { createDatabaseConnection, SETTINGS_STORE } from './database'
  * by exporting this record.
  *
  * There is no identity field here (T043, T050): the device's identity on
- * the server is an opaque session token, held by `session-auth.ts` in
- * `localStorage`, never generated or stored by this module — the old
+ * the server is a Supabase Auth access token, held by supabase-js (behind
+ * `session-auth.ts`) in `localStorage`, never generated or stored by this module — the old
  * device-generated 64-hex library key it replaces is deleted, not
  * deprecated.
  */
