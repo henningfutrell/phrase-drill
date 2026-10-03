@@ -35,6 +35,15 @@ const PROBE_VOICE_ID = '21m00Tcm4TlvDq8ikWAM'
 const PROBE_MODEL_ID = 'eleven_multilingual_v2'
 const PROBE_TEXT = '.'
 
+/**
+ * How long one synthesis attempt may take, connect to last body byte. An
+ * unbounded fetch holds one of the queue's four slots forever on a stalled
+ * connection, and the device waits with it. 30s is far past a phrase's normal
+ * latency. An abort is 'network' (nothing was received, so retryable); one
+ * that lands mid-body, after a 2xx, is a 'billed-failure' like any other.
+ */
+const DEFAULT_TIMEOUT_MS = 30_000
+
 /** The wait used when a 429 carries no usable `Retry-After` (one second). */
 const DEFAULT_RETRY_AFTER_MS = 1000
 
@@ -47,24 +56,53 @@ const DEFAULT_RETRY_AFTER_MS = 1000
  * `docs/scale.md`) and retries a 429 with backoff instead of failing it
  * permanently on the first attempt (the other defect that doc names).
  */
-export function createElevenLabsProvider({ apiKey, fetchImpl = fetch, queue, retries = 2, backoffMs = 500 }) {
+export function createElevenLabsProvider({
+  apiKey,
+  fetchImpl = fetch,
+  queue,
+  retries = 2,
+  backoffMs = 500,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+}) {
+  // Every synthesis attempt, retries included, never probes: ElevenLabs
+  // bills per attempt that gets a 2xx, so `/api/status` needs this number
+  // to set against the clips actually stored. In-process, like its siblings.
+  let attempts = 0
+
   return {
+    /** Read by `/api/status`. */
+    stats: () => ({ attempts }),
+
     async synthesize({ text, voiceId, modelId }) {
       if (!apiKey) throw providerError('not-configured', 'ELEVENLABS_API_KEY is not set')
 
       return queue.run(() =>
-        withRetry(() => callOnce({ apiKey, fetchImpl, text, voiceId, modelId }), {
-          retries,
-          baseMs: backoffMs,
-          // 'network' covers both a transport failure reaching ElevenLabs and
-          // a failure reading its response body (F6 audit, defect 3) — both
-          // are transient by nature, unlike 'not-configured' (a bad key) or
-          // an unrecognized non-ok status, neither of which a retry can fix.
-          // 'rate-limited' replaced 'quota' here on 2026-09-02: a 429 is
-          // transient and worth another attempt, while an account genuinely
-          // out of credit is not — retrying a bill only spends battery.
-          isRetryable: (err) => err.kind === 'rate-limited' || err.kind === 'network',
-        }),
+        withRetry(
+          () => {
+            attempts += 1
+            return callOnce({
+              apiKey,
+              fetchImpl,
+              text,
+              voiceId,
+              modelId,
+              timeoutMs,
+            })
+          },
+          {
+            retries,
+            baseMs: backoffMs,
+            // Retried only where ElevenLabs cannot have billed us: 'network'
+            // (nothing came back, or the attempt timed out), 'upstream' (a
+            // 5xx) and 'rate-limited'. NOT 'billed-failure' — a failure after
+            // a 2xx, which ElevenLabs charges for — nor 'not-configured' (a
+            // bad key) nor 'rejected-request' (a 4xx a retry cannot fix).
+            // 'rate-limited' replaced 'quota' here on 2026-09-02: a 429 is
+            // transient and worth another attempt, while an account genuinely
+            // out of credit is not — retrying a bill only spends battery.
+            isRetryable: (err) => err.kind === 'rate-limited' || err.kind === 'network' || err.kind === 'upstream',
+          },
+        ),
       )
     },
 
@@ -92,20 +130,38 @@ export function createElevenLabsProvider({ apiKey, fetchImpl = fetch, queue, ret
      * probe into several charges against the thing being measured.
      */
     async probe({ voiceId = PROBE_VOICE_ID, modelId = PROBE_MODEL_ID, text = PROBE_TEXT } = {}) {
-      if (!apiKey) return { configured: false, credential: 'unknown', detail: 'ELEVENLABS_API_KEY is not set' }
+      if (!apiKey)
+        return {
+          configured: false,
+          credential: 'unknown',
+          detail: 'ELEVENLABS_API_KEY is not set',
+        }
 
       let response
       try {
         response = await fetchImpl(`${API_URL}/${voiceId}?output_format=${OUTPUT_FORMAT}`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', 'xi-api-key': apiKey },
+          headers: {
+            'content-type': 'application/json',
+            accept: 'audio/mpeg',
+            'xi-api-key': apiKey,
+          },
           body: JSON.stringify({ text, model_id: modelId }),
         })
       } catch {
-        return { configured: true, credential: 'unreachable', detail: 'network error contacting ElevenLabs' }
+        return {
+          configured: true,
+          credential: 'unreachable',
+          detail: 'network error contacting ElevenLabs',
+        }
       }
 
-      if (response.ok) return { configured: true, credential: 'ok', detail: `HTTP ${response.status}` }
+      if (response.ok)
+        return {
+          configured: true,
+          credential: 'ok',
+          detail: `HTTP ${response.status}`,
+        }
 
       const detail = (await readProviderStatus(response)) ?? `HTTP ${response.status}`
       if (detail === 'quota_exceeded') return { configured: true, credential: 'no-credit', detail }
@@ -140,13 +196,18 @@ async function readProviderStatus(response) {
   }
 }
 
-async function callOnce({ apiKey, fetchImpl, text, voiceId, modelId }) {
+async function callOnce({ apiKey, fetchImpl, text, voiceId, modelId, timeoutMs }) {
   let response
   try {
     response = await fetchImpl(`${API_URL}/${voiceId}?output_format=${OUTPUT_FORMAT}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'xi-api-key': apiKey },
+      headers: {
+        'content-type': 'application/json',
+        accept: 'audio/mpeg',
+        'xi-api-key': apiKey,
+      },
       body: JSON.stringify({ text, model_id: modelId }),
+      signal: AbortSignal.timeout(timeoutMs),
     })
   } catch {
     throw providerError('network', 'network error contacting ElevenLabs')
@@ -172,24 +233,36 @@ async function callOnce({ apiKey, fetchImpl, text, voiceId, modelId }) {
     // rather than guessing.
     throw rateLimitedError(retryAfterMsFrom(response))
   }
+  // A 5xx is the provider failing before it produced audio — transient, and
+  // not billed. Any other non-ok status (a 400/404/422 for a request we
+  // built wrong) is the same answer every time: 'rejected-request', which
+  // `statusForProviderError` leaves at 502 and `isRetryable` never retries.
+  if (response.status >= 500) {
+    throw providerError('upstream', `ElevenLabs responded ${response.status}`)
+  }
   if (!response.ok) {
-    throw providerError('network', `ElevenLabs responded ${response.status}`)
+    throw providerError('rejected-request', `ElevenLabs responded ${response.status}`)
   }
 
   // The read, not just the request, must be inside error handling (F6 audit,
   // defect 3): a mid-stream truncation surfaces here, after a response that
-  // looked entirely fine at the HTTP level. Left outside, it used to reject
-  // with no `.kind`, fall through `statusForProviderError`'s `default: 502`,
-  // and never retry — though it is exactly the transient failure `withRetry`
-  // exists for. Same 'network' kind as a transport failure above, so it gets
-  // the same, now-retryable, treatment.
+  // looked entirely fine at the HTTP level. It is NOT 'network': ElevenLabs
+  // bills every 2xx it sends, so this failure has already been paid for and
+  // a retry pays again for the same audio (2026-10-02: up to 9 charges per
+  // phrase). 'billed-failure' is terminal, and `/api/status` counts it.
   let bytes
   try {
     bytes = Buffer.from(await response.arrayBuffer())
   } catch {
-    throw providerError('network', 'network error reading ElevenLabs response body')
+    throw providerError('billed-failure', 'failed reading the body of a billed ElevenLabs response')
   }
-  return { bytes, durationMs: Math.round(bytes.byteLength / MP3_BYTES_PER_MS_AT_128KBPS) }
+  return {
+    bytes,
+    durationMs: Math.round(bytes.byteLength / MP3_BYTES_PER_MS_AT_128KBPS),
+    // What ElevenLabs said it sent, for the caller to check against what it
+    // asked for (`clip-validation.js`); null when the header is absent.
+    contentType: response.headers?.get?.('content-type') ?? null,
+  }
 }
 
 function providerError(kind, message) {

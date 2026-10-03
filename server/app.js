@@ -710,6 +710,12 @@ function statusForProviderError(err) {
       return 402
     case 'unreadable':
       return 422
+    // Both reach the device as 502, which it treats as 'network'. 'upstream'
+    // is a provider 5xx (retried server-side already); 'billed-failure' is a
+    // 2xx whose body failed to read — billed, never retried server-side.
+    case 'upstream':
+    case 'billed-failure':
+      return 502
     default:
       return 502
   }
