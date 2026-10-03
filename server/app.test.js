@@ -782,16 +782,40 @@ describe('server app (integration, fake upstreams)', () => {
       })
     })
 
-    it('answers 502 billed-failure for a body that fails after a 2xx, with ONE provider call', async () => {
+    // A billed failure is terminal on the device (R3). It used to be 502,
+    // which the device reads as `network` and re-POSTs; the re-POST re-queued
+    // the failed job and the provider billed a second time for one phrase.
+    // 422 is the device's one terminal answer for "the server already spent
+    // money on this and got nothing" — the body still names the real kind,
+    // so `/api/status` and the logs keep the distinction.
+    it('answers 422 billed-failure for a body that fails after a 2xx, with ONE provider call', async () => {
       await boot({ elevenLabsFetch: fetchElevenLabsBodyFails() })
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
         headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
         body: ttsBody(),
       })
-      expect(res.status).toBe(502)
+      expect(res.status).toBe(422)
       expect(await res.json()).toEqual({ error: 'billed-failure' })
       expect(elevenLabsUpstream.calls).toBe(1)
+    })
+
+    // Every kind that names a call the provider already charged for, or a
+    // request that will be refused identically every time, is 422: the
+    // device's terminal `unreadable`. None of them may reach it as a 5xx.
+    it.each([
+      ['a clip that failed validation', fetchElevenLabsTruncated(40), 'unreadable'],
+      ['a body lost after a billed 2xx', fetchElevenLabsBodyFails(), 'billed-failure'],
+      ['a request the provider rejects', fetchElevenLabsRefusing(400, { detail: { status: 'invalid_request' } }), 'rejected-request'],
+    ])('answers %s with a terminal 422, never a retryable 5xx', async (_name, upstream, kind) => {
+      await boot({ elevenLabsFetch: upstream })
+      const res = await fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: ttsBody(),
+      })
+      expect(res.status).toBe(422)
+      expect(await res.json()).toEqual({ error: kind })
     })
 
     it('enforces the per-key rate limit, and says how long to wait', async () => {
@@ -981,8 +1005,11 @@ describe('server app (integration, fake upstreams)', () => {
     it('refuses a third billed generation of one phrase in a day with 422, without calling the provider', async () => {
       await boot({ elevenLabsFetch: fetchElevenLabsBodyFails() })
 
-      expect((await post()).status).toBe(502)
-      expect((await post()).status).toBe(502)
+      // Each billed failure is terminal on its own (R3); a device would not
+      // ask again. This drives the server past that, as a second device or a
+      // later Regenerate would, to show the cap holds regardless.
+      expect((await post()).status).toBe(422)
+      expect((await post()).status).toBe(422)
       const third = await post()
 
       expect(third.status).toBe(422)
