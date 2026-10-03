@@ -18,6 +18,11 @@ COPY . .
 # cache for `npm ci` on every deploy. Empty for a plain `docker build`, which
 # build-sha.ts then answers with git or `unknown`.
 ARG RENDER_GIT_COMMIT
+# The device's Supabase project URL and publishable key, baked into the bundle
+# (the build fails without them). Both are public by design: row-level
+# security and a disabled Data API are what protect the data, not these.
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_PUBLISHABLE_KEY
 RUN npm run build
 
 FROM node:26-alpine

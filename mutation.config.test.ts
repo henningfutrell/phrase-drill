@@ -76,9 +76,10 @@ describe('mutation gate configuration', () => {
     // became 900, half of them asserting against mutated code. It passed,
     // which is the dangerous part. A failed run leaves the directory behind,
     // so this is not self-healing.
-    const { default: config } = (await import('./vite.config')) as {
-      default: { test?: { exclude?: string[] } }
+    const { default: configFn } = (await import('./vite.config')) as {
+      default: (env: { command: 'serve'; mode: string }) => { test?: { exclude?: string[] } }
     }
+    const config = configFn({ command: 'serve', mode: 'test' })
     expect(config.test?.exclude).toContain('.stryker-tmp/**')
   })
 
