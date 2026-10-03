@@ -45,6 +45,31 @@ one has no bash.
 
 `005_verify.sql` reads `bytes`, so it only runs before step 9. After it, `--verify-only` is the check.
 
+## In one run: `cutover.sh`
+
+`cutover.sh` runs steps 1–11 above in order, from a clean target, and stops at
+the first failure. Every run first drops the four app tables on Supabase and
+migrates again from Render; Storage objects and Auth users are kept (an object
+counts only if it matches the new manifest; an existing auth user is reused).
+So the rehearsal and the real window run the same command.
+
+```sh
+migration/supabase/cutover.sh --workdir <dir> --user-email <their email> --user-id <their Render users.id>
+```
+
+- Asks before dropping the tables (`--yes` skips the prompt), then asks for their
+  new password on the terminal.
+- Adds TLS to URLs that carry no `sslmode`: Supabase is verified against
+  `server/certs/supabase-prod-ca.crt`, Render gets `sslmode=require`.
+- Writes the manifest, the dump (`TMPDIR`), both `005_verify` outputs and a log
+  into `<dir>`.
+- Fails when Render's libraries/library_versions/clips change while it runs:
+  suspend the Render web service first.
+- Exit 0: done. Exit 3: data migrated, but a library has no auth user (run
+  again with `--user-email`/`--user-id`). Anything else: failed; read the log.
+
+Step 0 (the bucket) is not part of it; the run refuses if `clips` is missing.
+
 ## Rollback
 
 Nothing on Render is changed or deleted by this kit; Render stays the source until
