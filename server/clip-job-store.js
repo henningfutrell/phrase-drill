@@ -181,6 +181,17 @@ export function createClipJobStore(pool) {
     request,
 
     /**
+     * The row for `hash` as it is, or null — a read, not a request: nothing
+     * is queued, planned or written. Regenerate (R1) needs to know whether a
+     * job is in flight, and whether the hash is capped, BEFORE it deletes the
+     * stored Clip; `request()` decides and writes in one step, too late.
+     */
+    async get(hash) {
+      const { rows } = await pool.query(`SELECT ${COLUMNS} FROM clip_jobs WHERE hash = $1`, [hash])
+      return rows.length > 0 ? toJob(rows[0]) : null
+    },
+
+    /**
      * The oldest due job, now `running`, or null. `SKIP LOCKED` so that two
      * instances overlapping during a deploy each take a different job rather
      * than one waiting on — and then repeating — the other's.
