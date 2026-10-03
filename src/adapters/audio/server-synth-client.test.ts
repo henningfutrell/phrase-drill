@@ -114,6 +114,17 @@ describe('createServerSynthClient', () => {
     await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'rate-limited', retryAfterMs: 20_000 })
   })
 
+  // The server answers 422 when the provider produced something unusable or
+  // this phrase hit the server's 24 h billing cap. Both are terminal: asking
+  // again spends money or is refused. It used to fall into `network` and be
+  // retried three times.
+  it('rejects with unreadable on a 422, distinct from a retryable network failure', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(errorResponse(422))
+    const { client } = makeClient({ fetchImpl })
+
+    await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'unreadable' })
+  })
+
   it('falls back to one second when a 429 carries no Retry-After', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(errorResponse(429))
     const { client } = makeClient({ fetchImpl })
