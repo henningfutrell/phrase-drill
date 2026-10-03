@@ -10,6 +10,9 @@ import { fakeLibraryPool, fakeClipPool } from './pool.test-support.js'
 import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
+import { createClipJobRunner } from './clip-job-runner.js'
+import { createMemoryClipJobStore } from './clip-job-store.test-support.js'
+import { validateClip } from './clip-validation.js'
 import { createAnthropicProvider } from './providers/anthropic-client.js'
 
 const SECRET_ELEVENLABS_KEY = 'xi-live-secret-99999'
@@ -183,6 +186,46 @@ async function newClipStore(options) {
   return store
 }
 
+/**
+ * The generation queue `/api/tts` waits on (S5): the contract-checked
+ * in-memory job store and the real runner, with waits short enough for a
+ * test. `retryDelayMs` is 1 ms so a retried failure exhausts its three
+ * attempts inside one request's wait.
+ */
+function clipQueue({ elevenLabs, clipStore, logger }) {
+  const clipJobStore = createMemoryClipJobStore()
+  const clipJobRunner = createClipJobRunner({
+    jobStore: clipJobStore,
+    clipStore,
+    elevenLabs,
+    validateClip,
+    logger,
+    pollMs: 5,
+    retryDelayMs: () => 1,
+  })
+  clipJobRunner.start()
+  return { clipJobStore, clipJobRunner }
+}
+
+/**
+ * A fake ElevenLabs that holds every call until `release()` — a generation
+ * that is still running when the request's wait runs out.
+ */
+function fetchElevenLabsHeld() {
+  let release
+  const gate = new Promise((resolve) => (release = resolve))
+  const impl = async () => {
+    impl.calls += 1
+    await gate
+    const bytes = new Uint8Array(1600)
+    bytes.set([0x49, 0x44, 0x33, impl.calls])
+    return { ok: true, status: 200, headers: new Headers({ 'content-type': 'audio/mpeg' }), arrayBuffer: async () => bytes.buffer }
+  }
+  impl.calls = 0
+  impl.release = () => release()
+  return impl
+}
+
 /** Every field `/api/tts` needs to derive the content address (T063). */
 function ttsBody(overrides = {}) {
   return JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1', provider: 'elevenlabs', lang: 'fr-FR', ...overrides })
@@ -197,6 +240,9 @@ describe('server app (integration, fake upstreams)', () => {
   let clipStore
   /** The counting fake upstream this boot wired in — `.calls` is what the T063 tests assert on. */
   let elevenLabsUpstream
+  /** The generation queue this boot wired in (S5); stopped after each test. */
+  let clipJobRunner
+  let clipJobStore
 
   async function boot({
     elevenLabsFetch = fetchElevenLabsOk(),
@@ -205,6 +251,9 @@ describe('server app (integration, fake upstreams)', () => {
     // machine without the secret — and `/api/status` must say so rather than
     // probe with nothing. Passed explicitly so the default stays "configured".
     elevenLabsKey = SECRET_ELEVENLABS_KEY,
+    // How long `/api/tts` waits on a generation before answering 202. Long
+    // by default so a test that is not about the 202 never sees one.
+    ttsWaitMs = 5_000,
   } = {}) {
     elevenLabsUpstream = elevenLabsFetch
     libraryStore = await newLibraryStore()
@@ -215,13 +264,9 @@ describe('server app (integration, fake upstreams)', () => {
     writeFileSync(join(distDir, 'assets', 'app.js'), 'console.log("app")')
 
     logger = collectingLogger()
-    const elevenLabs = createElevenLabsProvider({
-      apiKey: elevenLabsKey,
-      fetchImpl: elevenLabsFetch,
-      queue: createBoundedQueue({ concurrency: 4 }),
-      retries: 1,
-      backoffMs: 1,
-    })
+    const elevenLabs = createElevenLabsProvider({ apiKey: elevenLabsKey, fetchImpl: elevenLabsFetch })
+    const queue = clipQueue({ elevenLabs, clipStore, logger })
+    ;({ clipJobRunner, clipJobStore } = queue)
     const anthropic = createAnthropicProvider({
       apiKey: SECRET_ANTHROPIC_KEY,
       fetchImpl: anthropicFetch,
@@ -234,6 +279,8 @@ describe('server app (integration, fake upstreams)', () => {
       libraryStore,
       clipStore,
       elevenLabs,
+      ...queue,
+      ttsWaitMs,
       anthropic,
       ttsLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
@@ -255,6 +302,8 @@ describe('server app (integration, fake upstreams)', () => {
   }
 
   afterEach(async () => {
+    await clipJobRunner?.stop()
+    clipJobRunner = undefined
     await new Promise((resolve) => server.close(resolve))
     rmSync(distDir, { recursive: true, force: true })
   })
@@ -403,6 +452,7 @@ describe('server app (integration, fake upstreams)', () => {
       const tts = await status()
       expect(tts.clips).toEqual({ hits: 0, misses: 0, storeBytes: 0 })
       expect(tts.provider).toEqual({ calls: 0, billedFailures: 0 })
+      expect(tts.queue).toEqual({ queued: 0, running: 0, failed: 0 })
     })
 
     it('counts a miss, then a hit, one provider call, and the stored bytes', async () => {
@@ -416,10 +466,29 @@ describe('server app (integration, fake upstreams)', () => {
     })
 
     it('counts every attempt including retries, and a retried 5xx is not a billed failure', async () => {
-      await boot({ elevenLabsFetch: fetchThatFailsWith(500) }) // retries: 1 in this harness
+      await boot({ elevenLabsFetch: fetchThatFailsWith(500) }) // the runner's three attempts
       await post()
       const tts = await status()
-      expect(tts.provider).toEqual({ calls: 2, billedFailures: 0 })
+      expect(tts.provider).toEqual({ calls: 3, billedFailures: 0 })
+      expect(tts.queue).toEqual({ queued: 0, running: 0, failed: 1 })
+    })
+
+    it('reports a generation still running when its request gave up waiting', async () => {
+      const upstream = fetchElevenLabsHeld()
+      await boot({ elevenLabsFetch: upstream, ttsWaitMs: 50 })
+      expect((await post()).status).toBe(202)
+      expect((await status()).queue).toEqual({ queued: 0, running: 1, failed: 0 })
+      upstream.release()
+    })
+
+    it('reports the queue as null, not an error, when the job store cannot be read', async () => {
+      await boot()
+      clipJobStore.counts = async () => {
+        throw new Error('db down')
+      }
+      const res = await fetch(`${baseUrl}/api/status`)
+      expect(res.status).toBe(200)
+      expect((await res.json()).tts.queue).toBeNull()
     })
 
     it('does not count the credential probe as a provider call', async () => {
@@ -587,12 +656,15 @@ describe('server app (integration, fake upstreams)', () => {
       distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-dist-'))
       writeFileSync(join(distDir, 'index.html'), '<!doctype html>')
       logger = collectingLogger()
-      const elevenLabs = createElevenLabsProvider({ apiKey: null, queue: createBoundedQueue({ concurrency: 4 }) })
+      const elevenLabs = createElevenLabsProvider({ apiKey: null })
       const anthropic = createAnthropicProvider({ apiKey: null, queue: createBoundedQueue({ concurrency: 2 }) })
+      const queue = clipQueue({ elevenLabs, clipStore, logger })
+      ;({ clipJobRunner, clipJobStore } = queue)
       const handleRequest = createApp({
         libraryStore,
         clipStore,
         elevenLabs,
+        ...queue,
         anthropic,
         ttsLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
@@ -840,6 +912,124 @@ describe('server app (integration, fake upstreams)', () => {
     })
   })
 
+  /**
+   * S5. A miss is a job, not an inline provider call: the request queues it,
+   * waits on it for a bounded time, and answers what it knows by then.
+   *
+   *   done          → 200 audio
+   *   still running → 202 {status:'queued'}, Retry-After: 5 — the device asks
+   *                   again; the clip is in the store by then
+   *   failed        → the provider's kind, as before
+   *   billing cap   → 422 unreadable, with no provider call at all
+   */
+  describe('POST /api/tts — the generation queue (S5)', () => {
+    const post = (body = ttsBody()) =>
+      fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body,
+      })
+
+    it('answers 202 queued with Retry-After when the clip is not ready in time, and serves it on the re-poll', async () => {
+      const upstream = fetchElevenLabsHeld()
+      await boot({ elevenLabsFetch: upstream, ttsWaitMs: 50 })
+
+      const first = await post()
+      expect(first.status).toBe(202)
+      expect(first.headers.get('retry-after')).toBe('5')
+      expect(await first.json()).toEqual({ status: 'queued' })
+
+      upstream.release()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const again = await post()
+      expect(again.status).toBe(200)
+      expect(Buffer.from(await again.arrayBuffer()).byteLength).toBe(1600)
+      expect(upstream.calls, 'one generation, served from the store on the re-poll').toBe(1)
+    })
+
+    it('a re-poll while the job still runs joins it rather than paying again', async () => {
+      const upstream = fetchElevenLabsHeld()
+      await boot({ elevenLabsFetch: upstream, ttsWaitMs: 30 })
+
+      expect((await post()).status).toBe(202)
+      expect((await post()).status).toBe(202)
+      upstream.release()
+
+      expect(upstream.calls).toBe(1)
+    })
+
+    // Two devices sweeping the same new deck used to pay twice.
+    it('makes one provider call for concurrent requests for one phrase', async () => {
+      const upstream = fetchElevenLabsHeld()
+      await boot({ elevenLabsFetch: upstream })
+
+      const both = Promise.all([post(), post()])
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      upstream.release()
+      const [a, b] = await both
+
+      expect(a.status).toBe(200)
+      expect(b.status).toBe(200)
+      expect(upstream.calls).toBe(1)
+    })
+
+    // The month that was lost, bounded: whatever the next bug after a billed
+    // 2xx is, one phrase costs at most two calls a day.
+    it('refuses a third billed generation of one phrase in a day with 422, without calling the provider', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsBodyFails() })
+
+      expect((await post()).status).toBe(502)
+      expect((await post()).status).toBe(502)
+      const third = await post()
+
+      expect(third.status).toBe(422)
+      expect(await third.json()).toEqual({ error: 'unreadable' })
+      expect(elevenLabsUpstream.calls).toBe(2)
+
+      const tts = (await (await fetch(`${baseUrl}/api/status`)).json()).tts
+      expect(tts.requests).toEqual({ total: 3, failed: 3 })
+      expect(tts.lastFailure.kind).toBe('billing-capped')
+    })
+
+    // A request we built wrong is the same answer every time; 422 is terminal
+    // on the device, where a 502 was read as a network blip and retried.
+    it('answers a request the provider rejects with 422, after one call', async () => {
+      await boot({ elevenLabsFetch: fetchThatFailsWith(400) })
+
+      const res = await post()
+
+      expect(res.status).toBe(422)
+      expect(await res.json()).toEqual({ error: 'rejected-request' })
+      expect(elevenLabsUpstream.calls).toBe(1)
+    })
+
+    it('retries a 5xx inside the request’s wait and serves the clip that follows', async () => {
+      let calls = 0
+      const ok = fetchElevenLabsOk()
+      await boot({
+        elevenLabsFetch: async (url, init) => {
+          calls += 1
+          return calls === 1 ? { ok: false, status: 503 } : ok(url, init)
+        },
+      })
+
+      const res = await post()
+
+      expect(res.status).toBe(200)
+      expect(calls).toBe(2)
+    })
+
+    it('serves a stored clip without touching the queue', async () => {
+      await boot()
+      await post()
+      clipJobStore.request = async () => {
+        throw new Error('the queue must not be asked on a hit')
+      }
+
+      expect((await post()).status).toBe(200)
+    })
+  })
+
   describe('POST /api/scan', () => {
     it('returns parsed phrases for a valid image upload', async () => {
       await boot({ anthropicFetch: fetchAnthropicOk([{ french: 'bonjour', english: 'hello' }]) })
@@ -945,7 +1135,7 @@ describe('server app (integration, fake upstreams)', () => {
       distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-dist-'))
       writeFileSync(join(distDir, 'index.html'), '<!doctype html>')
       logger = collectingLogger()
-      const elevenLabs = createElevenLabsProvider({ apiKey: null, queue: createBoundedQueue({ concurrency: 4 }) })
+      const elevenLabs = createElevenLabsProvider({ apiKey: null })
       const anthropic = createAnthropicProvider({ apiKey: null, queue: createBoundedQueue({ concurrency: 2 }) })
       const handleRequest = createApp({
         libraryStore,
