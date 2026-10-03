@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createClipStore, createLibraryStore, createPool } from './db.js'
 import { createClipJobStore } from './clip-job-store.js'
 import { clipJobStoreContract, jobFields } from './clip-job-store.test-support.js'
+import { deleteClips } from '../scripts/clip-delete.mjs'
 
 /**
  * The only tests here that touch a real Postgres.
@@ -85,8 +86,8 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     await clips.put({ hash: 'regen', bytes: Buffer.alloc(100, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
     await clips.put({ hash: 'keep', bytes: Buffer.alloc(100, 2), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
 
-    await clips.delete('regen')
-    await clips.delete('absent')
+    expect(await clips.delete('regen')).toBe(true)
+    expect(await clips.delete('absent')).toBe(false)
 
     expect(await clips.get('regen')).toBeNull()
     expect(await clips.get('keep')).not.toBeNull()
@@ -224,6 +225,37 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     // The pool is usable afterwards — a failed put must not leak a client.
     await lib.put('rb', 'third', 3, { now: 20 })
     expect((await lib.get('rb')).data).toBe('third')
+  })
+
+  /**
+   * `scripts/clip-delete.mjs` (R2) on the real schema: both rows for the
+   * named hash go, and nothing else on the instance moves — not another
+   * hash, and above all not her library.
+   */
+  it('clip-delete removes the clip and job rows for a hash and touches no other row or table', async () => {
+    const clipStore = createClipStore(pool, { maxBytes: 1_000_000 })
+    await clipStore.init()
+    const clipJobStore = createClipJobStore(pool)
+    await clipJobStore.init()
+    const lib = createLibraryStore(pool, { snapshotIntervalMs: 0 })
+    await lib.init()
+    await lib.put('her', 'library-bytes', 1, { now: 0 })
+    const doomed = 'd'.repeat(64)
+    const kept = 'e'.repeat(64)
+    for (const hash of [doomed, kept]) {
+      await clipStore.put({ hash, bytes: Buffer.alloc(10, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+      await clipJobStore.request(jobFields({ hash }), 1)
+    }
+
+    expect(await deleteClips({ clipStore, clipJobStore }, [doomed, 'f'.repeat(64)])).toEqual([
+      { hash: doomed, clip: true, job: true },
+      { hash: 'f'.repeat(64), clip: false, job: false },
+    ])
+    expect(await clipStore.get(doomed)).toBeNull()
+    expect(await clipJobStore.get(doomed)).toBeNull()
+    expect(await clipStore.get(kept)).not.toBeNull()
+    expect(await clipJobStore.get(kept)).not.toBeNull()
+    expect((await lib.get('her')).data).toBe('library-bytes')
   })
 
   /**
