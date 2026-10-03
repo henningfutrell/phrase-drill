@@ -38,6 +38,11 @@ export interface SynthResult {
  * Collapsing them (both were 429 before) is what marked ~1,940 Phrases of a
  * cold 1,000-Phrase library permanently failed on the first sweep.
  *
+ * **`queued`** is HTTP 202: the server accepted the request and is still
+ * generating. Neither failure nor audio — ask the same POST again after
+ * `retryAfterMs`. Unlike `rate-limited` it speaks for this one request only,
+ * so the caller must not make the rest of the queue wait for it.
+ *
  * **`unreadable`** is HTTP 422, and terminal like `quota`: the provider
  * produced something unusable, or this phrase hit the server's billing cap
  * for 24 h. Asking again only spends money or is refused, so it is never
@@ -48,6 +53,7 @@ export type SynthError =
   | { kind: 'unauthorized' }
   | { kind: 'rate-limited'; retryAfterMs: number }
   | { kind: 'quota' }
+  | { kind: 'queued'; retryAfterMs: number }
   | { kind: 'unreadable' }
   | { kind: 'network'; detail: string }
 
@@ -61,6 +67,11 @@ const DEFAULT_RETRY_AFTER_MS = 1000
  * for (60 per 60s is one token per second), so a larger number is a bug or a
  * middlebox, not an instruction worth honouring. */
 const MAX_RETRY_AFTER_MS = 60_000
+
+/** Used when a 202 carries no usable `Retry-After`. Five seconds is what the
+ * server sends; generation takes seconds, so a shorter guess only re-asks
+ * before there is anything to find. */
+const DEFAULT_QUEUED_RETRY_AFTER_MS = 5000
 
 export interface SynthClient {
   /** Synthesize `text` (in `lang`) with the given voice. Resolves to MP3 bytes and an estimated duration. */
@@ -117,6 +128,10 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
         return Promise.reject(unauthorized())
       }
 
+      if (response.status === 202) {
+        return Promise.reject(queued(response.headers.get('retry-after')))
+      }
+
       if (response.status === 429) {
         return Promise.reject(rateLimited(response.headers.get('retry-after')))
       }
@@ -156,9 +171,18 @@ function unreadable(): SynthError {
 /** `Retry-After` is seconds (RFC 9110). Anything unparsable, zero, or
  * negative falls back rather than being trusted; anything absurd is capped. */
 function rateLimited(header: string | null): SynthError {
+  return { kind: 'rate-limited', retryAfterMs: parseRetryAfterMs(header, DEFAULT_RETRY_AFTER_MS) }
+}
+
+/** Same parsing as `rateLimited`, for a 202: a different default, the same cap. */
+function queued(header: string | null): SynthError {
+  return { kind: 'queued', retryAfterMs: parseRetryAfterMs(header, DEFAULT_QUEUED_RETRY_AFTER_MS) }
+}
+
+function parseRetryAfterMs(header: string | null, fallbackMs: number): number {
   const seconds = header === null ? NaN : Number(header)
-  const requested = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : DEFAULT_RETRY_AFTER_MS
-  return { kind: 'rate-limited', retryAfterMs: Math.min(requested, MAX_RETRY_AFTER_MS) }
+  const requested = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : fallbackMs
+  return Math.min(requested, MAX_RETRY_AFTER_MS)
 }
 
 function networkError(detail: string): SynthError {
