@@ -2169,25 +2169,42 @@ describe('App wired to explicit re-generation (T067)', () => {
     ],
   }
 
-  it('queues every Phrase of a Deck when the user confirms re-generating it', async () => {
+  // Regenerate, not enqueue: enqueue skips a Clip the device holds and is
+  // served the server's stored one, so Redo audio on a broken Clip used to
+  // change nothing at all.
+  it('regenerates every Phrase of a Deck when the user confirms re-generating it', async () => {
+    const generationQueue = createFakeGenerationQueue()
+    await renderApp(createFakeDeckStore([deckWithTwo]), createFakeSettingsStore(), createFakeSynthClient(), generationQueue)
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    const enqueuedBefore = generationQueue.enqueued.length
+
+    act(() => click(container.querySelector('[data-testid="regenerate-deck-audio"]')!))
+    await act(async () => click(container.querySelector('[data-testid="confirm-regenerate-deck-audio"]')!))
+
+    expect(generationQueue.regenerated.map((p) => p.id)).toEqual(['p1', 'p2'])
+    expect(generationQueue.enqueued).toHaveLength(enqueuedBefore)
+  })
+
+  it('regenerates nothing until the user confirms the Deck', async () => {
     const generationQueue = createFakeGenerationQueue()
     await renderApp(createFakeDeckStore([deckWithTwo]), createFakeSettingsStore(), createFakeSynthClient(), generationQueue)
     act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
 
     act(() => click(container.querySelector('[data-testid="regenerate-deck-audio"]')!))
-    await act(async () => click(container.querySelector('[data-testid="confirm-regenerate-deck-audio"]')!))
 
-    expect(generationQueue.enqueued.map((p) => p.id)).toEqual(['p1', 'p2'])
+    expect(generationQueue.regenerated).toEqual([])
   })
 
-  it('queues one Phrase when the user asks for that Phrase alone', async () => {
+  it('regenerates one Phrase when the user asks for that Phrase alone', async () => {
     const generationQueue = createFakeGenerationQueue()
     await renderApp(createFakeDeckStore([deckWithTwo]), createFakeSettingsStore(), createFakeSynthClient(), generationQueue)
     act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    const enqueuedBefore = generationQueue.enqueued.length
 
     await act(async () => click(container.querySelector('[data-testid="regenerate-phrase-audio-p2"]')!))
 
-    expect(generationQueue.enqueued.map((p) => p.id)).toEqual(['p2'])
+    expect(generationQueue.regenerated).toEqual([{ id: 'p2', french: 'Merci', english: 'Thanks' }])
+    expect(generationQueue.enqueued).toHaveLength(enqueuedBefore)
   })
 })
 
