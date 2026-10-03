@@ -192,6 +192,17 @@ export function createClipJobStore(pool) {
     },
 
     /**
+     * Removes the row for `hash`, and with it the hash's billing count —
+     * resolves `true` if there was one. Only the operator does this
+     * (`scripts/clip-delete.mjs`): it is what lets a capped or failed hash be
+     * generated again today, deliberately.
+     */
+    async delete(hash) {
+      const { rowCount } = await pool.query('DELETE FROM clip_jobs WHERE hash = $1', [hash])
+      return rowCount > 0
+    },
+
+    /**
      * The oldest due job, now `running`, or null. `SKIP LOCKED` so that two
      * instances overlapping during a deploy each take a different job rather
      * than one waiting on — and then repeating — the other's.
