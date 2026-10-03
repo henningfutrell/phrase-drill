@@ -289,6 +289,25 @@ describe('createClipStore (Postgres, T063)', () => {
     expect(clip.durationMs).toBe(250)
   })
 
+  // Regenerate (R1): the one way a stored Clip leaves except eviction. The
+  // next put for the hash must then land — `put` is ON CONFLICT DO NOTHING,
+  // so a delete that missed would leave the broken bytes served forever.
+  it('deletes one clip by hash, leaving the rest, so the next put for it lands', async () => {
+    const pool = fakeClipPool()
+    const store = createClipStore(pool)
+    await store.init()
+    await store.put({ hash: 'broken', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+    await store.put({ hash: 'other', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+
+    await store.delete('broken')
+    await store.delete('never-stored') // absent is not an error
+
+    expect(await store.get('broken')).toBeNull()
+    expect(await store.get('other')).not.toBeNull()
+    await store.put({ hash: 'broken', bytes: BYTES, mime: 'audio/mpeg', durationMs: 999, createdAt: 2 })
+    expect((await store.get('broken')).durationMs).toBe(999)
+  })
+
   it('does not throw or overwrite when the same hash is written twice', async () => {
     const pool = fakeClipPool()
     const store = createClipStore(pool)
@@ -390,6 +409,7 @@ describe('createClipStore — the growth bound (T071)', () => {
     await store.init()
     for (let i = 0; i < 10; i += 1) await store.put(clip(`clip-${i}`, 100, i))
     await store.get('clip-9')
+    await store.delete('clip-9')
 
     // The one guarantee that matters: her phrases are in `libraries` and
     // `library_versions` on this same instance, and nothing this store can be
@@ -468,6 +488,7 @@ describe('createClipJobStore — the tables it can reach (S5)', () => {
     await store.fail('h', 'unreadable', 10, { billed: true })
     await store.reapStale(10)
     await store.counts()
+    await store.get('h')
 
     const statements = [...capped.queries, ...requeued.queries].filter((text) => !/^\s*(BEGIN|COMMIT|ROLLBACK)\s*$/i.test(text))
     expect(statements.length).toBeGreaterThan(8)

@@ -79,6 +79,21 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     ).toBe(false)
   })
 
+  it('deletes exactly one clip by hash, and a regenerated put for it lands', async () => {
+    const clips = createClipStore(pool, { maxBytes: 1_000_000 })
+    await clips.init()
+    await clips.put({ hash: 'regen', bytes: Buffer.alloc(100, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
+    await clips.put({ hash: 'keep', bytes: Buffer.alloc(100, 2), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
+
+    await clips.delete('regen')
+    await clips.delete('absent')
+
+    expect(await clips.get('regen')).toBeNull()
+    expect(await clips.get('keep')).not.toBeNull()
+    await clips.put({ hash: 'regen', bytes: Buffer.alloc(100, 3), mime: 'audio/mpeg', durationMs: 2, createdAt: 11 })
+    expect((await clips.get('regen')).bytes[0], 'the new bytes, not the deleted ones').toBe(3)
+  })
+
   it('prunes archived versions by count, and by bytes, never to zero', async () => {
     const lib = createLibraryStore(pool, { snapshotIntervalMs: 0, versionMaxCount: 3, versionMaxBytes: 1024 * 1024 })
     await lib.init()

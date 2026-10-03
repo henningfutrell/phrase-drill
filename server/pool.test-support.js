@@ -224,8 +224,11 @@ export function fakeClipPool() {
       }
 
       if (sql.startsWith('DELETE')) {
-        for (const hash of params[0]) rows.delete(hash)
-        return { rows: [] }
+        // Eviction deletes `ANY($1::text[])`; `delete(hash)` deletes `= $1`.
+        const hashes = Array.isArray(params[0]) ? params[0] : [params[0]]
+        let rowCount = 0
+        for (const hash of hashes) if (rows.delete(hash)) rowCount += 1
+        return { rows: [], rowCount }
       }
 
       throw new Error(`fakeClipPool: unrecognized query: ${sql}`)
