@@ -78,6 +78,18 @@ export interface ClipCache {
   put(clip: Clip): Promise<void>
   has(hash: string): Promise<boolean>
   /**
+   * Takes one Clip out of the cache on purpose — the device half of
+   * **Regenerate** (docs/glossary.md). A broken Clip (truncated, garbled)
+   * otherwise answers `has()` with `true` for as long as it is held, so the
+   * generation queue skips it and asking again changes nothing.
+   *
+   * The audio and its index row leave together or not at all — the same
+   * one-transaction rule eviction keeps (T078), for the same reason: a row
+   * that outlives its audio makes `has()` promise a Clip that is gone.
+   * A no-op for a hash the cache does not hold.
+   */
+  delete(hash: string): Promise<void>
+  /**
    * Marks `hashes` as the current run's working set — spared from eviction
    * for as long as they hold that status (T016, the defect where a clip a
    * running drill still needs could be evicted mid-run: `has()` does not
@@ -433,6 +445,29 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
     }
   }
 
+  /**
+   * Removes one Clip's audio and its index row on ONE transaction over both
+   * stores (T078). Shared by eviction and by `delete`, so the two ways a Clip
+   * leaves the cache cannot drift apart on the one property both depend on.
+   */
+  async function deleteClipAndMeta(db: IDBPDatabase, hash: string): Promise<void> {
+    const tx = db.transaction([CLIPS_STORE, CLIP_META_STORE], 'readwrite')
+    await runTransaction(tx, async () => {
+      await tx.objectStore(CLIPS_STORE).delete(hash)
+      await tx.objectStore(CLIP_META_STORE).delete(hash)
+    })
+  }
+
+  /** Takes a removed Clip out of the in-memory account. Called only after the
+   * transaction that removed it has committed — counted second, as `put`
+   * does (T085), so a refused delete leaves the index describing the disk. */
+  function forget(index: Map<string, ClipMeta>, hash: string): void {
+    const meta = index.get(hash)
+    if (!meta) return
+    index.delete(hash)
+    totalBytes -= meta.bytes
+  }
+
   /** Re-dates a Clip and moves it to the young end of the LRU order. */
   async function touch(hash: string, index: Map<string, ClipMeta>): Promise<void> {
     const existing = index.get(hash)
@@ -505,32 +540,25 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
     if (totalBytes <= target) return
     const db = await getDatabase()
 
-    async function evictOne(hash: string, meta: ClipMeta): Promise<void> {
-      const tx = db.transaction([CLIPS_STORE, CLIP_META_STORE], 'readwrite')
-      await runTransaction(tx, async () => {
-        await tx.objectStore(CLIPS_STORE).delete(hash)
-        await tx.objectStore(CLIP_META_STORE).delete(hash)
-      })
-      index.delete(hash)
-      totalBytes -= meta.bytes
+    async function evictOne(hash: string): Promise<void> {
+      await deleteClipAndMeta(db, hash)
+      forget(index, hash)
     }
 
     // Pass 1: everything except the just-written clip and the working set.
     for (const hash of [...index.keys()]) {
       if (totalBytes <= target) return
       if (hash === protectedHash || protectedHashes.has(hash)) continue
-      const meta = index.get(hash)
-      if (!meta) continue
-      await evictOne(hash, meta)
+      if (!index.has(hash)) continue
+      await evictOne(hash)
     }
 
     // Pass 2: the working set gives way too — never the just-written clip.
     for (const hash of [...index.keys()]) {
       if (totalBytes <= target) return
       if (hash === protectedHash) continue
-      const meta = index.get(hash)
-      if (!meta) continue
-      await evictOne(hash, meta)
+      if (!index.has(hash)) continue
+      await evictOne(hash)
     }
   }
 
@@ -569,6 +597,17 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       index.set(clip.hash, meta)
 
       await evictDownToTarget(index, clip.hash)
+    },
+
+    async delete(hash: string): Promise<void> {
+      const db = await getDatabase()
+      const index = await getIndex()
+      // Always the transaction, even for a hash the index does not know: the
+      // index can lag the audio (T076 — a Clip the backfill has not measured),
+      // and a broken Clip left on the disk is the one thing this exists to
+      // remove. Deleting an absent key is a no-op in IndexedDB.
+      await deleteClipAndMeta(db, hash)
+      forget(index, hash)
     },
 
     protect(hashes: Iterable<string>): void {

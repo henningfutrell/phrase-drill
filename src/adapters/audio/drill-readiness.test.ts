@@ -19,6 +19,7 @@ function fakeClipCache(ready: readonly string[]): ClipCache {
     get: vi.fn(),
     put: vi.fn(),
     has: vi.fn(),
+    delete: vi.fn(),
     readyPhraseIds: vi.fn().mockResolvedValue(new Set(ready)),
   }
 }

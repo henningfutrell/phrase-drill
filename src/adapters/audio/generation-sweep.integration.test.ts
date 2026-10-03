@@ -141,6 +141,9 @@ function createFakeClipCache(): ClipCache {
     async has(hash) {
       return clips.has(hash)
     },
+    async delete(hash) {
+      clips.delete(hash)
+    },
     async readyPhraseIds() {
       return new Set()
     },

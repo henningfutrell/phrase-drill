@@ -205,6 +205,7 @@ const noopClipCache: BoundedClipCache = {
   async has() {
     return false
   },
+  async delete() {},
   async readyPhraseIds() {
     return new Set()
   },
