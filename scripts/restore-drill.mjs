@@ -57,7 +57,7 @@ export function scratchDatabaseName() {
 
 /**
  * Every table the app's own `init()` calls create (`server/db.js`):
- * `createAuthStore` → `users`/`sessions`, `createLibraryStore` →
+ * `createLibraryStore` →
  * `libraries`, `createClipStore` → `clips` (T063). A backup missing any one
  * of them is a backup that loses something, so the drill fails rather than
  * reporting a clean restore of a partial database.

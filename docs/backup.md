@@ -365,7 +365,7 @@ the incident.
   tab, which redeploys automatically — `docs/deploy.md`), or drop and
   recreate the production database first if you are certain the backup is
   the source of truth going forward.
-- Redeploy so `createLibraryStore(pool).init()` / `createAuthStore(pool).init()`
+- Redeploy so `createLibraryStore(pool).init()` / `createClipStore(pool).init()`
   run against the restored schema (Render redeploys automatically on an env
   var change; `docker compose up --build` locally) — both are idempotent
   (`CREATE TABLE IF NOT EXISTS`, `docs/server.md` "Schema: creation and
@@ -462,7 +462,7 @@ A throwaway `postgres:17-alpine` Docker container (`t054-drill-pg`, port
 55433, throwaway local-only credentials), never the repo's own
 `phrase-drill-postgres-1` and never `docker-compose.yml`. Client tools:
 `pg_dump`/`psql` 18.4. Schema created by the server's own
-`createAuthStore(pool).init()`, `createLibraryStore(pool).init()` and
+`createLibraryStore(pool).init()` and
 `createClipStore(pool).init()` — the same calls a boot makes, not hand-written
 DDL. Container removed afterward.
 

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
-import { portFrom, DEFAULT_PORT } from './index.js'
+import { portFrom, DEFAULT_PORT, supabaseConfigFrom } from './index.js'
 
 /**
  * T088. `Number(env.PORT ?? 8080)` was left in place by T082 on the reasoning
@@ -57,5 +57,19 @@ describe('portFrom (T088)', () => {
 
     expect(portFrom(raw, logger)).toBe(DEFAULT_PORT)
     expect(logger.error).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('supabaseConfigFrom', () => {
+  it('reads the url and the secret key', () => {
+    expect(supabaseConfigFrom({ SUPABASE_URL: 'http://x', SUPABASE_SECRET_KEY: 'k' })).toEqual({ url: 'http://x', secretKey: 'k' })
+  })
+
+  it.each([
+    ['SUPABASE_URL', { SUPABASE_SECRET_KEY: 'k' }],
+    ['SUPABASE_SECRET_KEY', { SUPABASE_URL: 'http://x' }],
+    ['SUPABASE_URL', { SUPABASE_URL: '', SUPABASE_SECRET_KEY: 'k' }],
+  ])('refuses to boot without %s', (name, env) => {
+    expect(() => supabaseConfigFrom(env)).toThrow(name)
   })
 })

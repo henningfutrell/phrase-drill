@@ -16,17 +16,8 @@ import { createServerTranslator } from './server-translator'
 const VALID_TOKEN = 'valid-token'
 const SUB = 'user-1'
 
-function fakeSessionAuth() {
-  return {
-    async verify(token: string) {
-      if (token !== VALID_TOKEN) throw new Error('invalid token')
-      return { sub: SUB }
-    },
-    async login() {
-      return null
-    },
-    async logout() {},
-  }
+async function fakeVerifyAccessToken(token: string) {
+  return token === VALID_TOKEN ? { sub: SUB } : null
 }
 
 function fakeAnthropicFetch(candidates: Array<{ text: string; register?: string }>) {
@@ -56,11 +47,10 @@ async function boot(anthropicFetch: typeof fetch) {
     ttsLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     scanLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     libraryLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
-    loginLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     translateLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     distDir: import.meta.dirname,
     logger: { info() {}, warn() {}, error() {} },
-    sessionAuth: fakeSessionAuth(),
+    verifyAccessToken: fakeVerifyAccessToken,
   })
   server = createServer(handleRequest)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
