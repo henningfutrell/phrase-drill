@@ -90,6 +90,17 @@ function fetchElevenLabsTruncated(byteLength) {
   return impl
 }
 
+/** A 2xx with the given content-type and body, counting calls. */
+function fetchElevenLabsSending({ contentType, bytes }) {
+  const impl = async () => {
+    impl.calls += 1
+    const headers = new Headers(contentType ? { 'content-type': contentType } : {})
+    return { ok: true, status: 200, headers, arrayBuffer: async () => new Uint8Array(bytes).buffer }
+  }
+  impl.calls = 0
+  return impl
+}
+
 /** A 2xx (billed) whose body then fails to read — the shape that used to be retried and re-billed. */
 function fetchElevenLabsBodyFails() {
   const impl = async () => {
@@ -120,8 +131,8 @@ function fetchElevenLabsOk() {
     // Distinguishable bytes per call, so a test can tell a replayed cached
     // clip from a freshly generated one.
     const bytes = new Uint8Array(1600)
-    bytes[0] = impl.calls
-    return { ok: true, status: 200, arrayBuffer: async () => bytes.buffer }
+    bytes.set([0x49, 0x44, 0x33, impl.calls]) // 'ID3' + the call number
+    return { ok: true, status: 200, headers: new Headers({ 'content-type': 'audio/mpeg' }), arrayBuffer: async () => bytes.buffer }
   }
   impl.calls = 0
   return impl
@@ -601,6 +612,28 @@ describe('server app (integration, fake upstreams)', () => {
       })
       expect(second.status).toBe(422)
       expect(elevenLabsUpstream.calls).toBe(2)
+    })
+
+    // Validation before caching: `put` is ON CONFLICT DO NOTHING, so the first
+    // bytes stored under a hash are served to every device forever.
+    describe.each([
+      ['a JSON body served as application/json', { contentType: 'application/json', bytes: Buffer.alloc(2000, 0x7b) }],
+      ['an MP3 with no content-type', { contentType: null, bytes: Buffer.from([0x49, 0x44, 0x33, ...Array(1997).fill(0)]) }],
+      ['audio/mpeg bytes that are not an MP3', { contentType: 'audio/mpeg', bytes: Buffer.alloc(2000, 0x7b) }],
+      ['an implausibly long body for the text', { contentType: 'audio/mpeg', bytes: Buffer.from([0x49, 0x44, 0x33, ...Array(200_000).fill(0)]) }],
+    ])('%s', (_name, upstream) => {
+      it('is answered 422 unreadable and never cached', async () => {
+        await boot({ elevenLabsFetch: fetchElevenLabsSending(upstream) })
+        const post = () =>
+          fetch(`${baseUrl}/api/tts`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+            body: ttsBody(),
+          })
+        expect((await post()).status).toBe(422)
+        expect((await post()).status).toBe(422)
+        expect(elevenLabsUpstream.calls).toBe(2)
+      })
     })
 
     it('answers 502 billed-failure for a body that fails after a 2xx, with ONE provider call', async () => {
