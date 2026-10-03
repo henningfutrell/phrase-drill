@@ -40,6 +40,7 @@ deleted the moment it's found, not left to expire on its own schedule.
 | Method | Path           | Purpose                                              | Body limit | Rate limit       |
 | ------ | -------------- | ----------------------------------------------------- | ---------- | ----------------- |
 | GET    | `/api/health`  | Liveness check, no auth required.                     | —          | none               |
+| GET    | `/api/status`  | Operational readings, no auth: the voice credential (cached probe), `/api/tts` counters, clip store and provider spend, library sync — see "Reading `/api/status`". | — | none |
 | POST   | `/api/login`   | `{username, password}` → `200 {token, expiresAt}` or `401` (identical body whether the username doesn't exist or the password is wrong — no leak). | 2 KB | 5 / 60s per username |
 | POST   | `/api/logout`  | Deletes the session row for the bearer token, if any. Always `204`. | — | none |
 | POST   | `/api/tts`     | Speech for one phrase (`{text, voiceId, modelId, provider, lang}` → audio/mpeg), served from the shared Clip store when it holds it — see below. All five fields are required. | 8 KB       | 60 / 60s per session |
@@ -384,6 +385,36 @@ in `/api/status` (the provider charged for it):
 - Size: at least `max(1000, 100 x characters)` bytes and at most `6400 x
   characters + 48000`. Loose on purpose — a false rejection costs one
   regeneration, a missed truncation costs a botched clip on every device.
+
+### Reading `/api/status`
+
+No auth, no secrets, no per-device data; counters are in-process and reset on
+every restart. The `tts` object:
+
+```json
+{
+  "configured": true,
+  "credential": "ok",
+  "detail": "HTTP 200",
+  "checkedAt": 1790000000000,
+  "requests": { "total": 12, "failed": 1 },
+  "clips": { "hits": 8, "misses": 4, "storeBytes": 83200 },
+  "provider": { "calls": 5, "billedFailures": 1 },
+  "lastFailure": { "kind": "billed-failure", "at": 1790000000000 }
+}
+```
+
+- `clips.hits` / `clips.misses`: `clipStore` lookups in `/api/tts`.
+  `storeBytes` is `SUM(byte_size)`, or `null` if that query fails (the
+  endpoint still answers).
+- `provider.calls`: every synthesis attempt to ElevenLabs, retries included,
+  probes excluded. `billedFailures`: attempts that got a 2xx but produced no
+  stored clip (`billed-failure` and validation `unreadable`).
+- Healthy: `misses` is about `provider.calls`, and `clips.storeBytes` grows
+  with it. `misses` high with `storeBytes` flat is the failure of
+  2026-09-02 to 2026-10-03. `calls` above `misses` is retries; a rising
+  `billedFailures` is money spent on nothing.
+- `lastFailure` is present only after a failure.
 
 ### The ceiling on it (T071)
 
