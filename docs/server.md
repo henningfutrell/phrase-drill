@@ -846,16 +846,20 @@ These are deliberate stopping points, not gaps someone forgot to close:
 | Var                    | Default                                                     | Meaning                                           |
 | ----------------------- | ------------------------------------------------------------ | -------------------------------------------------- |
 | `PORT`                  | `8080`                                                        | HTTP port. Parsed, not coerced (T088): anything that is not a whole number in 1–65535 — including an empty or cleared value, which `Number('')` reads as `0` and `listen(0)` turns into a RANDOM free port — logs an error and falls back to `8080`. |
-| `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `library_versions`, `users`, `sessions`, `clips`. |
+| `DATABASE_URL`          | `postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill` | Postgres connection string for `libraries`, `library_versions`, `clips`. Production: the Supabase session pooler URI (port 5432) **without** `sslmode=`; the server verifies it against `server/certs/supabase-prod-ca.crt`. A remote host with no TLS rule in `sslConfigFor` is refused. |
+| `SUPABASE_URL`          | local stack: `http://127.0.0.1:54321`                        | Supabase project URL (Auth token verification, Storage). Production: `https://<ref>.supabase.co`. |
+| `SUPABASE_SECRET_KEY`   | unset                                                         | Supabase secret key (`sb_secret_...`): Storage access. Secret, env only. |
+| `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` | unset                          | Public per-project values baked into the PWA at build time (Docker build args; `docs/deploy.md`). |
 | `CLIP_STORE_MAX_BYTES`  | `314572800` (300 MB)                                          | Ceiling on the shared Clip store; crossing it evicts least-recently-used to 90%. Raise it with the database plan, never above what leaves `libraries` room. |
 | `DIST_DIR`               | `../dist` (relative to `server/`)                             | Built PWA to serve statically.               |
 | `ELEVENLABS_API_KEY`     | unset                                                         | Speech generation returns `not-configured` if unset.|
 | `ANTHROPIC_API_KEY`      | unset                                                         | Scan reading returns `not-configured` if unset.      |
 
-That's the whole list (T050) — no login-provider config, no build-time
-`VITE_*` client id/realm to bake into the PWA, nothing else to set.
+The Supabase values are the whole of the identity config: there is no other
+login-provider setting. The `VITE_*` pair is public by design; everything
+else here is server-side only.
 
-Secrets (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, the Postgres password)
+Secrets (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, `SUPABASE_SECRET_KEY`, the Postgres password)
 come from the environment only — never committed, never logged, never
 returned in a response or error body (see "Provable" above). `.env.example`
 documents every variable this stack reads, with safe local-only defaults;
