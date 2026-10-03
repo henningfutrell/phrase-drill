@@ -24,9 +24,8 @@ user's phone, not for hypothetical others.
   The provider APIs (ElevenLabs, Anthropic) stay plain `fetch`. It owns both
   provider credentials (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, env only)
   and her phrase library (Postgres, T043). The device never sees a provider
-  key: it authenticates to the server with an opaque session token (a plain
-  login form, `POST /api/login` — T050, replacing an earlier Keycloak/OIDC
-  login in turn replacing the original device-generated library key) and
+  key: it authenticates to the server with a Supabase access token (JWT,
+  verified by `auth.getClaims`; its `sub` is her library key) and
   calls same-origin `/api/tts`, `/api/scan`, `/api/library`. Two services —
   the app and Postgres — serve the stack together: `docker-compose.yml`
   locally, `render.yaml` in production (T053). See `docs/server.md` for

@@ -37,6 +37,8 @@ services:
       DATABASE_URL: 'postgres://${POSTGRES_USER:-phrase_drill}:${POSTGRES_PASSWORD:-phrase_drill}@postgres:5432/${POSTGRES_DB:-phrase_drill}'
       ELEVENLABS_API_KEY: '${ELEVENLABS_API_KEY:-}'
       ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
+      SUPABASE_URL: '${SUPABASE_URL:-}'
+      SUPABASE_SECRET_KEY: '${SUPABASE_SECRET_KEY:-}'
     depends_on:
       postgres:
         condition: service_healthy

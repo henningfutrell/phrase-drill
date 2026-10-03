@@ -9,10 +9,8 @@ const { Pool } = pg
  * device-side (`format`/`schemaVersion`/`exportedAt`/`decks`), keyed by the
  * session's user id (`sub`, T050) — previously the Keycloak subject, and
  * before that the device-generated 64-hex library key; both deleted along
- * with every caller of them. `createAuthStore` below is the other half
- * (`users`/`sessions`, T050) — same one Postgres instance, one database
- * (`phrase_drill`), no second logical database for a vendor identity
- * provider's own schema any more.
+ * with every caller of them. Identity lives in Supabase Auth, not in
+ * this database.
  *
  * `createLibraryStore` takes an already-constructed pool (or, in tests, a
  * fake with the same `query`/`end` shape) rather than a connection string,
@@ -512,83 +510,6 @@ const LAST_USED_GRAIN_MS = 24 * 60 * 60 * 1000
 const CLIP_EVICT_BATCH_SIZE = 200
 
 /**
- * Identity storage for T050 (replacing Keycloak + the JWT it issued): two
- * tables, `users` (one row per account, created only by `scripts/useradd.mjs`
- * — there is no signup endpoint) and `sessions` (one row per issued token,
- * looked up by the token's SHA-256 hash — never the token itself, so a
- * database leak yields nothing usable). `server/session-auth.js` is the only
- * caller; it owns hashing and expiry logic, this module is SQL only, same
- * split as `createLibraryStore` above.
- *
- * Returns `{ init, users: { getByUsername, create }, sessions: { create,
- * get, delete }, close }` — nested to match `createSessionAuth`'s seam
- * (`userStore.getByUsername`, `sessionStore.create`/`get`/`delete`) name for
- * name (T052). `server/index.js` wires `authStore.users` and
- * `authStore.sessions` in directly; `server/auth-store-contract.test.js`
- * pins that the names actually line up, which nothing did before.
- */
-export function createAuthStore(pool) {
-  return {
-    /** Idempotent: safe on every boot, including against a database that already has both tables. */
-    async init() {
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY,
-          username TEXT UNIQUE NOT NULL,
-          password_hash TEXT NOT NULL,
-          created_at BIGINT NOT NULL
-        )
-      `)
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS sessions (
-          token_hash TEXT PRIMARY KEY,
-          user_id TEXT NOT NULL,
-          created_at BIGINT NOT NULL,
-          expires_at BIGINT NOT NULL
-        )
-      `)
-    },
-
-    users: {
-      async getByUsername(username) {
-        const { rows } = await pool.query(
-          'SELECT id, username, password_hash AS "passwordHash", created_at AS "createdAt" FROM users WHERE username = $1',
-          [username],
-        )
-        if (rows.length === 0) return null
-        return { id: rows[0].id, username: rows[0].username, passwordHash: rows[0].passwordHash, createdAt: Number(rows[0].createdAt) }
-      },
-
-      /** Throws (Postgres's own unique-violation, code `23505`) on a duplicate username — an existing account is an error, never a silent overwrite. */
-      async create({ id, username, passwordHash, createdAt }) {
-        await pool.query('INSERT INTO users (id, username, password_hash, created_at) VALUES ($1, $2, $3, $4)', [id, username, passwordHash, createdAt])
-      },
-    },
-
-    sessions: {
-      async create(tokenHash, userId, createdAt, expiresAt) {
-        await pool.query('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)', [
-          tokenHash,
-          userId,
-          createdAt,
-          expiresAt,
-        ])
-      },
-
-      async get(tokenHash) {
-        const { rows } = await pool.query('SELECT user_id AS "userId", expires_at AS "expiresAt" FROM sessions WHERE token_hash = $1', [tokenHash])
-        if (rows.length === 0) return null
-        return { userId: rows[0].userId, expiresAt: Number(rows[0].expiresAt) }
-      },
-
-      async delete(tokenHash) {
-        await pool.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash])
-      },
-    },
-  }
-}
-
-/**
  * Decides the `ssl` option `pg` needs, from `DATABASE_URL` alone — no new
  * env var (T053, deploying to Render). Render's managed Postgres exposes
  * two hostnames for the same database: an *internal* one (`dpg-xxxx-a`, no
@@ -641,7 +562,7 @@ export function sslConfigFor(connectionString) {
  * hostname, a firewall, the wrong network — hangs for over a minute per
  * attempt with no output. Combined with `waitForDatabase`'s retry loop that
  * turns a misconfiguration into an apparently frozen process, which is
- * exactly how `scripts/useradd.mjs` was reported. Fail fast; the retry loop
+ * exactly how an operator script was reported. Fail fast; the retry loop
  * above is what provides the patience.
  *
  * **The `error` listener is not optional either (T088).** `pg` attaches an
@@ -661,7 +582,7 @@ export function sslConfigFor(connectionString) {
  * The message and the driver's SQLSTATE go through the redacting logger, never
  * `console.error`, because a driver error can quote the connection string —
  * docs/server.md "Provable: no key can leak". A caller with no logger of its
- * own (`scripts/useradd.mjs`, `scripts/restore-drill.mjs`) gets one that
+ * own (`scripts/restore-drill.mjs`) gets one that
  * redacts this connection string's password, so the safe path is the default
  * rather than something each script has to remember.
  */
