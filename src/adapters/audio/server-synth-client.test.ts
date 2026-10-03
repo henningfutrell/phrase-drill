@@ -195,3 +195,72 @@ describe('createServerSynthClient', () => {
     expect(error.kind).toBe('network')
   })
 })
+
+/**
+ * Regenerate (docs/glossary.md): the one request that tells the server to
+ * throw its stored Clip away and make it again. `/api/tts` alone cannot — it
+ * serves the stored Clip, broken or not, to every device forever. Everything
+ * but the path is `synthesize`'s: same body, same auth, same answers, so the
+ * queue reads one set of outcomes whichever it sent.
+ */
+describe('createServerSynthClient regenerate', () => {
+  it('posts the whole content address to /api/tts/regenerate, bearer-authenticated', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(mp3Response(200, 100, 10))
+    const { client } = makeClient({ fetchImpl })
+
+    await client.regenerate('Bonjour', 'fr-FR', VOICE)
+
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/tts/regenerate')
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${ACCESS_TOKEN}`)
+    expect(JSON.parse(init.body as string)).toEqual({
+      text: 'Bonjour',
+      voiceId: 'voice-123',
+      modelId: 'eleven_multilingual_v2',
+      provider: 'elevenlabs',
+      lang: 'fr-FR',
+    })
+  })
+
+  it('resolves a 200 to the new MP3 bytes and the server-supplied duration', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(mp3Response(200, 16_000, 1000))
+    const { client } = makeClient({ fetchImpl })
+
+    const result = await client.regenerate('Bonjour', 'fr-FR', VOICE)
+
+    expect(result.bytes.byteLength).toBe(16_000)
+    expect(result.durationMs).toBe(1000)
+  })
+
+  it('passes the abort signal through to fetch', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(mp3Response(200, 100, 10))
+    const { client } = makeClient({ fetchImpl })
+    const signal = new AbortController().signal
+
+    await client.regenerate('Bonjour', 'fr-FR', VOICE, signal)
+
+    expect((fetchImpl.mock.calls[0] as [string, RequestInit])[1].signal).toBe(signal)
+  })
+
+  it.each<[string, Response, SynthError]>([
+    ['202 queued', errorResponse(202, { 'retry-after': '5' }), { kind: 'queued', retryAfterMs: 5000 }],
+    ['422 unreadable (includes the 24 h billing cap)', errorResponse(422), { kind: 'unreadable' }],
+    ['429 rate-limited', errorResponse(429, { 'retry-after': '20' }), { kind: 'rate-limited', retryAfterMs: 20_000 }],
+    ['402 quota', errorResponse(402), { kind: 'quota' }],
+    ['401 unauthorized', errorResponse(401), { kind: 'unauthorized' }],
+    ['503 unauthorized', errorResponse(503), { kind: 'unauthorized' }],
+  ])('maps a %s exactly as synthesize does', async (_label, response, expected) => {
+    const { client } = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(response) })
+
+    await expect(client.regenerate('Bonjour', 'fr-FR', VOICE)).rejects.toEqual(expected)
+  })
+
+  it('rejects with a network SynthError when fetch throws or the status is unrecognized', async () => {
+    const thrown = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockRejectedValue(new TypeError('Failed to fetch')) })
+    const status = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(errorResponse(500)) })
+
+    await expect(thrown.client.regenerate('Bonjour', 'fr-FR', VOICE)).rejects.toMatchObject({ kind: 'network' })
+    await expect(status.client.regenerate('Bonjour', 'fr-FR', VOICE)).rejects.toMatchObject({ kind: 'network' })
+  })
+})
