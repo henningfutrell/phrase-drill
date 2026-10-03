@@ -51,15 +51,19 @@ export function DeckDetailScreen({
   /** Launches a Drill over this whole Deck (docs/design.md §3.3, T006). */
   onDrillDeck: () => void
   /**
-   * Makes the audio for every Phrase of this Deck again, in the voice pinned
-   * now (T067). Confirmed first: it is one request per side per Phrase, the
-   * only control in the app that spends real money in bulk, and the user has no
-   * other signal of what it costs. Optional — a caller that wires nothing
-   * gets no control.
+   * **Regenerate** (docs/glossary.md) every Phrase of this Deck: throws away
+   * the audio the user has in the voice pinned now — on this phone and on the
+   * server — and makes it again (T067). The control for audio that is broken.
+   * Clips in other voices are untouched. Confirmed first: it is one paid
+   * request per side per Phrase, the only control in the app that spends
+   * real money in bulk, and the user has no other signal of what it costs.
+   * The server allows two provider charges per Clip per 24 h, so a second
+   * Redo within a day may be refused and that Phrase shows as failed.
+   * Optional — a caller that wires nothing gets no control.
    */
   onRegenerateDeckAudio?: () => void
-  /** The same for one Phrase. One tap, no confirmation: two Clips is not a
-   * decision worth a sheet. */
+  /** The same for one Phrase — both its Clips, same 24 h cap. One tap, no
+   * confirmation: two Clips is not a decision worth a sheet. */
   onRegeneratePhraseAudio?: (id: PhraseId) => void
   /**
    * How long since the library was last safe somewhere else (T031). Shown
