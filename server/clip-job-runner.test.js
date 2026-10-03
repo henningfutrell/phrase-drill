@@ -211,7 +211,8 @@ describe('createClipJobRunner (S5)', () => {
 
   it('never runs more than `concurrency` provider calls at once', async () => {
     const gate = deferred()
-    const { ask, provider } = await setup({ provider: fakeProvider(() => gate.promise), concurrency: 2 })
+    // No poll to fall back on: a freed slot must claim the next job itself.
+    const { ask, provider } = await setup({ provider: fakeProvider(() => gate.promise), concurrency: 2, pollMs: 60_000 })
 
     const outcomes = ['a', 'b', 'c', 'd', 'e'].map((hash) => ask(hash))
     await vi.waitFor(() => expect(provider.calls).toBe(2))
