@@ -187,7 +187,7 @@ async function newClipStore(options) {
 }
 
 /**
- * The generation queue `/api/tts` waits on (S5): the contract-checked
+ * The clip job queue `/api/tts` waits on (S5): the contract-checked
  * in-memory job store and the real runner, with waits short enough for a
  * test. `retryDelayMs` is 1 ms so a retried failure exhausts its three
  * attempts inside one request's wait.
@@ -243,7 +243,7 @@ describe('server app (integration, fake upstreams)', () => {
   let clipStore
   /** The counting fake upstream this boot wired in — `.calls` is what the T063 tests assert on. */
   let elevenLabsUpstream
-  /** The generation queue this boot wired in (S5); stopped after each test. */
+  /** The clip job queue this boot wired in (S5); stopped after each test. */
   let clipJobRunner
   let clipJobStore
 
@@ -925,7 +925,7 @@ describe('server app (integration, fake upstreams)', () => {
    *   failed        → the provider's kind, as before
    *   billing cap   → 422 unreadable, with no provider call at all
    */
-  describe('POST /api/tts — the generation queue (S5)', () => {
+  describe('POST /api/tts — the clip job queue (S5)', () => {
     const post = (body = ttsBody()) =>
       fetch(`${baseUrl}/api/tts`, {
         method: 'POST',
