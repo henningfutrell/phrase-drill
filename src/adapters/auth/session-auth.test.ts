@@ -1,9 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createSessionAuth, AuthRequiredError } from './session-auth'
+import {
+  createSessionAuth,
+  purgeLegacySession,
+  AuthRequiredError,
+  AuthUnavailableError,
+  type AuthClient,
+} from './session-auth'
+import { createIndexedDbDeckStore } from '../storage'
+import { idbDestructiveOperations, resetFakeIdb } from '../storage/idb.test-support'
 
-/** In-memory stand-in for `localStorage` — the real thing isn't available under `@vitest-environment node`. */
-function fakeStorage(): Storage {
-  const map = new Map<string, string>()
+/** A fake of the Supabase auth client at the seam — an external unmanaged dependency. */
+function fakeClient() {
+  const auth = {
+    signInWithPassword: vi.fn<AuthClient['auth']['signInWithPassword']>(),
+    getSession: vi.fn<AuthClient['auth']['getSession']>(),
+    signOut: vi.fn<AuthClient['auth']['signOut']>(),
+  }
+  auth.signOut.mockResolvedValue({ error: null })
+  return { client: { auth } satisfies AuthClient, auth }
+}
+
+function fakeStorage(initial: Record<string, string> = {}): Storage {
+  const map = new Map(Object.entries(initial))
   return {
     getItem: (k) => map.get(k) ?? null,
     setItem: (k, v) => void map.set(k, String(v)),
@@ -17,147 +35,149 @@ function fakeStorage(): Storage {
 }
 
 describe('createSessionAuth', () => {
-  let storage: Storage
+  let fake: ReturnType<typeof fakeClient>
   let fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>
-  let now: number
   let onUnauthorized: ReturnType<typeof vi.fn<() => void>>
 
   beforeEach(() => {
-    storage = fakeStorage()
+    fake = fakeClient()
     fetchImpl = vi.fn<typeof fetch>()
-    now = 1_000_000
     onUnauthorized = vi.fn()
   })
 
   function auth() {
-    return createSessionAuth({ storage, fetchImpl, now: () => now, onUnauthorized })
+    return createSessionAuth({ client: fake.client, fetchImpl, onUnauthorized })
+  }
+
+  function withSession(token: string) {
+    fake.auth.getSession.mockResolvedValue({ data: { session: { access_token: token } }, error: null })
   }
 
   describe('login()', () => {
-    it('POSTs credentials to /api/login and stores the returned token on success', async () => {
-      fetchImpl.mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({ token: 'tok-1', expiresAt: now + 1000 }),
-      } as unknown as Response)
-
-      const a = auth()
-      const result = await a.login('her', 'correct-password')
-
+    it('signs in with the email and password', async () => {
+      fake.auth.signInWithPassword.mockResolvedValue({ error: null })
+      const result = await auth().login('her@example.com', 'correct-password')
       expect(result).toEqual({ ok: true })
-      expect(fetchImpl).toHaveBeenCalledWith(
-        '/api/login',
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ username: 'her', password: 'correct-password' }),
-        }),
-      )
-      expect(await a.getAccessToken()).toBe('tok-1')
+      expect(fake.auth.signInWithPassword).toHaveBeenCalledWith({
+        email: 'her@example.com',
+        password: 'correct-password',
+      })
     })
 
-    it('returns a failure result (never throws) on 401, and stores nothing', async () => {
-      fetchImpl.mockResolvedValue({ ok: false, status: 401 } as unknown as Response)
-
-      const a = auth()
-      const result = await a.login('her', 'wrong-password')
-
-      expect(result).toEqual({ ok: false, reason: 'invalid-credentials' })
-      await expect(a.getAccessToken()).rejects.toBeInstanceOf(AuthRequiredError)
+    it('returns invalid-credentials (never throws) when the server refuses the credentials', async () => {
+      fake.auth.signInWithPassword.mockResolvedValue({ error: { message: 'Invalid login credentials', status: 400 } })
+      expect(await auth().login('her@example.com', 'wrong')).toEqual({ ok: false, reason: 'invalid-credentials' })
     })
 
-    it('returns a network failure result when the request itself throws', async () => {
-      fetchImpl.mockRejectedValue(new Error('offline'))
+    it('returns network when the server cannot be reached', async () => {
+      fake.auth.signInWithPassword.mockResolvedValue({ error: { message: 'fetch failed', status: 0 } })
+      expect(await auth().login('her@example.com', 'x')).toEqual({ ok: false, reason: 'network' })
+    })
 
-      const result = await auth().login('her', 'correct-password')
+    it('returns network when the client throws', async () => {
+      fake.auth.signInWithPassword.mockRejectedValue(new TypeError('fetch failed'))
+      expect(await auth().login('her@example.com', 'x')).toEqual({ ok: false, reason: 'network' })
+    })
 
-      expect(result).toEqual({ ok: false, reason: 'network' })
+    it('returns network on a server error', async () => {
+      fake.auth.signInWithPassword.mockResolvedValue({ error: { message: 'boom', status: 500 } })
+      expect(await auth().login('her@example.com', 'x')).toEqual({ ok: false, reason: 'network' })
     })
   })
 
   describe('getAccessToken()', () => {
-    it('throws AuthRequiredError when nothing is logged in yet', async () => {
+    it('resolves to the session access token', async () => {
+      withSession('jwt-1')
+      expect(await auth().getAccessToken()).toBe('jwt-1')
+    })
+
+    it('throws AuthRequiredError when there is no session', async () => {
+      fake.auth.getSession.mockResolvedValue({ data: { session: null }, error: null })
       await expect(auth().getAccessToken()).rejects.toBeInstanceOf(AuthRequiredError)
     })
 
-    it('persists the token across a reload — a fresh instance over the same storage reuses it', async () => {
-      fetchImpl.mockResolvedValue({ ok: true, status: 200, json: async () => ({ token: 'tok-1', expiresAt: now + 1000 }) } as unknown as Response)
-      await auth().login('her', 'correct-password')
-
-      const b = createSessionAuth({ storage, fetchImpl, now: () => now, onUnauthorized })
-      expect(await b.getAccessToken()).toBe('tok-1')
-    })
-
-    it('throws AuthRequiredError once the stored token is past its own expiresAt, and clears it', async () => {
-      fetchImpl.mockResolvedValue({ ok: true, status: 200, json: async () => ({ token: 'tok-1', expiresAt: now + 1000 }) } as unknown as Response)
-      const a = auth()
-      await a.login('her', 'correct-password')
-
-      now += 1001
-      await expect(a.getAccessToken()).rejects.toBeInstanceOf(AuthRequiredError)
-
-      const b = createSessionAuth({ storage, fetchImpl, now: () => now, onUnauthorized })
-      await expect(b.getAccessToken()).rejects.toBeInstanceOf(AuthRequiredError)
-    })
-  })
-
-  describe('logout()', () => {
-    it('POSTs to /api/logout with the bearer token, then clears storage regardless of the response', async () => {
-      fetchImpl.mockResolvedValue({ ok: true, status: 200, json: async () => ({ token: 'tok-1', expiresAt: now + 1000 }) } as unknown as Response)
-      const a = auth()
-      await a.login('her', 'correct-password')
-      fetchImpl.mockResolvedValue({ ok: true, status: 204 } as unknown as Response)
-
-      await a.logout()
-
-      expect(fetchImpl).toHaveBeenCalledWith(
-        '/api/logout',
-        expect.objectContaining({ method: 'POST', headers: expect.objectContaining({ authorization: 'Bearer tok-1' }) }),
-      )
-      await expect(a.getAccessToken()).rejects.toBeInstanceOf(AuthRequiredError)
-    })
-
-    it('clears storage even if the /api/logout call fails', async () => {
-      fetchImpl.mockResolvedValue({ ok: true, status: 200, json: async () => ({ token: 'tok-1', expiresAt: now + 1000 }) } as unknown as Response)
-      const a = auth()
-      await a.login('her', 'correct-password')
-      fetchImpl.mockRejectedValue(new Error('offline'))
-
-      await expect(a.logout()).resolves.not.toThrow()
-      await expect(a.getAccessToken()).rejects.toBeInstanceOf(AuthRequiredError)
+    it('throws AuthUnavailableError, not AuthRequiredError, when the session could not be read or refreshed', async () => {
+      fake.auth.getSession.mockResolvedValue({ data: { session: null }, error: { message: 'offline', status: 0 } })
+      await expect(auth().getAccessToken()).rejects.toBeInstanceOf(AuthUnavailableError)
     })
   })
 
   describe('authFetch', () => {
-    it('passes calls straight through to the injected fetch', async () => {
-      const response = { ok: true, status: 200 } as unknown as Response
+    it('adds the access token as a bearer header and hands the response back untouched', async () => {
+      withSession('jwt-1')
+      const response = { status: 200 } as Response
       fetchImpl.mockResolvedValue(response)
 
-      const result = await auth().authFetch('/api/tts', { method: 'POST' })
+      const result = await auth().authFetch('/api/library', { method: 'GET', headers: { accept: 'application/json' } })
 
       expect(result).toBe(response)
-      expect(fetchImpl).toHaveBeenCalledWith('/api/tts', { method: 'POST' })
-    })
-
-    it('clears the stored token and calls onUnauthorized when a call comes back 401', async () => {
-      fetchImpl.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ token: 'tok-1', expiresAt: now + 1000 }),
-      } as unknown as Response)
-      const a = auth()
-      await a.login('her', 'correct-password')
-
-      fetchImpl.mockResolvedValueOnce({ ok: false, status: 401 } as unknown as Response)
-      await a.authFetch('/api/tts', { method: 'POST' })
-
-      expect(onUnauthorized).toHaveBeenCalledTimes(1)
-      await expect(a.getAccessToken()).rejects.toBeInstanceOf(AuthRequiredError)
-    })
-
-    it('does not call onUnauthorized for a non-401 response', async () => {
-      fetchImpl.mockResolvedValue({ ok: true, status: 200 } as unknown as Response)
-      await auth().authFetch('/api/tts', { method: 'POST' })
+      const [url, init] = fetchImpl.mock.calls[0]
+      expect(url).toBe('/api/library')
+      const headers = new Headers(init?.headers)
+      expect(headers.get('authorization')).toBe('Bearer jwt-1')
+      expect(headers.get('accept')).toBe('application/json')
       expect(onUnauthorized).not.toHaveBeenCalled()
     })
+
+    it('sends no authorization header when there is no session, leaving the 401 to the server', async () => {
+      fake.auth.getSession.mockResolvedValue({ data: { session: null }, error: null })
+      fetchImpl.mockResolvedValue({ status: 200 } as Response)
+      await auth().authFetch('/api/library')
+      expect(new Headers(fetchImpl.mock.calls[0][1]?.headers).has('authorization')).toBe(false)
+    })
+
+    it('on a 401, signs out, fires onUnauthorized once, and still returns the 401', async () => {
+      withSession('jwt-1')
+      const response = { status: 401 } as Response
+      fetchImpl.mockResolvedValue(response)
+
+      const result = await auth().authFetch('/api/tts')
+
+      expect(result).toBe(response)
+      expect(fake.auth.signOut).toHaveBeenCalledTimes(1)
+      expect(onUnauthorized).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('logout()', () => {
+    it('signs out', async () => {
+      await auth().logout()
+      expect(fake.auth.signOut).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('IndexedDB', () => {
+    it('a forced logout (401) never touches her library or any other IndexedDB record', async () => {
+      resetFakeIdb()
+      vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
+      const deckStore = createIndexedDbDeckStore()
+      const deck = { id: 'deck-1', name: 'Home', phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }] }
+      await deckStore.save(deck)
+      idbDestructiveOperations.length = 0
+
+      withSession('jwt-1')
+      fetchImpl.mockResolvedValue({ status: 401 } as Response)
+      const a = auth()
+      await a.authFetch('/api/library')
+      await a.logout()
+
+      expect(onUnauthorized).toHaveBeenCalled()
+      expect(idbDestructiveOperations).toEqual([])
+      expect(await deckStore.loadAll()).toEqual([deck])
+    })
+  })
+})
+
+describe('purgeLegacySession', () => {
+  it('deletes the retired session-token key and nothing else', () => {
+    const storage = fakeStorage({ 'phrase-drill-session': '{"token":"t","expiresAt":1}', other: 'keep' })
+    purgeLegacySession(storage)
+    expect(storage.getItem('phrase-drill-session')).toBeNull()
+    expect(storage.getItem('other')).toBe('keep')
+  })
+
+  it('is a no-op when the key is absent', () => {
+    const storage = fakeStorage()
+    expect(() => purgeLegacySession(storage)).not.toThrow()
   })
 })
