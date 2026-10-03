@@ -166,8 +166,8 @@ export function connectionConfig(connectionString) {
   return remote ? { connectionString, ssl: { rejectUnauthorized: false } } : { connectionString }
 }
 
-export function bucketPort(supabase) {
-  const storage = supabase.storage.from(BUCKET)
+export function bucketPort(supabase, bucket = BUCKET) {
+  const storage = supabase.storage.from(bucket)
   return {
     async upload(name, bytes, mime) {
       return storage.upload(name, bytes, { contentType: mime, upsert: false })
