@@ -37,6 +37,10 @@ export function createMemoryClipJobStore() {
       return row ? copy(row) : null
     },
 
+    async delete(hash) {
+      return rows.delete(hash)
+    },
+
     async claim(now) {
       const [due] = [...rows.values()]
         .filter((row) => row.state === 'queued' && row.nextAttemptAt <= now)
@@ -126,6 +130,20 @@ export function clipJobStoreContract(makeStore) {
 
     expect(await store.get('h1')).toMatchObject({ hash: 'h1', state: 'done', billedCalls: 1, updatedAt: T0 + 1, windowStartedAt: T0 })
     expect(await store.get('h1'), 'a read is not a request').toMatchObject({ state: 'done', updatedAt: T0 + 1 })
+  })
+
+  // `scripts/clip-delete.mjs` (R2): the operator removes a hash's row — and
+  // with it the billing cap — so the next request starts a fresh window.
+  it('deletes one job by hash, saying whether there was one, and leaves the rest', async () => {
+    const store = await makeStore()
+    await store.request(jobFields({ hash: 'gone' }), T0)
+    await store.request(jobFields({ hash: 'kept' }), T0)
+
+    expect(await store.delete('gone')).toBe(true)
+    expect(await store.delete('gone')).toBe(false)
+    expect(await store.get('gone')).toBeNull()
+    expect(await store.get('kept')).not.toBeNull()
+    expect((await store.request(jobFields({ hash: 'gone' }), T0 + 5)).job).toMatchObject({ billedCalls: 0, createdAt: T0 + 5 })
   })
 
   // The device re-polls a 202 by POSTing again. That must join the job, not

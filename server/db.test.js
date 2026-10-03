@@ -299,8 +299,8 @@ describe('createClipStore (Postgres, T063)', () => {
     await store.put({ hash: 'broken', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
     await store.put({ hash: 'other', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
 
-    await store.delete('broken')
-    await store.delete('never-stored') // absent is not an error
+    expect(await store.delete('broken'), 'it says whether there was one').toBe(true)
+    expect(await store.delete('never-stored'), 'absent is not an error').toBe(false)
 
     expect(await store.get('broken')).toBeNull()
     expect(await store.get('other')).not.toBeNull()
@@ -489,6 +489,7 @@ describe('createClipJobStore — the tables it can reach (S5)', () => {
     await store.reapStale(10)
     await store.counts()
     await store.get('h')
+    await store.delete('h')
 
     const statements = [...capped.queries, ...requeued.queries].filter((text) => !/^\s*(BEGIN|COMMIT|ROLLBACK)\s*$/i.test(text))
     expect(statements.length).toBeGreaterThan(8)
