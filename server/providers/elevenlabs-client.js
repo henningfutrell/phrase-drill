@@ -156,11 +156,11 @@ async function callOnce({ apiKey, fetchImpl, text, voiceId, modelId }) {
   // account with **401 `quota_exceeded`** and a rate limit with **429**, so
   // the status alone cannot tell "somebody must pay" from "ask again in a
   // second" — and those two reach the device as a terminal verdict and a
-  // wait respectively. Read once here, where the response still is one.
-  const status = await readProviderStatus(response)
-
+  // wait respectively. Read only on this error branch: a body can be read
+  // once, and on a 200 it is the audio. Reading it as JSON first consumed
+  // it and failed every synthesis as 'network' (2026-10-02).
   if (response.status === 401 || response.status === 403) {
-    if (status === 'quota_exceeded') {
+    if ((await readProviderStatus(response)) === 'quota_exceeded') {
       throw providerError('quota', 'ElevenLabs reports the account is out of credit')
     }
     throw providerError('not-configured', 'ElevenLabs rejected the configured key')
