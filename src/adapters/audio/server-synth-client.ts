@@ -37,11 +37,18 @@ export interface SynthResult {
  *
  * Collapsing them (both were 429 before) is what marked ~1,940 Phrases of a
  * cold 1,000-Phrase library permanently failed on the first sweep.
+ *
+ * **`unreadable`** is HTTP 422, and terminal like `quota`: the provider
+ * produced something unusable, or this phrase hit the server's billing cap
+ * for 24 h. Asking again only spends money or is refused, so it is never
+ * retried. It is not `network` (which is retried) because it is an answer,
+ * not a failure to get one.
  */
 export type SynthError =
   | { kind: 'unauthorized' }
   | { kind: 'rate-limited'; retryAfterMs: number }
   | { kind: 'quota' }
+  | { kind: 'unreadable' }
   | { kind: 'network'; detail: string }
 
 /** Used when a 429 carries no usable `Retry-After`. One second is the
@@ -118,6 +125,10 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
         return Promise.reject(quota())
       }
 
+      if (response.status === 422) {
+        return Promise.reject(unreadable())
+      }
+
       if (!response.ok) {
         return Promise.reject(networkError(`server responded ${response.status}`))
       }
@@ -136,6 +147,10 @@ function unauthorized(): SynthError {
 
 function quota(): SynthError {
   return { kind: 'quota' }
+}
+
+function unreadable(): SynthError {
+  return { kind: 'unreadable' }
 }
 
 /** `Retry-After` is seconds (RFC 9110). Anything unparsable, zero, or

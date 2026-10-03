@@ -37,7 +37,8 @@ const DEFAULT_MAX_RATE_LIMIT_WAITS = 50
  * Clips (worse of the two wins): `generating` while in flight, `ready` once
  * both Clips are cached, `unauthorized`/`quota` per `SynthError` (never
  * retried), `failed` once retries are exhausted — network retries or waits
- * on our own server's rate limit alike.
+ * on our own server's rate limit alike — or at once on `unreadable` (the
+ * server's terminal 422, never retried).
  *
  * There is deliberately no `rate-limited` state here. Being paced is not an
  * outcome: it is the queue working. A Phrase that is waiting its turn is
@@ -230,6 +231,7 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
         const error = err as SynthError
         if (error.kind === 'unauthorized') return { kind: 'unauthorized' }
         if (error.kind === 'quota') return { kind: 'quota' } // the provider is out of credits: waiting changes nothing
+        if (error.kind === 'unreadable') return { kind: 'failed' } // terminal: the provider's output is unusable or the billing cap hit; asking again spends money
         if (error.kind === 'rate-limited') {
           if (rateLimitWaits >= maxRateLimitWaits) return { kind: 'failed' }
           rateLimitWaits++
