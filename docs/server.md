@@ -354,6 +354,16 @@ wrong audio under a good address for *every* device, permanently and silently,
 because a cache is never re-checked against what it caches. Deriving it here
 makes the address a function of the request the server itself made.
 
+**No `|` in `provider`, `modelId`, `voiceId` or `lang` (S8a).** The material
+is unescaped, so a pipe there would let two different requests share one
+address — and one be served the other's audio. `/api/tts` answers `400
+invalid-request` for it, and both hash functions throw. `text` is the last
+field, so it may hold anything; forbidding the delimiter in the other four is
+what makes the encoding injective without moving any existing address
+(escaping would re-address, and re-bill, every stored Clip — the server keeps
+only hashes and cannot rehash). Real ids, `elevenlabs`, `fr-FR` and `en-US`
+never contain one.
+
 The cost is two implementations of one derivation, which can drift.
 `src/adapters/storage/clip-hash-parity.integration.test.ts` imports both and
 compares them, so neither can change alone. This is why `/api/tts` now requires

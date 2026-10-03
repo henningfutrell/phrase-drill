@@ -32,8 +32,18 @@ export interface ClipKey {
   readonly text: string
 }
 
-/** SHA-256 of `provider|modelId|voiceId|lang|text`, as lowercase hex. */
+/**
+ * SHA-256 of `provider|modelId|voiceId|lang|text`, as lowercase hex.
+ *
+ * Rejects a `|` in any field before `text` (S8a), exactly as the server half
+ * does (`server/clip-hash.js#delimitedField` has the reasoning): the material
+ * is unescaped, so that rule is what keeps two keys from sharing an address,
+ * and it moves no address that exists today.
+ */
 export async function computeClipHash(key: ClipKey): Promise<string> {
+  for (const field of ['provider', 'modelId', 'voiceId', 'lang'] as const) {
+    if (key[field].includes('|')) throw new Error(`clip address field ${field} contains the delimiter "|"`)
+  }
   const material = `${key.provider}|${key.modelId}|${key.voiceId}|${key.lang}|${key.text}`
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(material))
   return Array.from(new Uint8Array(digest))
