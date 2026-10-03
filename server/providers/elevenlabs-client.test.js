@@ -190,4 +190,52 @@ describe('createElevenLabsProvider', () => {
     )
     expect(maxActive).toBeLessThanOrEqual(2)
   })
+
+  /**
+   * Against the platform's own `Response`, not a plain-object fake. A real
+   * body can be read once: the fakes above have no `bodyUsed`, so they let
+   * a stray `json()` before `arrayBuffer()` pass, and that is exactly how
+   * every fresh synthesis came to fail as 'network' in production
+   * (2026-10-02) while `probe()`, which never reads a 200 body, said 'ok'.
+   */
+  describe('with a real fetch Response', () => {
+    const json = (status, body, headers = {}) =>
+      new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
+
+    it('returns the audio bytes of a 200 MP3 reply', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(
+        new Response(new Uint8Array(1600), { status: 200, headers: { 'content-type': 'audio/mpeg' } }),
+      )
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+      const result = await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })
+      expect(result.bytes.byteLength).toBe(1600)
+      expect(result.durationMs).toBe(100)
+    })
+
+    it('maps 401 quota_exceeded to quota', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(json(401, { detail: { status: 'quota_exceeded' } }))
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
+      await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({ kind: 'quota' })
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    })
+
+    it('maps 401 for a bad key to not-configured', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(json(401, { detail: { status: 'invalid_api_key' } }))
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+      await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
+        kind: 'not-configured',
+      })
+    })
+
+    it('maps 429 to rate-limited, carrying Retry-After', async () => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValue(json(429, { detail: { status: 'too_many_concurrent_requests' } }, { 'retry-after': '3' }))
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+      await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
+        kind: 'rate-limited',
+        retryAfterMs: 3000,
+      })
+    })
+  })
 })
