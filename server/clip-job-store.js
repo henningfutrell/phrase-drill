@@ -1,5 +1,5 @@
 /**
- * The clip generation queue (S5): one table, `clip_jobs`, one row per Clip
+ * The clip job queue (S5): one table, `clip_jobs`, one row per Clip
  * content address that has been asked for and is not simply in the store.
  *
  * **Why a queue at all.** Generation used to happen inside the request: a
