@@ -20,6 +20,9 @@ function network(): SynthError {
 function unreadable(): SynthError {
   return { kind: 'unreadable' }
 }
+function queued(retryAfterMs = 5000): SynthError {
+  return { kind: 'queued', retryAfterMs }
+}
 function rateLimited(retryAfterMs = 1000): SynthError {
   return { kind: 'rate-limited', retryAfterMs }
 }
@@ -263,6 +266,122 @@ describe('createGenerationQueue', () => {
   // `unreadable` is the server's terminal 422: the provider produced
   // something unusable, or the phrase hit the server's 24 h billing cap.
   // Retrying spends money or is refused, so the Clip fails at once.
+  // `queued` is the server's 202: generation is under way on its side. It
+  // is a wait for THIS request, not a limiter — so unlike `rate-limited` it
+  // must not hold the whole queue back.
+  it('waits the queued Clip its own time and asks again, without holding the sibling Clip back', async () => {
+    const sleeps: number[] = []
+    const statuses: GenerationStatus['kind'][] = []
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockImplementation(async (text) => {
+      if (text === 'Bonjour' && sleeps.length === 0) throw queued(5000)
+      return { bytes: new ArrayBuffer(1), durationMs: 1 }
+    })
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+      onStatusChange: (_id, status) => statuses.push(status.kind),
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+    })
+
+    queue.enqueue(PHRASE)
+    await queue.whenIdle()
+
+    expect(synthesize.mock.calls.filter((call) => call[0] === 'Bonjour')).toHaveLength(2)
+    // Exactly one wait: a queue-wide `resumeAt` (as `rate-limited` sets) would
+    // make the English Clip sleep too.
+    expect(sleeps).toEqual([5000])
+    // Waiting on the server is still generating — never a state of its own.
+    expect(statuses).toEqual(['generating', 'ready'])
+  })
+
+  it('does not spend network attempts or rate-limit waits on queued replies', async () => {
+    const synthesize = vi
+      .fn<SynthClient['synthesize']>()
+      .mockRejectedValueOnce(queued())
+      .mockRejectedValueOnce(queued())
+      .mockRejectedValueOnce(queued())
+      .mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+      maxAttempts: 1,
+      maxRateLimitWaits: 0,
+      sleep: async () => {},
+    })
+
+    queue.enqueue(PHRASE)
+    await queue.whenIdle()
+
+    expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'ready' })
+  })
+
+  it('gives up after maxQueuedWaits queued replies — the sweep always terminates', async () => {
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(queued())
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+      maxQueuedWaits: 3,
+      sleep: async () => {},
+    })
+
+    queue.enqueue({ id: 'p5', french: 'Salut', english: 'Hi' })
+    await queue.whenIdle()
+
+    expect(synthesize.mock.calls.filter((call) => call[0] === 'Salut')).toHaveLength(4) // first attempt plus three waits
+    expect(queue.statusFor('p5')).toEqual<GenerationStatus>({ kind: 'failed' })
+  })
+
+  it('allows twenty queued waits by default', async () => {
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(queued())
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+      sleep: async () => {},
+    })
+
+    queue.enqueue({ id: 'p6', french: 'Salut', english: 'Hi' })
+    await queue.whenIdle()
+
+    expect(synthesize.mock.calls.filter((call) => call[0] === 'Salut')).toHaveLength(21)
+  })
+
+  it('does not re-ask a queued Clip until resume when suspension lands inside the wait', async () => {
+    const clipCache = createFakeClipCache()
+    // English pre-cached, so exactly one Clip reaches the network.
+    const enHash = await computeClipHash({ ...VOICE, lang: 'en-US', text: 'Hello' })
+    await clipCache.put({ hash: enHash, bytes: new ArrayBuffer(1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+    const sleeps: number[] = []
+    const synthesize = vi
+      .fn<SynthClient['synthesize']>()
+      .mockRejectedValueOnce(queued())
+      .mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache,
+      getVoice: async () => VOICE,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+        queue.suspend()
+      },
+    })
+
+    queue.enqueue(PHRASE)
+    await settle()
+
+    expect(synthesize).toHaveBeenCalledTimes(1)
+
+    queue.resume()
+    await queue.whenIdle()
+
+    expect(synthesize).toHaveBeenCalledTimes(2)
+  })
+
   it('fails an unreadable Clip immediately, with no retry', async () => {
     const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(unreadable())
     const queue = createGenerationQueue({

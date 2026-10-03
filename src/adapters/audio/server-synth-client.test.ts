@@ -125,6 +125,29 @@ describe('createServerSynthClient', () => {
     await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'unreadable' })
   })
 
+  // 202 is the server saying "I queued generation and am still working on
+  // it": not an error and not audio. The caller asks again after the wait.
+  it('rejects with queued on a 202, carrying the wait the server asked for', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(errorResponse(202, { 'retry-after': '5' }))
+    const { client } = makeClient({ fetchImpl })
+
+    await expect(client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'queued', retryAfterMs: 5000 })
+  })
+
+  it('falls back to five seconds when a 202 carries no usable Retry-After, and caps an absurd one', async () => {
+    const missing = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(errorResponse(202)) })
+    await expect(missing.client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'queued', retryAfterMs: 5000 })
+
+    const junk = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(errorResponse(202, { 'retry-after': 'soon' })) })
+    await expect(junk.client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'queued', retryAfterMs: 5000 })
+
+    const zero = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(errorResponse(202, { 'retry-after': '0' })) })
+    await expect(zero.client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'queued', retryAfterMs: 5000 })
+
+    const huge = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(errorResponse(202, { 'retry-after': '99999' })) })
+    await expect(huge.client.synthesize('Bonjour', 'fr-FR', VOICE)).rejects.toEqual({ kind: 'queued', retryAfterMs: 60_000 })
+  })
+
   it('falls back to one second when a 429 carries no Retry-After', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(errorResponse(429))
     const { client } = makeClient({ fetchImpl })
