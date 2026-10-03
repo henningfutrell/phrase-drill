@@ -1,5 +1,5 @@
 import { getBearerToken } from './auth.js'
-import { computeClipHash } from './clip-hash.js'
+import { computeClipHash, delimitedField } from './clip-hash.js'
 import { readBody, sendJson, PayloadTooLargeError } from './http-helpers.js'
 import { createStaticHandler } from './static.js'
 
@@ -362,7 +362,10 @@ export function createApp({
       typeof provider !== 'string' ||
       provider.length === 0 ||
       typeof lang !== 'string' ||
-      lang.length === 0
+      lang.length === 0 ||
+      // '|' is the address's delimiter; outside the text it would let two
+      // requests share one Clip (S8a, `clip-hash.js`).
+      delimitedField({ provider, modelId, voiceId, lang })
     ) {
       return sendJson(res, 400, { error: 'invalid-request' })
     }
