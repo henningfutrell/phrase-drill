@@ -784,7 +784,7 @@ describe('createPool — a dead idle connection must not kill the process (T088)
 
   it('redacts the database password even when the caller passes no logger', async () => {
     // docs/server.md "Provable: no key can leak". A pool built by a script
-    // (scripts/useradd.mjs, scripts/restore-drill.mjs) has no configured
+    // (scripts/restore-drill.mjs) has no configured
     // logger, and a driver error message can carry the connection string.
     const written = []
     const pool = createPool(URL_WITH_PASSWORD, { write: (line) => written.push(line) })
