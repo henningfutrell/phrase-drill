@@ -1,5 +1,6 @@
 import { getBearerToken } from './auth.js'
 import { computeClipHash, delimitedField } from './clip-hash.js'
+import { planRequest } from './clip-job-store.js'
 import { readBody, sendJson, PayloadTooLargeError } from './http-helpers.js'
 import { createStaticHandler } from './static.js'
 
@@ -329,11 +330,104 @@ export function createApp({
     const budget = ttsLimiter.allow(key)
     if (!budget.ok) return sendRateLimited(res, budget)
 
+    const request = await readClipRequest(req, res)
+    if (!request) return
+    const { fields, hash } = request
+
+    // Counted from here, once the request is known to be a real ask for a
+    // real clip: a malformed body or our own rate limit is not the provider
+    // answering, and folding either in would make `/api/status`'s numbers
+    // mean two things at once. A cache hit counts — it is a Clip their device
+    // asked for and got.
+    ttsRequests.total += 1
+
+    const cached = await clipStore.get(hash)
+    if (cached) {
+      clipLookups.hits += 1
+      return sendClip(res, cached)
+    }
+    clipLookups.misses += 1
+
+    // A miss is a job (S5). `request` joins one already queued or running
+    // for this hash — a re-poll, or a second device — rather than starting a
+    // second paid generation, and refuses once the hash has cost its two
+    // billed calls today.
+    const requested = await clipJobStore.request(fields, Date.now())
+    if (requested.capped) return sendBillingCapped(res)
+    return answerWhenGenerated(res, hash)
+  }
+
+  /**
+   * **Regenerate** (docs/glossary.md), the server half (R1): throw away the
+   * Clip stored at this address and make it again. `/api/tts` serves a stored
+   * Clip — broken or not — to every device forever, so without this a
+   * truncated or garbled Clip could never be replaced. Same body, auth and
+   * answers as `/api/tts` (`server-synth-client.ts` reads both with one
+   * mapping); the device polls the ordinary `/api/tts` after a `202`.
+   *
+   * The order is the contract, and each step is where it is for a reason:
+   *
+   * 1. **The rate limiter, before anything else.** The device re-asks
+   *    regenerate after a 429 — and only after a 429 — because a 429 means
+   *    the server did nothing. That is only true if no delete or queue
+   *    happens before the limiter says no.
+   * 2. **A job already queued or running is joined, not restarted.** It is a
+   *    generation in progress for this address; deleting again would remove
+   *    nothing useful and, after it lands, would remove the new Clip.
+   * 3. **The billing cap, before the delete.** A refused regenerate must not
+   *    leave them with less audio than before: a capped hash keeps the Clip it
+   *    has, broken or not, until its window reopens tomorrow. The check reads
+   *    the row and writes nothing, so a refused regenerate does not mark a
+   *    hash whose Clip is still stored as `failed`.
+   * 4. **Delete, then queue.** In that order because `clipStore.put` is
+   *    `ON CONFLICT DO NOTHING`: a job that finished while the old Clip was
+   *    still stored would have its new bytes silently dropped. `request()`
+   *    re-queues a `done` or `failed` row inside the cap — a regenerate is a
+   *    miss the server made on purpose, so it is billed and counted like one.
+   *
+   * Between 3 and 4 another billed call could, in principle, reach the cap;
+   * `request()` re-checks it under the row lock and the answer is then a
+   * 422 with the Clip already gone. It needs a second billed generation of
+   * the same phrase inside those milliseconds, and costs one regeneration
+   * tomorrow, so it is named here rather than locked against.
+   */
+  async function handleTtsRegenerate(req, res, key) {
+    const budget = ttsLimiter.allow(key)
+    if (!budget.ok) return sendRateLimited(res, budget)
+
+    const request = await readClipRequest(req, res)
+    if (!request) return
+    const { fields, hash } = request
+
+    ttsRequests.total += 1
+    clipLookups.misses += 1
+
+    const now = Date.now()
+    const job = await clipJobStore.get(hash)
+    if (job?.state === 'queued' || job?.state === 'running') return answerWhenGenerated(res, hash)
+    if (job && planRequest(job, now).capped) return sendBillingCapped(res)
+
+    await clipStore.delete(hash)
+    const requested = await clipJobStore.request(fields, now)
+    if (requested.capped) return sendBillingCapped(res)
+    return answerWhenGenerated(res, hash)
+  }
+
+  /**
+   * The body of a `/api/tts` or `/api/tts/regenerate` request, validated, and
+   * the content address derived from it — or `null` once the error is sent.
+   * One function so the two routes cannot disagree about what a Clip request
+   * is.
+   */
+  async function readClipRequest(req, res) {
     let body
     try {
       body = await readBody(req, { maxBytes: TTS_MAX_BODY_BYTES })
     } catch (err) {
-      if (err instanceof PayloadTooLargeError) return sendJson(res, 413, { error: 'payload-too-large' })
+      if (err instanceof PayloadTooLargeError) {
+        sendJson(res, 413, { error: 'payload-too-large' })
+        return null
+      }
       throw err
     }
 
@@ -341,7 +435,8 @@ export function createApp({
     try {
       parsed = JSON.parse(body.toString('utf8'))
     } catch {
-      return sendJson(res, 400, { error: 'invalid-json' })
+      sendJson(res, 400, { error: 'invalid-json' })
+      return null
     }
 
     // `provider` and `lang` are required even though the ElevenLabs call uses
@@ -367,39 +462,25 @@ export function createApp({
       // requests share one Clip (S8a, `clip-hash.js`).
       delimitedField({ provider, modelId, voiceId, lang })
     ) {
-      return sendJson(res, 400, { error: 'invalid-request' })
+      sendJson(res, 400, { error: 'invalid-request' })
+      return null
     }
 
     const hash = computeClipHash({ provider, modelId, voiceId, lang, text })
+    return { hash, fields: { hash, provider, modelId, voiceId, lang, text } }
+  }
 
-    // Counted from here, once the request is known to be a real ask for a
-    // real clip: a malformed body or our own rate limit is not the provider
-    // answering, and folding either in would make `/api/status`'s numbers
-    // mean two things at once. A cache hit counts — it is a Clip their device
-    // asked for and got.
-    ttsRequests.total += 1
+  function sendBillingCapped(res) {
+    // Answered as `unreadable`: the device already treats that as terminal
+    // (it is what a billed-but-unusable clip is), and it is true — this
+    // phrase has produced nothing usable twice. Tomorrow it may try again.
+    recordTtsFailure('billing-capped')
+    logger.error('tts billing cap reached for a clip', { kind: 'billing-capped' })
+    return sendJson(res, 422, { error: 'unreadable' })
+  }
 
-    const cached = await clipStore.get(hash)
-    if (cached) {
-      clipLookups.hits += 1
-      return sendClip(res, cached)
-    }
-    clipLookups.misses += 1
-
-    // A miss is a job (S5). `request` joins one already queued or running
-    // for this hash — a re-poll, or a second device — rather than starting a
-    // second paid generation, and refuses once the hash has cost its two
-    // billed calls today.
-    const requested = await clipJobStore.request({ hash, provider, modelId, voiceId, lang, text }, Date.now())
-    if (requested.capped) {
-      // Answered as `unreadable`: the device already treats that as terminal
-      // (it is what a billed-but-unusable clip is), and it is true — this
-      // phrase has produced nothing usable twice. Tomorrow it may try again.
-      recordTtsFailure('billing-capped')
-      logger.error('tts billing cap reached for a clip', { kind: 'billing-capped' })
-      return sendJson(res, 422, { error: 'unreadable' })
-    }
-
+  /** Waits up to `ttsWaitMs` on the job for `hash` and answers what is known by then. */
+  async function answerWhenGenerated(res, hash) {
     const outcome = clipJobRunner.waitFor(hash, ttsWaitMs)
     clipJobRunner.wake()
     const result = await outcome
@@ -694,6 +775,7 @@ export function createApp({
         const key = claims.sub
 
         if (url.pathname === '/api/tts' && req.method === 'POST') return await handleTts(req, res, key)
+        if (url.pathname === '/api/tts/regenerate' && req.method === 'POST') return await handleTtsRegenerate(req, res, key)
         if (url.pathname === '/api/scan' && req.method === 'POST') return await handleScan(req, res, key)
         if (url.pathname === '/api/translate' && req.method === 'POST') return await handleTranslate(req, res, key)
         if (url.pathname === '/api/library' && req.method === 'GET') return await handleLibraryGet(req, res, key)
