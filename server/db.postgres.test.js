@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createClipStore, createLibraryStore, createPool } from './db.js'
+import { createClipJobStore } from './clip-job-store.js'
+import { clipJobStoreContract, jobFields } from './clip-job-store.test-support.js'
 
 /**
  * The only tests here that touch a real Postgres.
@@ -27,11 +29,11 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
 
   beforeAll(async () => {
     pool = createPool(url)
-    await pool.query('DROP TABLE IF EXISTS clips, library_versions, libraries')
+    await pool.query('DROP TABLE IF EXISTS clip_jobs, clips, library_versions, libraries')
   })
 
   afterAll(async () => {
-    await pool.query('DROP TABLE IF EXISTS clips, library_versions, libraries')
+    await pool.query('DROP TABLE IF EXISTS clip_jobs, clips, library_versions, libraries')
     await pool.end()
   })
 
@@ -207,5 +209,62 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     // The pool is usable afterwards — a failed put must not leak a client.
     await lib.put('rb', 'third', 3, { now: 20 })
     expect((await lib.get('rb')).data).toBe('third')
+  })
+
+  /**
+   * `clip_jobs` (S5): the generation queue. The contract is the same one the
+   * in-memory fake passes on every `npm test`; here it runs against the SQL.
+   * The two tests after it are what no fake can speak for — `FOR UPDATE SKIP
+   * LOCKED` under a held lock, and the insert race on a hash's first request.
+   */
+  describe('clip_jobs', () => {
+    async function freshJobStore() {
+      await pool.query('DROP TABLE IF EXISTS clip_jobs')
+      const store = createClipJobStore(pool)
+      await store.init()
+      await store.init() // idempotent, as every boot re-runs it
+      return store
+    }
+
+    clipJobStoreContract(freshJobStore)
+
+    it('claims past a job another instance holds locked, instead of waiting for it', async () => {
+      const store = await freshJobStore()
+      await store.request(jobFields({ hash: 'held' }), 1)
+      await store.request(jobFields({ hash: 'free' }), 2)
+
+      // The deploy overlap: the old instance is mid-claim on `held`.
+      const other = await pool.connect()
+      try {
+        await other.query('BEGIN')
+        await other.query("SELECT hash FROM clip_jobs WHERE hash = 'held' FOR UPDATE")
+        const claimed = await store.claim(10)
+        expect(claimed?.hash, 'SKIP LOCKED: the locked row is passed over, not waited on').toBe('free')
+        await other.query('ROLLBACK')
+      } finally {
+        other.release()
+      }
+    })
+
+    it('never hands one job to two concurrent claims', async () => {
+      const store = await freshJobStore()
+      for (const hash of ['a', 'b', 'c']) await store.request(jobFields({ hash }), 1)
+      const warm = await Promise.all([pool.connect(), pool.connect(), pool.connect()])
+      warm.forEach((client) => client.release())
+
+      const claimed = await Promise.all([store.claim(10), store.claim(10), store.claim(10), store.claim(10)])
+      const hashes = claimed.filter(Boolean).map((job) => job.hash)
+
+      expect(hashes.sort()).toEqual(['a', 'b', 'c'])
+    })
+
+    it('makes one row of concurrent first requests for a hash', async () => {
+      const store = await freshJobStore()
+      const results = await Promise.all(Array.from({ length: 5 }, (_, i) => store.request(jobFields(), 100 + i)))
+
+      expect(results.every((r) => r.capped === false && r.job.state === 'queued')).toBe(true)
+      const { rows } = await pool.query('SELECT count(*) c FROM clip_jobs')
+      expect(rows[0].c).toBe('1')
+    })
   })
 })
