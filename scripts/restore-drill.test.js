@@ -1,12 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { scratchDatabaseName, SCRATCH_DATABASE_PREFIX, parseRestoreArgs, verify, REQUIRED_TABLES, CLIPS_DIGEST_SQL } from './restore-drill.mjs'
+import { scratchDatabaseName, SCRATCH_DATABASE_PREFIX, parseRestoreArgs, verify, REQUIRED_TABLES } from './restore-drill.mjs'
 
 const withDefaults = (overrides) => ({
   backupFile: '/tmp/backup.sql.gz',
   libraryKey: null,
   expectSha256: null,
-  expectClipsSha256: null,
   keepScratch: false,
   ...overrides,
 })
@@ -16,13 +15,11 @@ const withDefaults = (overrides) => ({
  * drill's checks are SQL plus a verdict, and the verdict is what needs
  * pinning without a live Postgres.
  */
-function fakePool({ tables = REQUIRED_TABLES, clips = [], clipsDigest = null }) {
+function fakePool({ tables = REQUIRED_TABLES }) {
   return {
     async query(sql) {
       if (sql.includes('information_schema.tables')) return { rows: tables.map((table_name) => ({ table_name })) }
       if (sql.includes('FROM libraries')) return { rows: [{ data: 'library-blob' }] }
-      if (sql === CLIPS_DIGEST_SQL) return { rows: [{ digest: clipsDigest, count: String(clips.length) }] }
-      if (sql.includes('FROM clips')) return { rows: clips }
       throw new Error(`unexpected query: ${sql}`)
     },
   }
@@ -79,63 +76,30 @@ describe('parseRestoreArgs', () => {
   })
 })
 
-describe('verify — the clips table (T063 added it after this drill was written)', () => {
-  it('requires the clips table, not only users/sessions/libraries', () => {
-    // A dump taken before `clips` existed, or one that silently skipped it,
-    // restores "cleanly" and loses every clip. The drill must say so.
-    expect(REQUIRED_TABLES).toContain('clips')
+describe('verify — required tables', () => {
+  it('requires exactly the tables the app owns now: auth and clip bytes live in Supabase, not in the dump', () => {
+    expect(REQUIRED_TABLES).toEqual(['libraries', 'library_versions', 'clips'])
   })
 
-  it('FAILs when the restored database has no clips table at all', async () => {
-    const checks = await verify({ pool: fakePool({ tables: ['users', 'sessions', 'libraries'] }) })
-    expect(named(checks, 'table "clips" exists')?.pass).toBe(false)
-  })
-
-  it('FAILs when a clip restored as text instead of bytea — the exact bytea failure mode', async () => {
-    // `pg` hands a real bytea column back as a Buffer. Anything else means
-    // the column round-tripped through a text path and the audio is not the
-    // audio any more.
-    const checks = await verify({ pool: fakePool({ clips: [{ hash: 'abc', bytes: '\\x00ff' }] }) })
-    expect(named(checks, 'clip audio round-trips as binary')?.pass).toBe(false)
-  })
-
-  it('PASSes when every clip comes back as a Buffer', async () => {
-    const checks = await verify({ pool: fakePool({ clips: [{ hash: 'abc', bytes: Buffer.from([0x00, 0xff]) }] }) })
-    expect(named(checks, 'clip audio round-trips as binary')?.pass).toBe(true)
-  })
-
-  it('FAILs when the clip digest differs from the pre-backup one', async () => {
-    const checks = await verify({
-      pool: fakePool({ clips: [{ hash: 'abc', bytes: Buffer.from([0x01]) }], clipsDigest: 'aaaa' }),
-      expectClipsSha256: 'bbbb',
-    })
-    expect(named(checks, 'byte-identical to the pre-backup clip digest')?.pass).toBe(false)
-  })
-
-  it('PASSes when the clip digest matches the pre-backup one', async () => {
-    const checks = await verify({
-      pool: fakePool({ clips: [{ hash: 'abc', bytes: Buffer.from([0x01]) }], clipsDigest: 'aaaa' }),
-      expectClipsSha256: 'aaaa',
-    })
-    expect(named(checks, 'byte-identical to the pre-backup clip digest')?.pass).toBe(true)
-  })
-
-  it('reports the clip digest and row count without an expectation, rather than staying silent', async () => {
-    const checks = await verify({ pool: fakePool({ clips: [{ hash: 'abc', bytes: Buffer.from([0x01]) }], clipsDigest: 'aaaa' }) })
-    const reported = named(checks, 'clip digest')
-    expect(reported?.pass).toBe(true)
-    expect(reported?.detail).toContain('aaaa')
-    expect(reported?.detail).toContain('1')
-  })
-
-  it('does not FAIL a database that legitimately has no clips yet', async () => {
-    const checks = await verify({ pool: fakePool({ clips: [], clipsDigest: null }) })
+  it('passes a restore that has every required table', async () => {
+    const checks = await verify({ pool: fakePool({}) })
     expect(checks.every((c) => c.pass)).toBe(true)
+  })
+
+  it.each(['libraries', 'library_versions', 'clips'])('FAILs when the restored database has no %s table', async (missing) => {
+    const checks = await verify({ pool: fakePool({ tables: REQUIRED_TABLES.filter((t) => t !== missing) }) })
+    expect(named(checks, `table "${missing}" exists`)?.pass).toBe(false)
+  })
+
+  it('does not ask for the removed users/sessions tables or run any clip-byte check', async () => {
+    const checks = await verify({ pool: fakePool({ tables: ['libraries', 'library_versions', 'clips'] }) })
+    expect(named(checks, 'users')).toBeUndefined()
+    expect(named(checks, 'clip')?.name).toBe('table "clips" exists')
   })
 })
 
-describe('parseRestoreArgs — --expect-clips-sha256', () => {
-  it('parses --expect-clips-sha256', () => {
-    expect(parseRestoreArgs(['/tmp/backup.sql.gz', '--expect-clips-sha256=cafe'])).toEqual(withDefaults({ expectClipsSha256: 'cafe' }))
+describe('parseRestoreArgs — the clip digest flag is gone', () => {
+  it('rejects --expect-clips-sha256: clip bytes are not in the dump any more', () => {
+    expect(() => parseRestoreArgs(['/tmp/backup.sql.gz', '--expect-clips-sha256=cafe'])).toThrow(/unrecognized/i)
   })
 })
