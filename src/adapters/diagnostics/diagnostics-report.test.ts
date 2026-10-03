@@ -57,6 +57,7 @@ function fakeClipCache(readyIds: ReadonlySet<string>): ClipCache {
     async has() {
       return false
     },
+    async delete() {},
     async readyPhraseIds(phrases) {
       return new Set(phrases.map((p) => p.id).filter((id) => readyIds.has(id)))
     },

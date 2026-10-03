@@ -192,6 +192,9 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         async has(hash: string) {
           return clips.has(hash)
         },
+        async delete(hash: string) {
+          clips.delete(hash)
+        },
         async readyPhraseIds() {
           return new Set<string>()
         },
@@ -236,6 +239,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         async has() {
           return false
         },
+        async delete() {},
         async readyPhraseIds() {
           return new Set<string>()
         },

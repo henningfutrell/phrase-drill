@@ -67,7 +67,7 @@ describe('createSyncedLibrary (T067)', () => {
     expect(settings.voice).toEqual(VOICE)
 
     const readiness = await computeDrillReadiness([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], {
-      clipCache: { get: vi.fn(), put: vi.fn(), has: vi.fn(), readyPhraseIds: vi.fn().mockResolvedValue(new Set(['p1'])) },
+      clipCache: { get: vi.fn(), put: vi.fn(), has: vi.fn(), delete: vi.fn(), readyPhraseIds: vi.fn().mockResolvedValue(new Set(['p1'])) },
       generationQueue: { enqueue: vi.fn(), statusFor: vi.fn(), whenIdle: vi.fn().mockResolvedValue(undefined), suspend: vi.fn(), resume: vi.fn() },
       voice: settings.voice,
     })
