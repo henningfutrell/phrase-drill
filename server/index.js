@@ -1,8 +1,9 @@
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { createApp } from './app.js'
-import { createLibraryStore, createAuthStore, createClipStore, createPool, waitForDatabase, extractPassword, clipStoreMaxBytesFrom } from './db.js'
-import { createSessionAuth } from './session-auth.js'
+import { createLibraryStore, createClipStore, createPool, waitForDatabase, extractPassword, clipStoreMaxBytesFrom } from './db.js'
+import { createSupabase } from './supabase.js'
+import { createAccessTokenVerifier } from './access-token-verifier.js'
 import { createLogger } from './logger.js'
 import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
@@ -31,8 +32,9 @@ export async function buildServer(env = process.env) {
   const distDir = env.DIST_DIR ?? fileURLToPath(new URL('../dist', import.meta.url))
   const elevenLabsApiKey = env.ELEVENLABS_API_KEY || null
   const anthropicApiKey = env.ANTHROPIC_API_KEY || null
+  const supabaseConfig = supabaseConfigFrom(env)
 
-  const logger = createLogger({ secrets: [elevenLabsApiKey, anthropicApiKey, extractPassword(databaseUrl)] })
+  const logger = createLogger({ secrets: [elevenLabsApiKey, anthropicApiKey, supabaseConfig.secretKey, extractPassword(databaseUrl)] })
   if (!elevenLabsApiKey) logger.warn('ELEVENLABS_API_KEY is not set — speech generation will return not-configured')
   if (!anthropicApiKey) logger.warn('ANTHROPIC_API_KEY is not set — scan reading will return not-configured')
 
@@ -46,8 +48,6 @@ export async function buildServer(env = process.env) {
   await waitForDatabase(pool)
   const libraryStore = createLibraryStore(pool)
   await libraryStore.init()
-  const authStore = createAuthStore(pool)
-  await authStore.init()
   // T063: adds the `clips` table. Same `CREATE TABLE IF NOT EXISTS` shape as
   // the two above, so a deployed database gets it on the next restart with no
   // manual step and nothing existing touched. T071 bounds it: audio is
@@ -62,12 +62,10 @@ export async function buildServer(env = process.env) {
   const clipStore = createClipStore(pool, { maxBytes: clipStoreMaxBytes, logger })
   await clipStore.init()
 
-  // T050: identity is a session row in Postgres, not a Keycloak-issued
-  // JWT — no issuer, no audience, no JWKS to configure or trust. T052:
-  // authStore.users/.sessions match createSessionAuth's seam name for name
-  // (server/auth-store-contract.test.js pins it) — this used to pass the
-  // same flat, mismatched object as both arguments and every login 500'd.
-  const sessionAuth = createSessionAuth({ userStore: authStore.users, sessionStore: authStore.sessions })
+  // Identity is a Supabase access token; the verifier is the port the router
+  // calls (`server/access-token-verifier.js`).
+  const supabase = createSupabase(supabaseConfig)
+  const verifyAccessToken = createAccessTokenVerifier(supabase)
 
   const anthropicQueue = createBoundedQueue({ concurrency: 2 })
   const elevenLabs = createElevenLabsProvider({ apiKey: elevenLabsApiKey })
@@ -90,10 +88,6 @@ export async function buildServer(env = process.env) {
   const ttsLimiter = createRateLimiter({ capacity: 60, refillMs: 60_000 })
   const scanLimiter = createRateLimiter({ capacity: 10, refillMs: 60_000 })
   const libraryLimiter = createRateLimiter({ capacity: 30, refillMs: 60_000 })
-  // Hard, per-username: T050 "rate-limit login hard" — 5 attempts/60s means
-  // a brute force against one username gets nowhere before the account
-  // owner would notice.
-  const loginLimiter = createRateLimiter({ capacity: 5, refillMs: 60_000 })
   // T057: translate fires once per phrase, debounced, while she's adding
   // phrases to a Deck in one sitting — more frequent than scan's "one photo
   // at a time" but each call is far cheaper (one short string, not an
@@ -110,18 +104,29 @@ export async function buildServer(env = process.env) {
     ttsLimiter,
     scanLimiter,
     libraryLimiter,
-    loginLimiter,
     translateLimiter,
     distDir,
     logger,
-    sessionAuth,
+    verifyAccessToken,
   })
 
   const server = createServer(handleRequest)
   // `pool` is returned because its lifetime is this function's, not any
   // store's (T088, see `createPool`): one owner builds it and one owner ends
   // it, on the way out.
-  return { server, port, logger, pool, libraryStore, authStore, clipStore, clipJobRunner }
+  return { server, port, logger, pool, libraryStore, clipStore, clipJobRunner }
+}
+
+/**
+ * `SUPABASE_URL` and `SUPABASE_SECRET_KEY` from the environment. No default:
+ * a server pointed at the wrong project, or at none, must not boot.
+ */
+export function supabaseConfigFrom(env) {
+  const url = env.SUPABASE_URL
+  const secretKey = env.SUPABASE_SECRET_KEY
+  if (!url) throw new Error('SUPABASE_URL is not set')
+  if (!secretKey) throw new Error('SUPABASE_SECRET_KEY is not set')
+  return { url, secretKey }
 }
 
 /**

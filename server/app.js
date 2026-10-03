@@ -8,7 +8,6 @@ const TTS_MAX_BODY_BYTES = 8_000 // a phrase is a sentence, not a document
 const TTS_MAX_TEXT_CHARS = 2_000
 const SCAN_MAX_BODY_BYTES = 6 * 1024 * 1024 // one downsized photo (device caps ~1600px/JPEG q0.85)
 const LIBRARY_MAX_BODY_BYTES = 8 * 1024 * 1024 // ~6.5x the modelled 10,000-phrase export (docs/scale.md §4)
-const LOGIN_MAX_BODY_BYTES = 2_000 // a username and password, not a document
 const TRANSLATE_MAX_BODY_BYTES = 4_000 // one phrase plus a deck name, not a document
 const TRANSLATE_MAX_TEXT_CHARS = 500
 const LIBRARY_FORMAT = 'phrase-drill-library'
@@ -152,11 +151,10 @@ export function createApp({
   ttsLimiter,
   scanLimiter,
   libraryLimiter,
-  loginLimiter,
   translateLimiter,
   distDir,
   logger,
-  sessionAuth,
+  verifyAccessToken,
 }) {
   const serveStatic = createStaticHandler(distDir)
 
@@ -265,48 +263,6 @@ export function createApp({
     })()
 
     return credentialProbeInFlight
-  }
-
-  async function handleLogin(req, res) {
-    let body
-    try {
-      body = await readBody(req, { maxBytes: LOGIN_MAX_BODY_BYTES })
-    } catch (err) {
-      if (err instanceof PayloadTooLargeError) return sendJson(res, 413, { error: 'payload-too-large' })
-      throw err
-    }
-
-    let parsed
-    try {
-      parsed = JSON.parse(body.toString('utf8'))
-    } catch {
-      return sendJson(res, 400, { error: 'invalid-json' })
-    }
-
-    const { username, password } = parsed ?? {}
-    if (typeof username !== 'string' || username.length === 0 || typeof password !== 'string' || password.length === 0) {
-      return sendJson(res, 400, { error: 'invalid-request' })
-    }
-
-    // Rate-limited hard, keyed by username — 5 attempts per 60s
-    // (buildServer wires the limiter's capacity/refillMs) — before
-    // credentials are ever checked, so a brute force against one username
-    // never even reaches the scrypt comparison after the fifth try.
-    const loginBudget = loginLimiter.allow(username)
-    if (!loginBudget.ok) return sendRateLimited(res, loginBudget)
-
-    // Never pass the password to the logger, in a field or a message — see
-    // docs/server.md "Provable: no key can leak".
-    const result = await sessionAuth.login(username, password)
-    if (!result) return sendJson(res, 401, { error: 'invalid-credentials' })
-    sendJson(res, 200, { token: result.token, expiresAt: result.expiresAt })
-  }
-
-  async function handleLogout(req, res) {
-    const token = getBearerToken(req)
-    if (token) await sessionAuth.logout(token)
-    res.writeHead(204)
-    res.end()
   }
 
   /**
@@ -752,24 +708,14 @@ export function createApp({
         return
       }
 
-      if (url.pathname === '/api/login' && req.method === 'POST') return await handleLogin(req, res)
-      if (url.pathname === '/api/logout' && req.method === 'POST') return await handleLogout(req, res)
-
       if (url.pathname.startsWith('/api/')) {
         const token = getBearerToken(req)
-        let claims = null
-        if (token) {
-          try {
-            claims = await sessionAuth.verify(token)
-          } catch {
-            claims = null
-          }
-        }
+        const claims = token ? await verifyAccessToken(token) : null
         if (!claims || typeof claims.sub !== 'string' || claims.sub.length === 0) {
           sendJson(res, 401, { error: 'unauthorized' })
           return
         }
-        // Her library is keyed by the session's user id (T050) — a stable,
+        // Her library is keyed by the Supabase user id — a stable,
         // server-issued identity, never a value the device could pick or a
         // pasted key someone else could hand out.
         const key = claims.sub

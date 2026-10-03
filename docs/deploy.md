@@ -52,39 +52,10 @@ do not cover.
    deploy succeeded — watch the deploy log for a `200` from that path, or a
    failure it reports directly if the container never comes up.
 
-4. **Create her account.** There is no signup endpoint (`docs/server.md`),
-   so the one account is created from a shell inside the running service:
-
-   - Open the `phrase-drill` service in the Render dashboard → **Shell**
-     tab. (This requires a paid instance type — `starter`, which
-     `render.yaml` already sets. The free instance type has no Shell tab at
-     all, which is one more reason not to drop to it.)
-   - Run:
-     ```sh
-     node scripts/useradd.mjs her-username
-     ```
-     then type her password and press Enter, then Ctrl-D to close stdin (the
-     script reads the password from stdin, never argv — same as the local
-     `npm run useradd --` flow in `docs/server.md`, just invoked with `node`
-     directly since the production image ships without `npm run`'s
-     dev-dependency scripts but does still have `node` and the script
-     itself — both `server/` and `scripts/useradd.mjs` are copied into the
-     image by `Dockerfile`). `DATABASE_URL` is already set in the shell's
-     environment, so no connection string needs to be pasted in by hand.
-   - The script refuses instead of overwriting if the username already
-     exists — safe to re-run by accident.
-
-   **Unverified — no live Render account was used to write this task.**
-   The Shell tab's interactive terminal is documented by Render as a real
-   TTY reaching the running container, and `scripts/useradd.mjs`'s
-   stdin-reading `readline` has no dependency on being a *local* terminal
-   specifically — but this exact sequence has not been run against a real
-   deployed instance. If the Shell tab turns out not to deliver a clean
-   Ctrl-D/EOF, the fallback is Render's **one-off Job** feature (dashboard →
-   Jobs → run `node scripts/useradd.mjs her-username` as a job command) —
-   untested here for the same reason, and a one-off Job's non-interactive
-   stdin makes the current stdin-based password prompt awkward (there is no
-   terminal to type into). Try the Shell tab first; it needs no code change.
+4. **Create her account** in Supabase Auth (Dashboard → Authentication →
+   Users → Add user, email + password, auto-confirm), with "Allow new users to
+   sign up" off. There is no signup endpoint on this server. The server only
+   verifies the access tokens Supabase issues (`docs/server.md`).
 
 ## Verify it worked
 
