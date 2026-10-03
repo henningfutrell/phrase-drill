@@ -196,11 +196,17 @@ function createFakeMixStore(initial: readonly Mix[] = []): MixStore & { mixes: M
 /** In-memory SynthClient fake — the real ElevenLabs adapter is exercised in
  * src/adapters/audio; App's wiring (which text/voice it hands over, whether
  * it aborts) is what these tests care about. */
-function createFakeSynthClient(): SynthClient & { synthesize: ReturnType<typeof vi.fn> } {
+function createFakeSynthClient(): SynthClient & {
+  synthesize: ReturnType<typeof vi.fn>
+  regenerate: ReturnType<typeof vi.fn>
+} {
   const synthesize = vi.fn(
     async (): Promise<SynthResult> => ({ bytes: new ArrayBuffer(0), durationMs: 0 }),
   )
-  return { synthesize }
+  const regenerate = vi.fn(
+    async (): Promise<SynthResult> => ({ bytes: new ArrayBuffer(0), durationMs: 0 }),
+  )
+  return { synthesize, regenerate }
 }
 
 /** A GenerationQueue fake that only records what it was asked to do — the

@@ -52,6 +52,9 @@ function countingSynthClient(): SynthClient & { calls: { text: string; voiceId: 
       calls.push({ text, voiceId: voice.voiceId })
       return { bytes: new TextEncoder().encode(`${voice.voiceId}:${text}`).buffer as ArrayBuffer, durationMs: 10 }
     },
+    async regenerate() {
+      throw new Error('a voice change never regenerates')
+    },
   }
 }
 

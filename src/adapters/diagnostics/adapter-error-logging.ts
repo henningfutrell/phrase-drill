@@ -14,8 +14,8 @@ function describeFailure(err: unknown): string {
 /**
  * Wraps an adapter call so a failure is logged (tagged with `source`) before
  * being rethrown unchanged — the caller's own error handling is untouched.
- * Applied at the composition root (`main.tsx`) around `synthClient.synthesize`
- * and `scanReader.read`, rather than editing those adapters directly, to
+ * Applied at the composition root (`main.tsx`) around `synthClient.synthesize`,
+ * `synthClient.regenerate` and `scanReader.read`, rather than editing those adapters directly, to
  * capture adapter failures (T039) without scattering logging through
  * heavily-tested files.
  */

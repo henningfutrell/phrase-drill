@@ -27,6 +27,15 @@ function rateLimited(retryAfterMs = 1000): SynthError {
   return { kind: 'rate-limited', retryAfterMs }
 }
 
+/** The `regenerate` half of a synth client for every test that never asks
+ * for a Regenerate: a call is a defect in the queue, so it throws rather
+ * than quietly answering. */
+function unexpectedRegenerate(): SynthClient['regenerate'] {
+  return () => {
+    throw new Error('regenerate was not expected here')
+  }
+}
+
 /** A minimal in-memory ClipCache fake — this module's own tests exercise the
  * real IndexedDB one; the queue only needs get/put/has. */
 function createFakeClipCache(): ClipCache {
@@ -81,7 +90,7 @@ describe('createGenerationQueue', () => {
       durationMs: 500,
     })
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
     })
@@ -99,7 +108,7 @@ describe('createGenerationQueue', () => {
 
   it('is idle before anything is enqueued', async () => {
     const queue = createGenerationQueue({
-      synthClient: { synthesize: vi.fn().mockReturnValue(new Promise(() => {})) },
+      synthClient: { synthesize: vi.fn().mockReturnValue(new Promise(() => {})), regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
     })
@@ -113,7 +122,7 @@ describe('createGenerationQueue', () => {
       .fn<SynthClient['synthesize']>()
       .mockImplementation(() => new Promise((resolve) => pending.push(resolve)))
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
       maxConcurrent: 2,
@@ -136,7 +145,7 @@ describe('createGenerationQueue', () => {
   it('does not call the synth client, and stays un-queued, when no voice is pinned', async () => {
     const synthesize = vi.fn<SynthClient['synthesize']>()
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => null,
     })
@@ -153,7 +162,7 @@ describe('createGenerationQueue', () => {
     const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
     await clipCache.put({ hash: frHash, bytes: new ArrayBuffer(1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
     const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.enqueue(PHRASE)
     await queue.whenIdle()
@@ -168,7 +177,7 @@ describe('createGenerationQueue', () => {
       .fn<SynthClient['synthesize']>()
       .mockRejectedValueOnce(network())
       .mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.enqueue(PHRASE)
     await queue.whenIdle()
@@ -180,7 +189,7 @@ describe('createGenerationQueue', () => {
     const clipCache = createFakeClipCache()
     const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(network())
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
       maxAttempts: 3,
@@ -200,7 +209,7 @@ describe('createGenerationQueue', () => {
   it('surfaces unauthorized as a visible state and never retries it', async () => {
     const clipCache = createFakeClipCache()
     const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(unauthorized())
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.enqueue(PHRASE)
     await queue.whenIdle()
@@ -215,7 +224,7 @@ describe('createGenerationQueue', () => {
   it('surfaces quota as a visible state and never retries it', async () => {
     const clipCache = createFakeClipCache()
     const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(quota())
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.enqueue(PHRASE)
     await queue.whenIdle()
@@ -237,7 +246,7 @@ describe('createGenerationQueue', () => {
       .mockRejectedValueOnce(rateLimited(2000))
       .mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
       sleep: async (ms) => {
@@ -280,7 +289,7 @@ describe('createGenerationQueue', () => {
       return { bytes: new ArrayBuffer(1), durationMs: 1 }
     })
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
       onStatusChange: (_id, status) => statuses.push(status.kind),
@@ -308,7 +317,7 @@ describe('createGenerationQueue', () => {
       .mockRejectedValueOnce(queued())
       .mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
       maxAttempts: 1,
@@ -325,7 +334,7 @@ describe('createGenerationQueue', () => {
   it('gives up after maxQueuedWaits queued replies — the sweep always terminates', async () => {
     const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(queued())
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
       maxQueuedWaits: 3,
@@ -342,7 +351,7 @@ describe('createGenerationQueue', () => {
   it('allows twenty queued waits by default', async () => {
     const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(queued())
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
       sleep: async () => {},
@@ -365,7 +374,7 @@ describe('createGenerationQueue', () => {
       .mockRejectedValueOnce(queued())
       .mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
       sleep: async (ms) => {
@@ -388,7 +397,7 @@ describe('createGenerationQueue', () => {
   it('fails an unreadable Clip immediately, with no retry', async () => {
     const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(unreadable())
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
       sleep: async () => {},
@@ -406,7 +415,7 @@ describe('createGenerationQueue', () => {
     const clipCache = createFakeClipCache()
     const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(rateLimited(1000))
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
       maxRateLimitWaits: 4,
@@ -433,7 +442,7 @@ describe('createGenerationQueue', () => {
       return { bytes: new ArrayBuffer(1), durationMs: 1 }
     })
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
       maxConcurrent: 3,
@@ -453,7 +462,7 @@ describe('createGenerationQueue', () => {
       if (text === 'Bonjour') throw unauthorized()
       return { bytes: new ArrayBuffer(1), durationMs: 1 }
     })
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.enqueue(PHRASE)
     await queue.whenIdle()
@@ -466,7 +475,7 @@ describe('createGenerationQueue', () => {
     const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
     const onStatusChange = vi.fn()
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
       onStatusChange,
@@ -481,7 +490,7 @@ describe('createGenerationQueue', () => {
 
   it('does not gate on a caller awaiting it — enqueue itself never returns a Promise', () => {
     const queue = createGenerationQueue({
-      synthClient: { synthesize: vi.fn().mockReturnValue(new Promise(() => {})) },
+      synthClient: { synthesize: vi.fn().mockReturnValue(new Promise(() => {})), regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
     })
@@ -497,7 +506,7 @@ describe('createGenerationQueue', () => {
   it('issues no request while suspended, and issues both Clips once resumed', async () => {
     const clipCache = createFakeClipCache()
     const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.suspend()
     queue.enqueue(PHRASE)
@@ -518,7 +527,7 @@ describe('createGenerationQueue', () => {
       .fn<SynthClient['synthesize']>()
       .mockImplementation(() => new Promise((resolve) => pending.push(resolve)))
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache: createFakeClipCache(),
       getVoice: async () => VOICE,
       maxConcurrent: 2,
@@ -547,7 +556,7 @@ describe('createGenerationQueue', () => {
       throw network()
     })
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
       // Two attempts: a gate below `networkAttempts++` would spend the second
@@ -574,7 +583,7 @@ describe('createGenerationQueue', () => {
       .mockRejectedValueOnce(rateLimited(1000))
       .mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
     const queue = createGenerationQueue({
-      synthClient: { synthesize },
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
       clipCache,
       getVoice: async () => VOICE,
       sleep: async (ms) => {
@@ -597,7 +606,7 @@ describe('createGenerationQueue', () => {
   it('takes suspension as an idempotent boolean, not a counter', async () => {
     const clipCache = createFakeClipCache()
     const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.resume() // nothing is suspended: a no-op, not a throw and not a debt
     queue.suspend()
@@ -615,7 +624,7 @@ describe('createGenerationQueue', () => {
   it('does not report itself idle while suspended work is parked, and does once resumed', async () => {
     const clipCache = createFakeClipCache()
     const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.suspend()
     queue.enqueue(PHRASE)
@@ -636,7 +645,7 @@ describe('createGenerationQueue', () => {
     const clipCache = createFakeClipCache()
     const has = vi.spyOn(clipCache, 'has')
     const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(1), durationMs: 1 })
-    const queue = createGenerationQueue({ synthClient: { synthesize }, clipCache, getVoice: async () => VOICE })
+    const queue = createGenerationQueue({ synthClient: { synthesize, regenerate: unexpectedRegenerate() }, clipCache, getVoice: async () => VOICE })
 
     queue.suspend()
     queue.enqueue(PHRASE)

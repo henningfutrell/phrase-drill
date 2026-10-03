@@ -76,6 +76,23 @@ const DEFAULT_QUEUED_RETRY_AFTER_MS = 5000
 export interface SynthClient {
   /** Synthesize `text` (in `lang`) with the given voice. Resolves to MP3 bytes and an estimated duration. */
   synthesize(text: string, lang: Language, voice: SynthVoice, signal?: AbortSignal): Promise<SynthResult>
+  /**
+   * **Regenerate** (docs/glossary.md): tell the server to throw away the Clip
+   * it holds for this content address and make it again — the only way a
+   * broken one is ever replaced, because `synthesize` serves the stored Clip,
+   * broken or not, to every device forever.
+   *
+   * Same arguments, same answers as `synthesize`, so a caller reads one set
+   * of outcomes. Two of them mean something different here:
+   *
+   * - **`queued` (202)**: the server has deleted its Clip and queued one new
+   *   generation. Poll with `synthesize`, never with this again — every
+   *   `regenerate` deletes and queues, and the second one is billed.
+   * - **`unreadable` (422)** includes the server's billing cap — two provider
+   *   charges per Clip per 24 h — so a second regenerate of the same Clip
+   *   within a day may be refused. Terminal, as it is for `synthesize`.
+   */
+  regenerate(text: string, lang: Language, voice: SynthVoice, signal?: AbortSignal): Promise<SynthResult>
 }
 
 export interface ServerSynthClientDeps {
@@ -105,53 +122,63 @@ export interface ServerSynthClientDeps {
 export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClient {
   const fetchImpl = deps.fetchImpl ?? fetch
 
+  /** One POST to `path`, mapped to a `SynthResult` or a `SynthError`. Shared by
+   * both endpoints, which differ in what the server does and in nothing a
+   * caller can see on the wire — one mapping, so they cannot drift apart. */
+  async function post(path: string, text: string, lang: Language, voice: SynthVoice, signal?: AbortSignal): Promise<SynthResult> {
+    const accessToken = await deps.getAccessToken()
+
+    let response: Response
+    try {
+      response = await fetchImpl(path, {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ text, voiceId: voice.voiceId, modelId: voice.modelId, provider: voice.provider, lang }),
+      })
+    } catch (err) {
+      return Promise.reject(networkError(describe(err)))
+    }
+
+    if (response.status === 401 || response.status === 503) {
+      return Promise.reject(unauthorized())
+    }
+
+    if (response.status === 202) {
+      return Promise.reject(queued(response.headers.get('retry-after')))
+    }
+
+    if (response.status === 429) {
+      return Promise.reject(rateLimited(response.headers.get('retry-after')))
+    }
+
+    if (response.status === 402) {
+      return Promise.reject(quota())
+    }
+
+    if (response.status === 422) {
+      return Promise.reject(unreadable())
+    }
+
+    if (!response.ok) {
+      return Promise.reject(networkError(`server responded ${response.status}`))
+    }
+
+    const durationHeader = response.headers.get('x-duration-ms')
+    const bytes = await response.arrayBuffer()
+    const durationMs = durationHeader !== null ? Number(durationHeader) : NaN
+    return { bytes, durationMs: Number.isFinite(durationMs) ? durationMs : 0 }
+  }
+
   return {
-    async synthesize(text, lang, voice, signal) {
-      const accessToken = await deps.getAccessToken()
-
-      let response: Response
-      try {
-        response = await fetchImpl('/api/tts', {
-          method: 'POST',
-          signal,
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify({ text, voiceId: voice.voiceId, modelId: voice.modelId, provider: voice.provider, lang }),
-        })
-      } catch (err) {
-        return Promise.reject(networkError(describe(err)))
-      }
-
-      if (response.status === 401 || response.status === 503) {
-        return Promise.reject(unauthorized())
-      }
-
-      if (response.status === 202) {
-        return Promise.reject(queued(response.headers.get('retry-after')))
-      }
-
-      if (response.status === 429) {
-        return Promise.reject(rateLimited(response.headers.get('retry-after')))
-      }
-
-      if (response.status === 402) {
-        return Promise.reject(quota())
-      }
-
-      if (response.status === 422) {
-        return Promise.reject(unreadable())
-      }
-
-      if (!response.ok) {
-        return Promise.reject(networkError(`server responded ${response.status}`))
-      }
-
-      const durationHeader = response.headers.get('x-duration-ms')
-      const bytes = await response.arrayBuffer()
-      const durationMs = durationHeader !== null ? Number(durationHeader) : NaN
-      return { bytes, durationMs: Number.isFinite(durationMs) ? durationMs : 0 }
+    synthesize(text, lang, voice, signal) {
+      return post('/api/tts', text, lang, voice, signal)
+    },
+    regenerate(text, lang, voice, signal) {
+      return post('/api/tts/regenerate', text, lang, voice, signal)
     },
   }
 }

@@ -205,6 +205,9 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
             calls++
             return { bytes: new ArrayBuffer(1), durationMs: 1 }
           },
+          async regenerate(): Promise<never> {
+            throw new Error('a cold fill never regenerates')
+          },
         },
         clipCache: fakeClipCache,
         getVoice: async () => VOICE,
@@ -251,6 +254,9 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
             return new Promise(() => {
               /* never resolves — nothing here ever "finishes" */
             })
+          },
+          async regenerate(): Promise<never> {
+            throw new Error('a cold fill never regenerates')
           },
         },
         clipCache: hangingClipCache,
