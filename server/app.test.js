@@ -208,13 +208,16 @@ function clipQueue({ elevenLabs, clipStore, logger }) {
 }
 
 /**
- * A fake ElevenLabs that holds every call until `release()` — a generation
- * that is still running when the request's wait runs out.
+ * A fake ElevenLabs that holds every synthesis until `release()` — a
+ * generation that is still running when the request's wait runs out. The
+ * credential probe (`/api/status`, text '.') is answered at once and not
+ * counted, so reading the status mid-generation does not hang on it.
  */
 function fetchElevenLabsHeld() {
   let release
   const gate = new Promise((resolve) => (release = resolve))
-  const impl = async () => {
+  const impl = async (_url, init) => {
+    if (JSON.parse(init.body).text === '.') return { ok: true, status: 200 }
     impl.calls += 1
     await gate
     const bytes = new Uint8Array(1600)
@@ -994,7 +997,7 @@ describe('server app (integration, fake upstreams)', () => {
     // A request we built wrong is the same answer every time; 422 is terminal
     // on the device, where a 502 was read as a network blip and retried.
     it('answers a request the provider rejects with 422, after one call', async () => {
-      await boot({ elevenLabsFetch: fetchThatFailsWith(400) })
+      await boot({ elevenLabsFetch: fetchElevenLabsRefusing(400, { detail: { status: 'invalid_request' } }) })
 
       const res = await post()
 
