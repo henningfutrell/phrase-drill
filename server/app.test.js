@@ -11,6 +11,7 @@ import { createRateLimiter } from './rate-limiter.js'
 import { createBoundedQueue } from './bounded-queue.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
 import { createClipJobRunner } from './clip-job-runner.js'
+import { computeClipHash } from './clip-hash.js'
 import { createMemoryClipJobStore } from './clip-job-store.test-support.js'
 import { validateClip } from './clip-validation.js'
 import { createAnthropicProvider } from './providers/anthropic-client.js'
@@ -1076,6 +1077,182 @@ describe('server app (integration, fake upstreams)', () => {
       }
 
       expect((await post()).status).toBe(200)
+    })
+  })
+
+  /**
+   * R1, the server half of **Regenerate** (docs/glossary.md). `/api/tts`
+   * serves a stored Clip, broken or not, to every device forever; this is
+   * the one request that throws it away and makes it again. Same body, auth
+   * and answers as `/api/tts`, so the device reads one set of outcomes.
+   *
+   * Two orderings carry the weight. The limiter comes before anything is
+   * deleted or queued: the device re-asks regenerate after a 429 BECAUSE the
+   * server did nothing. And the billing cap comes before the delete: a
+   * refused regenerate must not leave them with less audio than before.
+   */
+  describe('POST /api/tts/regenerate', () => {
+    const KEY = { provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1', lang: 'fr-FR', text: 'bonjour' }
+    const HASH = computeClipHash(KEY)
+    const call = (path, body = ttsBody(), token = VALID_TOKEN) =>
+      fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body,
+      })
+    const tts = (body) => call('/api/tts', body)
+    const regenerate = (body) => call('/api/tts/regenerate', body)
+    /** Stores a Clip without spending a rate-limit token, as an earlier day's generation would have. */
+    const storeBrokenClip = () =>
+      clipStore.put({ hash: HASH, bytes: Buffer.from([0x49, 0x44, 0x33, 0xee, ...Array(1596).fill(0)]), mime: 'audio/mpeg', durationMs: 7, createdAt: 1 })
+    /** Counts `clipStore.delete` calls without changing what it does. */
+    function spyDeletes() {
+      const real = clipStore.delete.bind(clipStore)
+      const spy = { calls: 0 }
+      clipStore.delete = async (hash) => {
+        spy.calls += 1
+        return real(hash)
+      }
+      return spy
+    }
+
+    it('throws the stored Clip away and serves a new generation, which /api/tts then serves too', async () => {
+      await boot()
+      const first = Buffer.from(await (await tts()).arrayBuffer())
+
+      const res = await regenerate()
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-type')).toBe('audio/mpeg')
+      const fresh = Buffer.from(await res.arrayBuffer())
+      expect(fresh[3], 'the second provider call, not the stored bytes').toBe(2)
+      expect(fresh.equals(first)).toBe(false)
+      expect(elevenLabsUpstream.calls).toBe(2)
+      const served = Buffer.from(await (await tts()).arrayBuffer())
+      expect(served.equals(fresh), 'the store now holds the new Clip').toBe(true)
+    })
+
+    it('regenerates a Clip whose job row is long gone, from a store-only hit', async () => {
+      await boot()
+      await storeBrokenClip()
+
+      const res = await regenerate()
+
+      expect(res.status).toBe(200)
+      expect(Buffer.from(await res.arrayBuffer())[3]).toBe(1)
+      expect(elevenLabsUpstream.calls).toBe(1)
+    })
+
+    it('checks the rate limit first — a 429 deletes nothing and queues nothing', async () => {
+      await boot() // ttsLimiter capacity 3
+      await tts()
+      await tts()
+      await tts()
+      const deletes = spyDeletes()
+
+      const res = await regenerate()
+
+      expect(res.status).toBe(429)
+      expect(await res.json()).toEqual({ error: 'rate-limited' })
+      expect(Number(res.headers.get('retry-after'))).toBeGreaterThanOrEqual(1)
+      expect(deletes.calls).toBe(0)
+      expect(await clipStore.get(HASH), 'their Clip is still there for the re-ask').not.toBeNull()
+      expect((await clipJobStore.get(HASH)).state).toBe('done')
+      expect(elevenLabsUpstream.calls).toBe(1)
+    })
+
+    it.each([
+      ['an empty text', ttsBody({ text: '' }), 400, 'invalid-request'],
+      ['a missing lang', JSON.stringify({ text: 'bonjour', voiceId: 'v1', modelId: 'm1', provider: 'elevenlabs' }), 400, 'invalid-request'],
+      ['a "|" in the voice id', ttsBody({ voiceId: 'v|1' }), 400, 'invalid-request'],
+      ['a body that is not JSON', '{', 400, 'invalid-json'],
+      ['an oversized body', ttsBody({ text: 'x'.repeat(20_000) }), 413, 'payload-too-large'],
+    ])('validates the body exactly like /api/tts: %s', async (_name, body, status, error) => {
+      await boot()
+      await storeBrokenClip()
+      const deletes = spyDeletes()
+
+      const res = await regenerate(body)
+
+      expect(res.status).toBe(status)
+      expect(await res.json()).toEqual({ error })
+      expect(deletes.calls).toBe(0)
+      expect(elevenLabsUpstream.calls).toBe(0)
+    })
+
+    it('requires a session, like every /api route', async () => {
+      await boot()
+      expect((await call('/api/tts/regenerate', ttsBody(), 'not-a-token')).status).toBe(401)
+    })
+
+    it('joins a generation already in flight instead of deleting or paying again', async () => {
+      const upstream = fetchElevenLabsHeld()
+      await boot({ elevenLabsFetch: upstream, ttsWaitMs: 30 })
+      expect((await tts()).status).toBe(202)
+      const deletes = spyDeletes()
+
+      const res = await regenerate()
+
+      expect(res.status).toBe(202)
+      expect(res.headers.get('retry-after')).toBe('5')
+      expect(await res.json()).toEqual({ status: 'queued' })
+      expect(deletes.calls).toBe(0)
+      upstream.release()
+      expect(upstream.calls).toBe(1)
+    })
+
+    it('answers 202 queued when the new Clip is not ready in time, with the old one already gone', async () => {
+      const upstream = fetchElevenLabsHeld()
+      await boot({ elevenLabsFetch: upstream, ttsWaitMs: 30 })
+      await storeBrokenClip()
+
+      const res = await regenerate()
+
+      expect(res.status).toBe(202)
+      expect(await res.json()).toEqual({ status: 'queued' })
+      expect(await clipStore.get(HASH), 'the broken Clip must not be served to the poll').toBeNull()
+      upstream.release()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect((await tts()).status, 'the poll finds the new one').toBe(200)
+      expect(upstream.calls).toBe(1)
+    })
+
+    it('refuses past the billing cap with 422 and leaves the stored Clip where it was', async () => {
+      await boot()
+      await tts() // billed call 1
+      expect((await regenerate()).status).toBe(200) // billed call 2
+      const kept = await clipStore.get(HASH)
+      const deletes = spyDeletes()
+
+      const refused = await regenerate()
+
+      expect(refused.status).toBe(422)
+      expect(await refused.json()).toEqual({ error: 'unreadable' })
+      expect(deletes.calls, 'a refused regenerate must not leave them with less audio').toBe(0)
+      expect(Buffer.from((await clipStore.get(HASH)).bytes).equals(Buffer.from(kept.bytes))).toBe(true)
+      expect(elevenLabsUpstream.calls).toBe(2)
+    })
+
+    it('answers a provider failure exactly as /api/tts does', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsRefusing(401, { detail: { status: 'quota_exceeded' } }) })
+      await storeBrokenClip()
+
+      const res = await regenerate()
+
+      expect(res.status).toBe(402)
+      expect(await res.json()).toEqual({ error: 'quota' })
+    })
+
+    it('counts as a request and a miss in /api/status, and a refusal as a failure', async () => {
+      await boot()
+      await tts()
+      await regenerate()
+      await regenerate() // capped
+
+      const status = (await (await fetch(`${baseUrl}/api/status`)).json()).tts
+      expect(status.requests).toEqual({ total: 3, failed: 1 })
+      expect(status.clips).toMatchObject({ hits: 0, misses: 3 })
+      expect(status.lastFailure.kind).toBe('billing-capped')
     })
   })
 

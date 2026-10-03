@@ -32,6 +32,11 @@ export function createMemoryClipJobStore() {
       return plan.capped ? { capped: true } : { capped: false, job: copy(rows.get(row.hash)) }
     },
 
+    async get(hash) {
+      const row = rows.get(hash)
+      return row ? copy(row) : null
+    },
+
     async claim(now) {
       const [due] = [...rows.values()]
         .filter((row) => row.state === 'queued' && row.nextAttemptAt <= now)
@@ -107,6 +112,20 @@ export function clipJobStoreContract(makeStore) {
       createdAt: T0,
       updatedAt: T0,
     })
+  })
+
+  // Regenerate reads the row before it decides anything (R1): a job in
+  // flight is joined, a capped hash is refused before its Clip is deleted.
+  it('reads one job by hash without changing it, and null for a hash never asked for', async () => {
+    const store = await makeStore()
+    expect(await store.get('h1')).toBeNull()
+
+    await store.request(jobFields(), T0)
+    await store.claim(T0)
+    await store.complete('h1', T0 + 1)
+
+    expect(await store.get('h1')).toMatchObject({ hash: 'h1', state: 'done', billedCalls: 1, updatedAt: T0 + 1, windowStartedAt: T0 })
+    expect(await store.get('h1'), 'a read is not a request').toMatchObject({ state: 'done', updatedAt: T0 + 1 })
   })
 
   // The device re-polls a 202 by POSTing again. That must join the job, not
