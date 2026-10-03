@@ -2,7 +2,6 @@ import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { createApp } from './app.js'
 import { createLibraryStore, createClipStore, createPool, waitForDatabase, extractPassword, clipStoreMaxBytesFrom } from './db.js'
-import { createSupabase } from './supabase.js'
 import { createAccessTokenVerifier } from './access-token-verifier.js'
 import { createLogger } from './logger.js'
 import { createRateLimiter } from './rate-limiter.js'
@@ -60,13 +59,13 @@ export async function buildServer(env = process.env) {
   // (`''`), and the first of those ends with `libraryStore.put` as the write
   // that fails. `clipStoreMaxBytesFrom` falls back to the default, loudly.
   const clipStoreMaxBytes = clipStoreMaxBytesFrom(env.CLIP_STORE_MAX_BYTES, logger)
-  const supabase = createSupabase({ url: env.SUPABASE_URL, secretKey: env.SUPABASE_SECRET_KEY })
+  // One Supabase client: Storage for the Clip store, Auth for token verification.
+  const supabase = createSupabase(supabaseConfig)
   const clipStore = createClipStore(pool, { storage: supabase.storage.from('clips'), maxBytes: clipStoreMaxBytes, logger })
   await clipStore.init()
 
   // Identity is a Supabase access token; the verifier is the port the router
   // calls (`server/access-token-verifier.js`).
-  const supabase = createSupabase(supabaseConfig)
   const verifyAccessToken = createAccessTokenVerifier(supabase)
 
   const anthropicQueue = createBoundedQueue({ concurrency: 2 })
