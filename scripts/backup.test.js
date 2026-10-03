@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { backupFileName, parseBackupTimestamp, selectExpiredBackups, resolveDestinationDir } from './backup.mjs'
+import { backupFileName, parseBackupTimestamp, selectExpiredBackups, resolveDestinationDir, pgDumpArgs } from './backup.mjs'
 
 const execFileAsync = promisify(execFile)
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'backup.mjs')
@@ -98,5 +98,11 @@ describe('the script itself, run for real', () => {
     const { code, stderr } = await runScript({ BACKUP_DEST: '/tmp/nowhere' })
     expect(code).toBe(1)
     expect(stderr).toMatch(/DATABASE_URL is required/)
+  })
+})
+
+describe('pgDumpArgs', () => {
+  it('dumps only the public schema: the pooler role cannot read Supabase-owned auth/storage, and they are not theirs', () => {
+    expect(pgDumpArgs('postgres://u@h:5432/postgres')).toEqual(['-d', 'postgres://u@h:5432/postgres', '--no-owner', '--no-privileges', '--schema=public'])
   })
 })
