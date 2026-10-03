@@ -351,7 +351,7 @@ describe('createClipStore — the growth bound (T071)', () => {
     // The change has to reach it on a redeploy with no manual step, which is
     // `ADD COLUMN IF NOT EXISTS` plus a backfill that matches nothing the
     // second time — docs/server.md "Schema: creation and change".
-    const alters = pool.queries.filter((q) => q.text.includes('ALTER TABLE clips'))
+    const alters = pool.queries.filter((q) => q.text.includes('ALTER TABLE clips') && q.text.includes('byte_size'))
     expect(alters.length).toBe(2)
     expect(alters[0].text).toContain('ADD COLUMN IF NOT EXISTS')
     expect(pool.queries.some((q) => q.text.includes('SET byte_size = octet_length(bytes)'))).toBe(true)
@@ -370,7 +370,7 @@ describe('createClipStore — the growth bound (T071)', () => {
     expect(pool.queries.some((q) => q.text.trim().startsWith('DELETE'))).toBe(false)
   })
 
-  it('evicts oldest-first down to 90% of the ceiling once a put crosses it', async () => {
+  it('evicts least-recently-used down to 90% of the ceiling once a put crosses it', async () => {
     const pool = fakeClipPool()
     const store = createClipStore(pool, { maxBytes: 1_000 })
     await store.init()
@@ -378,13 +378,108 @@ describe('createClipStore — the growth bound (T071)', () => {
     for (let i = 0; i < 11; i += 1) await store.put(clip(`clip-${i}`, 100, i))
 
     expect(await store.totalBytes()).toBeLessThanOrEqual(900)
-    // Oldest-first, on the `created_at` the table already carried. Least
-    // recently *played* would be better policy and costs a write on every
-    // cache hit plus a column; on the server a wrongly evicted clip is one
-    // regeneration, not an offline drill that cannot start, so it does not
-    // earn that. The device's own cache is the LRU one (docs/scale.md §6).
+    // Never asked for since it was written: last used when it was stored.
     expect(await store.get('clip-0')).toBeNull()
     expect(await store.get('clip-10')).not.toBeNull()
+  })
+
+  /**
+   * S8b. Oldest-first evicted the Clips the user has drilled longest — the first
+   * Decks the user built, the ones the user still plays — and kept a deck the user tried
+   * once yesterday. Each wrong eviction is a paid regeneration. A hit
+   * records the day it was used; eviction takes the least recently used.
+   */
+  describe('last used (S8b)', () => {
+    const DAY = 24 * 60 * 60 * 1000
+
+    function storeAt(options) {
+      const clock = { now: 1_000 }
+      const pool = fakeClipPool()
+      const logger = { warnings: [], warn: (msg, fields) => logger.warnings.push({ msg, fields }) }
+      const store = createClipStore(pool, { maxBytes: 1_000, now: () => clock.now, logger, ...options })
+      return { clock, pool, logger, store }
+    }
+
+    it('adds last_used_at idempotently and backfills it from created_at', async () => {
+      const { pool, store } = storeAt()
+      await store.init()
+      await store.init()
+
+      const alters = pool.queries.filter((q) => q.text.includes('ALTER TABLE clips') && q.text.includes('last_used_at'))
+      expect(alters.length).toBe(2)
+      expect(alters[0].text).toContain('ADD COLUMN IF NOT EXISTS last_used_at BIGINT')
+      expect(pool.queries.some((q) => q.text.includes('SET last_used_at = created_at WHERE last_used_at IS NULL'))).toBe(true)
+    })
+
+    it('stamps a new clip as used when it is stored', async () => {
+      const { pool, store } = storeAt()
+      await store.init()
+      await store.put(clip('a', 100, 77))
+
+      expect(pool.rows.get('a').lastUsedAt).toBe(77)
+    })
+
+    it('keeps a clip that is played, and evicts the one written after it that nobody asked for', async () => {
+      const { clock, store } = storeAt()
+      await store.init()
+      for (let i = 0; i < 9; i += 1) await store.put(clip(`clip-${i}`, 100, i))
+
+      clock.now = 2 * DAY
+      expect(await store.get('clip-0')).not.toBeNull() // the user drills it
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await store.put(clip('clip-9', 100, 2 * DAY))
+      await store.put(clip('clip-10', 100, 2 * DAY))
+
+      expect(await store.get('clip-0'), 'the oldest, but used today').not.toBeNull()
+      expect(await store.get('clip-1'), 'never used since it was stored').toBeNull()
+    })
+
+    // One write a day per Clip, not one per hit: a drill replays the same
+    // Clips over and over, and a row version per play is churn for nothing.
+    it('bumps at most once per day', async () => {
+      const { clock, pool, store } = storeAt()
+      await store.init()
+      await store.put(clip('a', 100, 0))
+
+      clock.now = DAY - 1
+      await store.get('a')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(pool.rows.get('a').lastUsedAt, 'less than a day since it was last stamped').toBe(0)
+
+      clock.now = DAY
+      await store.get('a')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(pool.rows.get('a').lastUsedAt).toBe(DAY)
+
+      const bump = pool.queries.find((q) => q.text.includes('SET last_used_at = $2'))
+      expect(bump.params).toEqual(['a', DAY, 0])
+    })
+
+    it('serves the hit without waiting for the bump', async () => {
+      const { pool, store } = storeAt()
+      await store.init()
+      await store.put(clip('a', 100, 0))
+      pool.holdBump = true
+
+      const served = await Promise.race([store.get('a'), new Promise((resolve) => setTimeout(() => resolve('waited'), 50))])
+
+      expect(served).not.toBe('waited')
+      expect(served).not.toBeNull()
+    })
+
+    it('never fails a hit because the bump failed, and says so in a warning', async () => {
+      const { clock, pool, logger, store } = storeAt()
+      await store.init()
+      await store.put(clip('a', 100, 0))
+      pool.failBump = true
+      clock.now = DAY
+
+      expect(await store.get('a')).not.toBeNull()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(logger.warnings).toHaveLength(1)
+      expect(logger.warnings[0].msg).toMatch(/last.used/i)
+      expect(JSON.stringify(logger.warnings[0]), 'never the hash').not.toContain('"a"')
+    })
   })
 
   it('keeps evicting across more rows than one sweep reads', async () => {

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createClipStore, createLibraryStore, createPool } from './db.js'
 import { createClipJobStore } from './clip-job-store.js'
 import { clipJobStoreContract, jobFields } from './clip-job-store.test-support.js'
@@ -64,6 +64,72 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     const { rows: nulls } = await pool.query('SELECT count(*) c FROM clips WHERE byte_size IS NULL')
     expect(nulls[0].c).toBe('0')
     expect(await clips.totalBytes()).toBe(5000)
+  })
+
+  it('upgrades a clips table that shipped before last_used_at existed, backfilling from created_at', async () => {
+    // The shape deployed before S8b: byte_size present, no last_used_at.
+    await pool.query('DROP TABLE IF EXISTS clips')
+    await pool.query(`
+      CREATE TABLE clips (
+        hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL, mime TEXT NOT NULL,
+        duration_ms BIGINT NOT NULL, created_at BIGINT NOT NULL, byte_size BIGINT
+      )`)
+    await pool.query('INSERT INTO clips (hash, bytes, mime, duration_ms, created_at, byte_size) VALUES ($1,$2,$3,$4,$5,$6)', [
+      'legacy',
+      Buffer.alloc(5000, 7),
+      'audio/mpeg',
+      1000,
+      1,
+      5000,
+    ])
+
+    const clips = createClipStore(pool, { maxBytes: 20_000, evictBatchSize: 2 })
+    await clips.init()
+    const { rows } = await pool.query('SELECT last_used_at FROM clips WHERE hash = $1', ['legacy'])
+    expect(Number(rows[0].last_used_at), 'last used when it was made — the most a row written before the column can say').toBe(1)
+
+    await clips.init() // every boot
+    const { rows: nulls } = await pool.query('SELECT count(*) c FROM clips WHERE last_used_at IS NULL')
+    expect(nulls[0].c).toBe('0')
+  })
+
+  it('bumps last_used_at on a hit at most once a day, without the hit waiting on it', async () => {
+    const DAY = 24 * 60 * 60 * 1000
+    const clock = { now: 0 }
+    const clips = createClipStore(pool, { maxBytes: 1_000_000, now: () => clock.now, logger: { warn() {} } })
+    await clips.init()
+    await clips.put({ hash: 'played', bytes: Buffer.alloc(100, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 100 })
+    const lastUsed = async () => Number((await pool.query('SELECT last_used_at FROM clips WHERE hash = $1', ['played'])).rows[0].last_used_at)
+    expect(await lastUsed()).toBe(100)
+
+    clock.now = 100 + DAY - 1
+    await clips.get('played')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(await lastUsed(), 'under a day: no write').toBe(100)
+
+    clock.now = 100 + DAY
+    await clips.get('played')
+    await vi.waitFor(async () => expect(await lastUsed()).toBe(100 + DAY))
+  })
+
+  it('evicts least-recently-used, so a played old clip outlives an unplayed newer one', async () => {
+    const DAY = 24 * 60 * 60 * 1000
+    const clock = { now: 0 }
+    await pool.query('DELETE FROM clips')
+    const clips = createClipStore(pool, { maxBytes: 20_000, evictBatchSize: 2, now: () => clock.now, logger: { warn() {} } })
+    await clips.init()
+    await clips.put({ hash: 'old-played', bytes: Buffer.alloc(9000, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+    await clips.put({ hash: 'newer-unplayed', bytes: Buffer.alloc(9000, 2), mime: 'audio/mpeg', durationMs: 1, createdAt: 2 })
+    clock.now = 2 * DAY
+    await clips.get('old-played')
+    await vi.waitFor(async () =>
+      expect(Number((await pool.query("SELECT last_used_at FROM clips WHERE hash = 'old-played'")).rows[0].last_used_at)).toBe(2 * DAY),
+    )
+
+    await clips.put({ hash: 'newest', bytes: Buffer.alloc(9000, 3), mime: 'audio/mpeg', durationMs: 1, createdAt: 2 * DAY })
+
+    const { rows } = await pool.query('SELECT hash FROM clips ORDER BY hash')
+    expect(rows.map((r) => r.hash)).toEqual(['newest', 'old-played'])
   })
 
   it('evicts oldest-first to hold the ceiling', async () => {

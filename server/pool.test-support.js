@@ -170,16 +170,23 @@ export function fakeLibraryPool() {
 
 /**
  * `clips` (T063), including the `byte_size` column and the eviction sweep
- * T071 added. The real driver maps `bytea` to a `Buffer` in both
- * directions, which is what this stores and returns.
+ * T071 added, and `last_used_at` (S8b) with the once-a-day bump. The real
+ * driver maps `bytea` to a `Buffer` in both directions, which is what this
+ * stores and returns. `rows` is exposed so a test can read `lastUsedAt`, and
+ * `failBump`/`holdBump` make the bump fail or never answer.
  */
 export function fakeClipPool() {
   const created = new Set()
   const rows = new Map()
   const queries = []
 
-  return {
+  const pool = {
     queries,
+    rows,
+    /** Set to make the last-used bump reject. */
+    failBump: false,
+    /** Set to make the last-used bump never settle. */
+    holdBump: false,
     async query(text, params = []) {
       queries.push({ text, params })
       const sql = flatten(text)
@@ -199,6 +206,20 @@ export function fakeClipPool() {
         return { rows: [] }
       }
 
+      if (sql.startsWith('UPDATE clips SET last_used_at = created_at')) {
+        for (const row of rows.values()) if (row.lastUsedAt === null || row.lastUsedAt === undefined) row.lastUsedAt = row.createdAt
+        return { rows: [] }
+      }
+
+      // `UPDATE clips SET last_used_at = $2 WHERE hash = $1 AND last_used_at < $3`
+      if (sql.startsWith('UPDATE clips SET last_used_at')) {
+        if (pool.failBump) throw new Error('bump failed')
+        if (pool.holdBump) return new Promise(() => {})
+        const row = rows.get(params[0])
+        if (row && row.lastUsedAt < params[2]) row.lastUsedAt = params[1]
+        return { rows: [] }
+      }
+
       if (sql.startsWith('SELECT COALESCE(SUM(byte_size)')) {
         let total = 0
         for (const row of rows.values()) total += row.byteSize ?? 0
@@ -206,7 +227,8 @@ export function fakeClipPool() {
       }
 
       if (sql.startsWith('SELECT hash, byte_size')) {
-        const ordered = [...rows.values()].sort((a, b) => a.createdAt - b.createdAt || (a.hash < b.hash ? -1 : 1))
+        if (!sql.includes('ORDER BY last_used_at ASC, hash ASC')) throw new Error(`fakeClipPool: eviction order not modelled: ${sql}`)
+        const ordered = [...rows.values()].sort((a, b) => a.lastUsedAt - b.lastUsedAt || (a.hash < b.hash ? -1 : 1))
         return { rows: ordered.slice(0, params[0]).map((r) => ({ hash: r.hash, byteSize: String(r.byteSize) })) }
       }
 
@@ -216,10 +238,11 @@ export function fakeClipPool() {
       }
 
       if (sql.startsWith('INSERT')) {
-        const [hash, bytes, mime, durationMs, createdAt, byteSize] = params
+        if (!sql.includes('last_used_at')) throw new Error(`fakeClipPool: an INSERT must set last_used_at: ${sql}`)
+        const [hash, bytes, mime, durationMs, createdAt, byteSize, lastUsedAt] = params
         // Mirrors `ON CONFLICT (hash) DO NOTHING`: the first write for a
         // content address wins and later ones are silently no-ops.
-        if (!rows.has(hash)) rows.set(hash, { hash, bytes, mime, durationMs, createdAt, byteSize })
+        if (!rows.has(hash)) rows.set(hash, { hash, bytes, mime, durationMs, createdAt, byteSize, lastUsedAt })
         return { rows: [] }
       }
 
@@ -235,4 +258,5 @@ export function fakeClipPool() {
     },
     async end() {},
   }
+  return pool
 }
