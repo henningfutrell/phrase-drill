@@ -15,7 +15,7 @@ import {
   clipStoreMaxBytesFrom,
   createPool,
 } from './db.js'
-import { fakeLibraryPool as fakePool, fakeClipPool } from './pool.test-support.js'
+import { fakeLibraryPool as fakePool, fakeClipPool, fakeClipStorage } from './pool.test-support.js'
 import { createClipJobStore } from './clip-job-store.js'
 
 describe('createLibraryStore (Postgres)', () => {
@@ -258,7 +258,7 @@ describe('createClipStore (Postgres, T063)', () => {
 
   it('creates its table idempotently, on init, before any read', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool)
+    const store = createClipStore(pool, { storage: fakeClipStorage() })
 
     await store.init()
     await store.init() // a second boot against an existing schema must not throw
@@ -266,19 +266,23 @@ describe('createClipStore (Postgres, T063)', () => {
     const creates = pool.queries.filter((q) => q.text.trim().startsWith('CREATE TABLE'))
     expect(creates.length).toBe(2)
     expect(creates[0].text).toContain('IF NOT EXISTS')
-    // bytea, not text/base64: the bytes are stored as bytes (T063).
-    expect(creates[0].text).toContain('BYTEA')
+    // The bytes live in Storage; the row holds only where they are.
+    expect(creates[0].text).not.toMatch(/\bbytes\b/i)
+    expect(creates[0].text).toContain('storage_path TEXT NOT NULL')
+    expect(creates[0].text).toContain('byte_size BIGINT NOT NULL')
+    expect(creates[0].text).toContain('last_used_at BIGINT NOT NULL')
+    expect(pool.queries.some((q) => /ALTER TABLE|octet_length/.test(q.text)), 'no migration debt on boot').toBe(false)
   })
 
   it('returns null for a hash it has never stored', async () => {
-    const store = createClipStore(fakeClipPool())
+    const store = createClipStore(fakeClipPool(), { storage: fakeClipStorage() })
     await store.init()
 
     expect(await store.get('deadbeef')).toBeNull()
   })
 
   it('round-trips the bytes, mime and duration under a content hash', async () => {
-    const store = createClipStore(fakeClipPool())
+    const store = createClipStore(fakeClipPool(), { storage: fakeClipStorage() })
     await store.init()
 
     await store.put({ hash: 'abc123', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1_700_000_000_000 })
@@ -294,7 +298,7 @@ describe('createClipStore (Postgres, T063)', () => {
   // so a delete that missed would leave the broken bytes served forever.
   it('deletes one clip by hash, leaving the rest, so the next put for it lands', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool)
+    const store = createClipStore(pool, { storage: fakeClipStorage() })
     await store.init()
     await store.put({ hash: 'broken', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
     await store.put({ hash: 'other', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
@@ -310,7 +314,7 @@ describe('createClipStore (Postgres, T063)', () => {
 
   it('does not throw or overwrite when the same hash is written twice', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool)
+    const store = createClipStore(pool, { storage: fakeClipStorage() })
     await store.init()
 
     await store.put({ hash: 'abc123', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
@@ -320,6 +324,117 @@ describe('createClipStore (Postgres, T063)', () => {
     // definition, so a concurrent double-miss must be a no-op, never an error.
     expect(pool.queries.some((q) => q.text.includes('ON CONFLICT (hash) DO NOTHING'))).toBe(true)
     expect((await store.get('abc123')).durationMs).toBe(250)
+  })
+
+
+  describe('over Storage', () => {
+    function stores(options) {
+      const pool = fakeClipPool()
+      const storage = fakeClipStorage()
+      const logger = { errors: [], warnings: [], error: (msg, fields) => logger.errors.push({ msg, fields }), warn: (msg, fields) => logger.warnings.push({ msg, fields }) }
+      const store = createClipStore(pool, { storage, logger, ...options })
+      return { pool, storage, logger, store }
+    }
+    const put = (store, hash = 'abc123', size = 4) => store.put({ hash, bytes: Buffer.alloc(size, 9), mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+
+    it('writes the object under the hash, with its mime, then a row that points at it', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      await put(store)
+
+      expect(storage.calls.upload).toEqual([{ path: 'abc123', options: { contentType: 'audio/mpeg', upsert: false } }])
+      expect(pool.rows.get('abc123').storagePath).toBe('abc123')
+    })
+
+    it('writes no row when the upload fails, so a row never points at a missing object', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      storage.upload = async () => ({ data: null, error: { message: 'bucket not found', status: 404 } })
+
+      await expect(put(store)).rejects.toThrow(/bucket not found/)
+      expect(pool.rows.size).toBe(0)
+    })
+
+    it('treats an object that already exists as written, and still records the row', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      storage.objects.set('abc123', { bytes: Buffer.alloc(4, 9) }) // a put that died after the upload
+
+      await put(store)
+
+      expect(pool.rows.has('abc123')).toBe(true)
+    })
+
+    it('misses, quietly, for a hash with no row', async () => {
+      const { storage, store } = stores()
+      await store.init()
+
+      expect(await store.get('nope')).toBeNull()
+      expect(storage.calls.remove).toEqual([])
+    })
+
+    it('on a row whose object is gone: logs at error level, deletes the row, and misses', async () => {
+      const { pool, storage, logger, store } = stores()
+      await store.init()
+      await put(store)
+      storage.objects.delete('abc123')
+
+      expect(await store.get('abc123')).toBeNull()
+      expect(pool.rows.has('abc123'), 'the next request regenerates rather than failing again').toBe(false)
+      expect(logger.errors).toHaveLength(1)
+      expect(JSON.stringify(logger.errors[0]), 'never the hash, which is phrase-derived').not.toContain('abc123')
+    })
+
+    it('does not delete the row for a download failure that is not "missing"', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      await put(store)
+      storage.download = async () => ({ data: null, error: { message: 'upstream timeout', status: 504 } })
+
+      await expect(store.get('abc123')).rejects.toThrow(/upstream timeout/)
+      expect(pool.rows.has('abc123')).toBe(true)
+    })
+
+    it('delete removes the row, then the object', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      await put(store)
+
+      expect(await store.delete('abc123')).toBe(true)
+      expect(await store.delete('abc123')).toBe(false)
+      expect(pool.rows.size).toBe(0)
+      expect(storage.objects.size).toBe(0)
+      expect(storage.calls.remove).toEqual([['abc123']])
+    })
+
+    it('a failed remove leaves an orphan object, is logged, and does not fail the request', async () => {
+      const { storage, logger, store } = stores()
+      await store.init()
+      await put(store)
+      storage.failRemove = true
+
+      expect(await store.delete('abc123')).toBe(true)
+      expect(storage.objects.size, 'the orphan').toBe(1)
+      expect(logger.errors.length + logger.warnings.length).toBeGreaterThan(0)
+    })
+
+    it('eviction removes the evicted objects, in batches of at most 200', async () => {
+      const { storage, store } = stores({ maxBytes: 1_000, evictBatchSize: 500 })
+      await store.init()
+      for (let i = 0; i < 11; i += 1) await put(store, `clip-${String(i).padStart(2, '0')}`, 100)
+
+      expect(storage.objects.has('clip-00')).toBe(false)
+      expect(storage.objects.has('clip-10')).toBe(true)
+      expect(storage.objects.size).toBe(9)
+
+      const big = stores({ maxBytes: 600_000, evictBatchSize: 500 })
+      await big.store.init()
+      for (let i = 0; i < 450; i += 1) await put(big.store, `c${String(i).padStart(3, '0')}`, 1_000)
+      await put(big.store, 'last', 300_000) // 750 KB over a 600 KB ceiling: the sweep deletes ~210 rows
+      expect(big.storage.calls.remove.length).toBeGreaterThan(1)
+      for (const batch of big.storage.calls.remove) expect(batch.length).toBeLessThanOrEqual(200)
+      expect(big.storage.objects.size).toBe(big.pool.rows.size)
+    })
   })
 
 })
@@ -340,26 +455,9 @@ describe('createClipStore — the growth bound (T071)', () => {
     createdAt,
   })
 
-  it('adds byte_size idempotently and backfills rows written before it existed', async () => {
-    const pool = fakeClipPool()
-    const store = createClipStore(pool)
-
-    await store.init()
-    await store.init()
-
-    // The deployed database already has `clips` (T063) with no `byte_size`.
-    // The change has to reach it on a redeploy with no manual step, which is
-    // `ADD COLUMN IF NOT EXISTS` plus a backfill that matches nothing the
-    // second time — docs/server.md "Schema: creation and change".
-    const alters = pool.queries.filter((q) => q.text.includes('ALTER TABLE clips') && q.text.includes('byte_size'))
-    expect(alters.length).toBe(2)
-    expect(alters[0].text).toContain('ADD COLUMN IF NOT EXISTS')
-    expect(pool.queries.some((q) => q.text.includes('SET byte_size = octet_length(bytes)'))).toBe(true)
-  })
-
   it('stores nothing extra and evicts nothing while under the ceiling', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool, { maxBytes: 1_000 })
+    const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 1_000 })
     await store.init()
 
     await store.put(clip('a', 100, 1))
@@ -372,7 +470,7 @@ describe('createClipStore — the growth bound (T071)', () => {
 
   it('evicts least-recently-used down to 90% of the ceiling once a put crosses it', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool, { maxBytes: 1_000 })
+    const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 1_000 })
     await store.init()
 
     for (let i = 0; i < 11; i += 1) await store.put(clip(`clip-${i}`, 100, i))
@@ -396,20 +494,9 @@ describe('createClipStore — the growth bound (T071)', () => {
       const clock = { now: 1_000 }
       const pool = fakeClipPool()
       const logger = { warnings: [], warn: (msg, fields) => logger.warnings.push({ msg, fields }) }
-      const store = createClipStore(pool, { maxBytes: 1_000, now: () => clock.now, logger, ...options })
+      const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 1_000, now: () => clock.now, logger, ...options })
       return { clock, pool, logger, store }
     }
-
-    it('adds last_used_at idempotently and backfills it from created_at', async () => {
-      const { pool, store } = storeAt()
-      await store.init()
-      await store.init()
-
-      const alters = pool.queries.filter((q) => q.text.includes('ALTER TABLE clips') && q.text.includes('last_used_at'))
-      expect(alters.length).toBe(2)
-      expect(alters[0].text).toContain('ADD COLUMN IF NOT EXISTS last_used_at BIGINT')
-      expect(pool.queries.some((q) => q.text.includes('SET last_used_at = created_at WHERE last_used_at IS NULL'))).toBe(true)
-    })
 
     it('stamps a new clip as used when it is stored', async () => {
       const { pool, store } = storeAt()
@@ -489,7 +576,7 @@ describe('createClipStore — the growth bound (T071)', () => {
 
   it('keeps evicting across more rows than one sweep reads', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool, { maxBytes: 1_000, evictBatchSize: 3 })
+    const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 1_000, evictBatchSize: 3 })
     await store.init()
 
     for (let i = 0; i < 10; i += 1) await store.put(clip(`clip-${i}`, 100, i))
@@ -505,7 +592,7 @@ describe('createClipStore — the growth bound (T071)', () => {
 
   it('never issues a statement naming any table but clips', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool, { maxBytes: 200 })
+    const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 200 })
     await store.init()
     for (let i = 0; i < 10; i += 1) await store.put(clip(`clip-${i}`, 100, i))
     await store.get('clip-9')

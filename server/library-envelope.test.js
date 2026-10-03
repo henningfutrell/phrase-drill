@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createApp, LIBRARY_MAX_SCHEMA_VERSION } from './app.js'
 import { createLibraryStore, createClipStore } from './db.js'
-import { fakeLibraryPool, fakeClipPool } from './pool.test-support.js'
+import { fakeLibraryPool, fakeClipPool, fakeClipStorage } from './pool.test-support.js'
 import { createRateLimiter } from './rate-limiter.js'
 
 /**
@@ -91,7 +91,7 @@ describe('/api/library — the server never stores an envelope it will later ref
   beforeEach(async () => {
     libraryStore = createLibraryStore(fakeLibraryPool())
     await libraryStore.init()
-    const clipStore = createClipStore(fakeClipPool())
+    const clipStore = createClipStore(fakeClipPool(), { storage: fakeClipStorage() })
     await clipStore.init()
     distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-t082-'))
     writeFileSync(join(distDir, 'index.html'), '<!doctype html>')

@@ -6,7 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseHashes, deleteClips, describeResult } from './clip-delete.mjs'
 import { createClipStore } from '../server/db.js'
-import { fakeClipPool } from '../server/pool.test-support.js'
+import { fakeClipPool, fakeClipStorage } from '../server/pool.test-support.js'
 import { createMemoryClipJobStore, jobFields } from '../server/clip-job-store.test-support.js'
 
 /**
@@ -61,7 +61,7 @@ describe('parseHashes', () => {
 
 describe('deleteClips', () => {
   async function stores() {
-    const clipStore = createClipStore(fakeClipPool())
+    const clipStore = createClipStore(fakeClipPool(), { storage: fakeClipStorage() })
     await clipStore.init()
     const clipJobStore = createMemoryClipJobStore()
     return { clipStore, clipJobStore }
