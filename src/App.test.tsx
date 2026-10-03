@@ -212,7 +212,9 @@ function createFakeSynthClient(): SynthClient & {
 /** A GenerationQueue fake that only records what it was asked to do — the
  * real queue is exercised in src/adapters/audio; App's wiring is what these
  * tests care about. `enqueue` never resolves, by design: it proves the
- * Phrase save itself is never gated on generation completing.
+ * Phrase save itself is never gated on generation completing. `regenerated`
+ * is kept apart from `enqueued` because the two are different requests: only
+ * a Regenerate replaces a Clip the device or the server already holds.
  *
  * `suspensions` records Generation suspension in order rather than counting
  * it: the span is taken twice per Drill (the Start tap and the running-phase
@@ -220,15 +222,21 @@ function createFakeSynthClient(): SynthClient & {
  * composition root wired both ends of it. */
 function createFakeGenerationQueue(): GenerationQueue & {
   enqueued: Array<{ id: string; french: string; english: string }>
+  regenerated: Array<{ id: string; french: string; english: string }>
   suspensions: Array<'suspend' | 'resume'>
 } {
   const enqueued: Array<{ id: string; french: string; english: string }> = []
+  const regenerated: Array<{ id: string; french: string; english: string }> = []
   const suspensions: Array<'suspend' | 'resume'> = []
   return {
     enqueued,
+    regenerated,
     suspensions,
     enqueue(phrase) {
       enqueued.push({ id: phrase.id, french: phrase.french, english: phrase.english })
+    },
+    regenerate(phrase) {
+      regenerated.push({ id: phrase.id, french: phrase.french, english: phrase.english })
     },
     statusFor() {
       return undefined

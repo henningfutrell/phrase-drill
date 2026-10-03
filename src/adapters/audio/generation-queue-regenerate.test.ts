@@ -67,6 +67,26 @@ function createFakeClipCache(): ClipCache & { clips: Map<string, Clip> } {
   }
 }
 
+/** How many times `mock` was asked for `text` — one side of a Phrase, when
+ * the other side's calls are not the subject. */
+function callsFor(mock: { mock: { calls: unknown[][] } }, text: string): number {
+  return mock.mock.calls.filter((call) => call[0] === text).length
+}
+
+/** A synth call that answers `error` the first time it is asked for the
+ * French side and new audio every other time — so the English side, running
+ * alongside, cannot take the scripted answer instead. */
+function onceForBonjour(error: SynthError): SynthClient['synthesize'] {
+  let answered = false
+  return async (text) => {
+    if (text === 'Bonjour' && !answered) {
+      answered = true
+      return Promise.reject(error)
+    }
+    return fresh()
+  }
+}
+
 async function hashOf(voice: Voice, lang: 'fr-FR' | 'en-US', text: string): Promise<string> {
   return computeClipHash({ ...voice, lang, text })
 }
@@ -133,13 +153,13 @@ describe('GenerationQueue.regenerate', () => {
     const heldWhenAsked: boolean[] = []
     const { queue } = setup({
       clipCache,
-      regenerate: async () => {
-        heldWhenAsked.push(clipCache.clips.has(fr))
+      regenerate: async (text) => {
+        if (text === 'Bonjour') heldWhenAsked.push(clipCache.clips.has(fr))
         return Promise.reject(unreadable())
       },
     })
 
-    queue.regenerate({ id: 'p1', french: 'Bonjour', english: '' })
+    queue.regenerate(PHRASE)
     await queue.whenIdle()
 
     expect(heldWhenAsked).toEqual([false])
@@ -149,17 +169,14 @@ describe('GenerationQueue.regenerate', () => {
   it('polls a queued (202) Clip with the ordinary synthesize, never a second regenerate', async () => {
     const { queue, synthesize, regenerate } = setup({
       regenerate: async () => Promise.reject(queued(5000)),
-      synthesize: vi
-        .fn<SynthClient['synthesize']>()
-        .mockRejectedValueOnce(queued(5000))
-        .mockResolvedValue(fresh()),
+      synthesize: onceForBonjour(queued(5000)),
     })
 
-    queue.regenerate({ id: 'p1', french: 'Bonjour', english: '' })
+    queue.regenerate(PHRASE)
     await queue.whenIdle()
 
-    expect(regenerate).toHaveBeenCalledTimes(1)
-    expect(synthesize).toHaveBeenCalledTimes(2)
+    expect(callsFor(regenerate, 'Bonjour')).toBe(1)
+    expect(callsFor(synthesize, 'Bonjour')).toBe(2)
     expect(synthesize).toHaveBeenCalledWith('Bonjour', 'fr-FR', SYNTH_VOICE)
     expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'ready' })
   })
@@ -167,11 +184,11 @@ describe('GenerationQueue.regenerate', () => {
   it('retries a network failure with synthesize — the regenerate may have reached the server, and a second one bills again', async () => {
     const { queue, synthesize, regenerate } = setup({ regenerate: async () => Promise.reject(network()) })
 
-    queue.regenerate({ id: 'p1', french: 'Bonjour', english: '' })
+    queue.regenerate(PHRASE)
     await queue.whenIdle()
 
-    expect(regenerate).toHaveBeenCalledTimes(1)
-    expect(synthesize).toHaveBeenCalledTimes(1)
+    expect(callsFor(regenerate, 'Bonjour')).toBe(1)
+    expect(callsFor(synthesize, 'Bonjour')).toBe(1)
     expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'ready' })
   })
 
@@ -183,16 +200,13 @@ describe('GenerationQueue.regenerate', () => {
   // a 60/60s limiter, so this is the common case, not an edge.
   it('asks to regenerate again after a 429 — the limiter refused it before the server did anything', async () => {
     const { queue, synthesize, regenerate } = setup({
-      regenerate: vi
-        .fn<SynthClient['regenerate']>()
-        .mockRejectedValueOnce(rateLimited(1000))
-        .mockResolvedValue(fresh()),
+      regenerate: onceForBonjour(rateLimited(1000)),
     })
 
-    queue.regenerate({ id: 'p1', french: 'Bonjour', english: '' })
+    queue.regenerate(PHRASE)
     await queue.whenIdle()
 
-    expect(regenerate).toHaveBeenCalledTimes(2)
+    expect(callsFor(regenerate, 'Bonjour')).toBe(2)
     expect(synthesize).not.toHaveBeenCalled()
     expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'ready' })
   })
@@ -236,6 +250,41 @@ describe('GenerationQueue.regenerate', () => {
     await queue.whenIdle()
     expect(regenerate).toHaveBeenCalledTimes(2)
     expect(clipCache.clips.get(fr)?.bytes.byteLength).toBe(NEW_BYTES)
+  })
+
+  it('does not delete a Clip that was waiting for a slot when the Drill started — the gate is at the request, not only at the tap', async () => {
+    const clipCache = createFakeClipCache()
+    const waiting = { id: 'p2', french: 'Merci', english: 'Thanks' }
+    const waitingFr = await hashOf(VOICE, 'fr-FR', waiting.french)
+    await clipCache.put({ hash: waitingFr, bytes: new ArrayBuffer(BROKEN_BYTES), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+    // PHRASE's two sides fill both slots and are held; `waiting` passes the
+    // head-of-generateOne gate and queues for a slot behind them.
+    const held: Array<() => void> = []
+    let holding = true
+    const { queue } = setup({
+      clipCache,
+      maxConcurrent: 2,
+      regenerate: () => (holding ? new Promise((resolve) => held.push(() => resolve(fresh()))) : Promise.resolve(fresh())),
+    })
+
+    queue.regenerate(PHRASE)
+    await settle()
+    expect(held).toHaveLength(2)
+    queue.regenerate(waiting)
+    await settle()
+
+    // The Drill starts, then the two held requests land: their slots pass to
+    // `waiting`'s sides while the queue is suspended.
+    queue.suspend()
+    holding = false
+    for (const release of held.splice(0)) release()
+    await settle()
+
+    expect(clipCache.clips.get(waitingFr)?.bytes.byteLength).toBe(BROKEN_BYTES)
+
+    queue.resume()
+    await queue.whenIdle()
+    expect(clipCache.clips.get(waitingFr)?.bytes.byteLength).toBe(NEW_BYTES)
   })
 
   it('sends one regenerate per Clip when she taps twice before the first finishes', async () => {

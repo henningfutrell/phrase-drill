@@ -95,6 +95,27 @@ export interface GenerationQueue {
    * before or independent of this call, never gated on it.
    */
   enqueue(phrase: Pick<Phrase, 'id' | 'french' | 'english'>): void
+  /**
+   * **Regenerate** (docs/glossary.md): make both Clips of a Phrase again, in
+   * the pinned voice, because she says the audio is broken. Synchronous and
+   * never throws, like `enqueue`.
+   *
+   * `enqueue` cannot do this, on either end: it skips a Clip the device
+   * holds, and `/api/tts` serves the Clip the server stored first to every
+   * device forever. So, per side: wait out any Drill (never delete a Clip
+   * while one plays — Generation suspension), delete the device's Clip, ask
+   * `/api/tts/regenerate` once, and poll anything still pending with the
+   * ordinary `synthesize`.
+   *
+   * **The pinned voice only.** The same Phrase's Clips in any other voice
+   * are left where they are: a Clip's voice is its own (T067), and she is
+   * asking about the audio she hears now.
+   *
+   * A Phrase that does not come back `ready` is `failed` like any other —
+   * including when the server's billing cap (two provider charges per Clip
+   * per 24 h) refuses a second regenerate of the same Clip within a day.
+   */
+  regenerate(phrase: Pick<Phrase, 'id' | 'french' | 'english'>): void
   /** The last known combined status for a Phrase, or `undefined` if it was
    * never queued (including: no voice was pinned when it was). */
   statusFor(phraseId: string): GenerationStatus | undefined
@@ -219,16 +240,49 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   /** One Clip, from the first request to a settled outcome. Holds a
    * concurrency slot for the whole of its retrying, so a paused queue really
    * is paused rather than letting the next Clip take its place and be refused
-   * in turn. */
-  async function requestClip(text: string, lang: Language, voice: Voice, hash: string): Promise<GenerationStatus> {
+   * in turn.
+   *
+   * `regenerate` is a Regenerate: the device's Clip is deleted after the
+   * gate has passed — the gate is the last moment a Drill could have started,
+   * so no Clip is deleted under one — and the request goes to
+   * `synthClient.regenerate` until the server has had it. That is every
+   * attempt up to the first answer that is not a 429. A 429 is our own
+   * limiter, which refuses before the handler runs (server/app.js), so the
+   * server did nothing and must be asked again; and a Deck's Redo audio,
+   * two requests per Phrase against 60 a minute, meets it routinely. After a
+   * 202 or a network failure the server has (or may have) deleted its Clip
+   * and queued one generation, so every later attempt polls `synthesize`: a
+   * second regenerate would delete and bill again. */
+  async function requestClip(
+    text: string,
+    lang: Language,
+    voice: Voice,
+    hash: string,
+    regenerate: boolean,
+  ): Promise<GenerationStatus> {
     let networkAttempts = 0
     let rateLimitWaits = 0
     let queuedWaits = 0
+    let deleteFirst = regenerate
+    let askToRegenerate = regenerate
 
     for (;;) {
       await waitUntilAllowed()
+      if (deleteFirst) {
+        deleteFirst = false
+        try {
+          await deps.clipCache.delete(hash)
+        } catch {
+          // The device would not let go of its Clip. Asking the server would
+          // pay for audio this phone may not be able to store either — and
+          // `put` would be refused the same way — so the honest outcome is
+          // `failed`, with nothing charged.
+          return { kind: 'failed' }
+        }
+      }
+      const request = askToRegenerate ? deps.synthClient.regenerate : deps.synthClient.synthesize
       try {
-        const result = await deps.synthClient.synthesize(text, lang, {
+        const result = await request(text, lang, {
           provider: voice.provider,
           modelId: voice.modelId,
           voiceId: voice.voiceId,
@@ -246,6 +300,9 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
         if (error.kind === 'unauthorized') return { kind: 'unauthorized' }
         if (error.kind === 'quota') return { kind: 'quota' } // the provider is out of credits: waiting changes nothing
         if (error.kind === 'unreadable') return { kind: 'failed' } // terminal: the provider's output is unusable or the billing cap hit; asking again spends money
+        // Every answer but a 429 means the server had the regenerate (see the
+        // doc comment above); from here on, poll.
+        if (error.kind !== 'rate-limited') askToRegenerate = false
         if (error.kind === 'queued') {
           // The server is still generating this one Clip. Wait for THIS
           // request only: no `resumeAt`, because a job in progress is not a
@@ -272,7 +329,7 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
     }
   }
 
-  async function generateOne(text: string, lang: Language, voice: Voice): Promise<GenerationStatus> {
+  async function generateOne(text: string, lang: Language, voice: Voice, regenerate: boolean): Promise<GenerationStatus> {
     // Before the hash, not just before the request. `computeClipHash` and
     // `clipCache.has` sit outside the concurrency slot and are therefore
     // unbounded: a cold 1,000-Phrase library would put 2,000
@@ -290,36 +347,49 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
     })
     // Both checks stay outside the concurrency slot: a Clip already cached
     // costs no request, and making it queue behind four that do would turn a
-    // warm library's sweep into a slow one for no reason.
-    if (await deps.clipCache.has(hash)) return { kind: 'ready' }
+    // warm library's sweep into a slow one for no reason. A Regenerate skips
+    // the first — a cached Clip is exactly what it exists to replace — and
+    // keeps the second: a second tap on Redo audio while the first is out is
+    // the same request, and sending it again would bill twice.
+    if (!regenerate && (await deps.clipCache.has(hash))) return { kind: 'ready' }
     if (inFlightHashes.has(hash)) return { kind: 'generating' }
 
     inFlightHashes.add(hash)
     try {
-      return await withSlot(() => requestClip(text, lang, voice, hash))
+      return await withSlot(() => requestClip(text, lang, voice, hash, regenerate))
     } finally {
       inFlightHashes.delete(hash)
     }
   }
 
+  /** Both Clips of one Phrase, in the voice pinned now, in the background —
+   * `enqueue` and `regenerate` differ only in `regenerate`. */
+  function generatePhrase(phrase: Pick<Phrase, 'id' | 'french' | 'english'>, regenerate: boolean): void {
+    idle.begin() // synchronous, so `whenIdle()` called straight after this already knows
+    void (async () => {
+      try {
+        const voice = await deps.getVoice()
+        if (!voice) return // no voice pinned: nothing to generate against, no default invented
+
+        setStatus(phrase.id, { kind: 'generating' })
+        const [french, english] = await Promise.all([
+          generateOne(phrase.french, 'fr-FR', voice, regenerate),
+          generateOne(phrase.english, 'en-US', voice, regenerate),
+        ])
+        setStatus(phrase.id, combine(french, english))
+      } finally {
+        idle.end()
+      }
+    })()
+  }
+
   return {
     enqueue(phrase) {
-      idle.begin() // synchronous, so `whenIdle()` called straight after this already knows
-      void (async () => {
-        try {
-          const voice = await deps.getVoice()
-          if (!voice) return // no voice pinned: nothing to generate against, no default invented
+      generatePhrase(phrase, false)
+    },
 
-          setStatus(phrase.id, { kind: 'generating' })
-          const [french, english] = await Promise.all([
-            generateOne(phrase.french, 'fr-FR', voice),
-            generateOne(phrase.english, 'en-US', voice),
-          ])
-          setStatus(phrase.id, combine(french, english))
-        } finally {
-          idle.end()
-        }
-      })()
+    regenerate(phrase) {
+      generatePhrase(phrase, true)
     },
 
     statusFor(phraseId) {
