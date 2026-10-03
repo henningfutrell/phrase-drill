@@ -18,6 +18,11 @@ COPY . .
 # cache for `npm ci` on every deploy. Empty for a plain `docker build`, which
 # build-sha.ts then answers with git or `unknown`.
 ARG RENDER_GIT_COMMIT
+# Public, per-project Supabase values the PWA bundle is built with. Vite
+# inlines VITE_* at build time; Render passes service env vars into a Docker
+# build only through declared ARGs (same rule as above).
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_PUBLISHABLE_KEY
 RUN npm run build
 
 FROM node:26-alpine
@@ -26,6 +31,7 @@ ENV NODE_ENV=production
 ENV PORT=8080
 ENV DIST_DIR=/app/dist
 COPY --from=builder /app/dist ./dist
+# server/ includes certs/supabase-prod-ca.crt, which server/db.js reads at connect time.
 COPY server ./server
 COPY scripts/useradd.mjs ./scripts/useradd.mjs
 # clip-delete imports describeTarget from useradd.mjs, copied above; the rest
