@@ -924,6 +924,25 @@ describe('server app (integration, fake upstreams)', () => {
       expect(elevenLabsUpstream.calls).toBe(0)
     })
 
+    // S8a: '|' is the delimiter of the content address. In any field but the
+    // text it would let two different requests share one address, and one of
+    // them be served the other's audio. Refused before anything is spent.
+    it.each(['provider', 'modelId', 'voiceId', 'lang'])('rejects a "|" in %s with 400, before the provider is called', async (field) => {
+      await boot()
+
+      const res = await tts(ttsBody({ [field]: 'a|b' }))
+
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({ error: 'invalid-request' })
+      expect(elevenLabsUpstream.calls).toBe(0)
+    })
+
+    it('accepts a "|" in the text', async () => {
+      await boot()
+
+      expect((await tts(ttsBody({ text: 'oui | non' }))).status).toBe(200)
+    })
+
     // The device already paid for these bytes; a store that is down or full
     // must not turn a successful generation into a failed request.
     it('still returns the audio when writing it to the store fails', async () => {

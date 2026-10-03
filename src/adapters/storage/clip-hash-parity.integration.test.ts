@@ -27,13 +27,26 @@ const VECTORS: readonly Vector[] = [
   { provider: 'elevenlabs', modelId: 'eleven_v3', voiceId: 'voice-2', lang: 'fr-FR', text: "J'aimerais un café, s'il vous plaît." },
   // Non-ASCII, a pipe in the text, and leading/trailing space: the material
   // string is not escaped, so these are the shapes that would expose an
-  // encoding difference between `TextEncoder` and Node's utf8 handling.
-  { provider: 'elevenlabs', modelId: 'm|1', voiceId: 'v 2', lang: 'fr-FR', text: ' Où ça? | Là-bas… ' },
+  // encoding difference between `TextEncoder` and Node's utf8 handling. The
+  // pipe is in the text only: in any other field both sides refuse it (S8a).
+  { provider: 'elevenlabs', modelId: 'm 1', voiceId: 'v 2', lang: 'fr-FR', text: ' Où ça? | Là-bas… ' },
 ]
+
+const FIELDS_BEFORE_TEXT = ['provider', 'modelId', 'voiceId', 'lang'] as const
 
 describe('clip hash parity between the device and the server', () => {
   it.each(VECTORS)('agrees on $lang "$text"', async (vector) => {
     expect(await deviceComputeClipHash(vector)).toBe(serverComputeClipHash(vector))
+  })
+
+  // The two halves must also agree on what is NOT an address. A '|' in any
+  // field before the text would make two keys share one material string; a
+  // side that accepted it would cache audio under an address the other side
+  // refuses to compute.
+  it.each(FIELDS_BEFORE_TEXT)('both refuse a "|" in %s', async (field) => {
+    const vector = { ...VECTORS[0]!, [field]: 'a|b' } as Vector
+    await expect(deviceComputeClipHash(vector)).rejects.toThrow(/\|/)
+    expect(() => serverComputeClipHash(vector)).toThrow(/\|/)
   })
 
   it('both sides address the same material string', () => {

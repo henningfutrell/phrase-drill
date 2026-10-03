@@ -49,3 +49,31 @@ describe('computeClipHash', () => {
     expect(computeClipHash({ ...KEY, provider: 'other' })).not.toBe(computeClipHash(KEY))
   })
 })
+
+/**
+ * S8a. The material is the five fields joined by '|', unescaped, so without
+ * a rule two different keys could share one string — `{voiceId: 'a|b', lang:
+ * 'c'}` and `{voiceId: 'a', lang: 'b|c'}` — and so one address, and one
+ * stored Clip served for both. Forbidding the delimiter in the first four
+ * fields makes the encoding injective; `text` is last, so it may hold
+ * anything, and no address that exists today changes.
+ */
+describe('the delimiter rule', () => {
+  it.each(['provider', 'modelId', 'voiceId', 'lang'])('refuses a "|" in %s, the same from either function', (field) => {
+    const key = { ...KEY, [field]: `${KEY[field]}|x` }
+    expect(() => clipHashMaterial(key)).toThrow(/\|/)
+    expect(() => computeClipHash(key)).toThrow(/\|/)
+  })
+
+  it('accepts a "|" in the text — the last field cannot be confused with a boundary', () => {
+    expect(clipHashMaterial({ ...KEY, text: 'a | b' })).toBe('elevenlabs|eleven_multilingual_v2|voice-1|fr-FR|a | b')
+  })
+
+  it('leaves every existing address exactly as it was', () => {
+    // The hash of the material string above, computed before the rule existed.
+    // The server stores only hashes and cannot rehash, so a moved address is a
+    // re-billed library.
+    expect(computeClipHash(KEY)).toBe('b7c1c7394cfa3648a877fff841e14bbfee690ef152b58467e325be8fc911f3ae')
+  })
+})
+
