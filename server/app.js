@@ -159,7 +159,27 @@ export function createApp({
    * her library has stopped filling.
    */
   const ttsRequests = { total: 0, failed: 0 }
+
+  /**
+   * Cache lookups, and the 2xx responses ElevenLabs billed for that produced
+   * no stored clip. `provider.calls` is not kept here: only the provider
+   * sees its own retries (`elevenLabs.stats()`). Set against each other —
+   * misses far above stored clips — they show the failure that cost a month
+   * (2026-09-02 to 2026-10-03) when `requests` alone read as healthy.
+   */
+  const clipLookups = { hits: 0, misses: 0 }
+  let billedFailures = 0
   let lastTtsFailure
+
+  /** A status read must not fail because the store's SUM did: report null instead. */
+  async function storeBytesOrNull() {
+    try {
+      return await clipStore.totalBytes()
+    } catch (err) {
+      logger.warn('could not read clip store size', { message: describeError(err) })
+      return null
+    }
+  }
 
   /**
    * Whether a device is talking to this server at all, and when it last did.
@@ -326,7 +346,11 @@ export function createApp({
     ttsRequests.total += 1
 
     const cached = await clipStore.get(hash)
-    if (cached) return sendClip(res, cached)
+    if (cached) {
+      clipLookups.hits += 1
+      return sendClip(res, cached)
+    }
+    clipLookups.misses += 1
 
     try {
       const result = await elevenLabs.synthesize({ text, voiceId, modelId })
@@ -353,6 +377,8 @@ export function createApp({
       // The one place that knows a device asked for audio and did not get
       // it. Kind and time only — never the text, the hash or the session.
       ttsRequests.failed += 1
+      // Both kinds are a 2xx the provider billed that yielded no clip.
+      if (err.kind === 'billed-failure' || err.kind === 'unreadable') billedFailures += 1
       lastTtsFailure = { kind: err.kind ?? 'network', at: Date.now() }
       logger.error('tts provider error', { kind: lastTtsFailure.kind, message: describeError(err) })
       // A provider rate limit carries its own wait, and the device parks
@@ -604,6 +630,8 @@ export function createApp({
             detail: probe.detail,
             checkedAt: probe.checkedAt,
             requests: { total: ttsRequests.total, failed: ttsRequests.failed },
+            clips: { ...clipLookups, storeBytes: await storeBytesOrNull() },
+            provider: { calls: elevenLabs.stats().attempts, billedFailures },
             ...(lastTtsFailure ? { lastFailure: lastTtsFailure } : {}),
           },
           library: {
