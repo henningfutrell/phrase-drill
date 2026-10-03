@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import pg from 'pg'
 import { createLogger } from './logger.js'
 
@@ -589,29 +590,26 @@ export function createAuthStore(pool) {
 }
 
 /**
- * Decides the `ssl` option `pg` needs, from `DATABASE_URL` alone — no new
- * env var (T053, deploying to Render). Render's managed Postgres exposes
- * two hostnames for the same database: an *internal* one (`dpg-xxxx-a`, no
- * domain suffix — reachable only on Render's private network) and an
- * *external* one (`dpg-xxxx-a.<region>-postgres.render.com` — reachable
- * from anywhere, TLS required). `render.yaml` wires `DATABASE_URL` from the
- * database's `connectionString` property, which resolves to the *internal*
- * URL when the web service and the database share a region — exactly what
- * this Blueprint sets up — so the common case needs no SSL at all, same as
- * the local `docker-compose.yml` Postgres.
+ * Decides the `ssl` option `pg` needs, from `DATABASE_URL` alone — no extra
+ * env var. Every remote host must have a named trust rule; there is no
+ * "connect unverified" fallback.
  *
- * The external hostname is the one case that needs an `ssl` option:
- * Render's certificate chain is not present in Node's default CA trust
- * store, so a plain `ssl: true` fails with `SELF_SIGNED_CERT_IN_CHAIN`
- * (github.com/brianc/node-postgres#2375; community.render.com/t/…/37079).
- * `rejectUnauthorized: false` is scoped to *this hostname pattern only* —
- * never a blanket default for every connection — because it's the one
- * documented, verified case where Render's own chain, not an attacker's, is
- * what's being accepted. Anyone connecting from off-platform (a one-off
- * `psql`/migration from a laptop against the External Database URL) hits
- * this same hostname and gets the same treatment, which is correct there
- * too: it's still Render's self-signed chain, not a new trust decision.
+ * - Supabase (`*.pooler.supabase.com`, `*.supabase.co`): verify the server
+ *   certificate against the pinned Supabase root CA
+ *   (`certs/supabase-prod-ca.crt`, see `certs/README.md`). `pg` verifies the
+ *   hostname too, so this is verify-full.
+ * - A host with no dot (`localhost`, a docker-compose service name such as
+ *   `postgres`) or a loopback address: no SSL, a private link.
+ * - Anything else: throws. A new remote host is a trust decision, and it is
+ *   made here, in code, not by silently skipping verification.
+ * - An unparsable or missing URL: `undefined`; `pg` reports its own error.
+ *
+ * **Keep `sslmode=` out of the app's `DATABASE_URL`.** `pg` lets the URL's
+ * `sslmode` replace this `ssl` option, which would drop the pinned CA.
+ * (`pg_dump` and `psql` in `scripts/` want `sslmode=require`; they ignore this.)
  */
+const SUPABASE_CA_PATH = new URL('./certs/supabase-prod-ca.crt', import.meta.url)
+
 export function sslConfigFor(connectionString) {
   if (typeof connectionString !== 'string' || connectionString.length === 0) return undefined
   let hostname
@@ -620,8 +618,11 @@ export function sslConfigFor(connectionString) {
   } catch {
     return undefined
   }
-  if (hostname.endsWith('.render.com')) return { rejectUnauthorized: false }
-  return undefined
+  if (hostname.endsWith('.pooler.supabase.com') || hostname.endsWith('.supabase.co')) {
+    return { ca: readFileSync(SUPABASE_CA_PATH, 'utf8') }
+  }
+  if (!hostname.includes('.') || hostname === '127.0.0.1' || hostname === '[::1]') return undefined
+  throw new Error(`database host "${hostname}" has no TLS trust rule — add one to sslConfigFor in server/db.js`)
 }
 
 /**
