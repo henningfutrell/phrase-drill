@@ -18,7 +18,10 @@ user's phone, not for hypothetical others.
   (audio element unlock and reuse, IndexedDB quirks, PWA install/offline
   behavior), not Chrome's.
 - **The server holds the keys, she never touches one (T041).** `server/`
-  is a plain-Node HTTP server — no framework, no vendor SDK — that owns both
+  is a plain-Node HTTP server — no framework. Its one vendor SDK is
+  `@supabase/supabase-js`, for Supabase Auth (token verification) and
+  Storage (the Clip bytes); the database is Supabase Postgres over `pg`.
+  The provider APIs (ElevenLabs, Anthropic) stay plain `fetch`. It owns both
   provider credentials (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, env only)
   and her phrase library (Postgres, T043). The device never sees a provider
   key: it authenticates to the server with an opaque session token (a plain
