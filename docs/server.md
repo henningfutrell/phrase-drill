@@ -279,9 +279,9 @@ impractical without punishing her for a typo.
 Provider failures map to HTTP status: `not-configured` (no key set on the
 server) → 503; `quota` (the provider is out of credits) → **402**;
 `unreadable` (vision model found no usable phrases, or a synthesized clip
-failed validation), `rejected-request` (a 4xx for a request we built wrong)
-and `billing-capped` (S5) → 422, terminal on the device; `billed-failure`,
-`upstream` and anything else → 502. `/api/tts` also answers `202` for a clip
+failed validation), `billed-failure` (a billed 2xx whose body was lost),
+`rejected-request` (a 4xx for a request we built wrong) and `billing-capped`
+(S5) → 422, terminal on the device; `upstream` and anything else → 502. `/api/tts` also answers `202` for a clip
 still being generated — see "/api/tts — the clip job queue".
 
 ## 429 is ours, 402 is the provider's (T035)
@@ -423,15 +423,20 @@ this; the rate limiter still sits in front of all of it):
 | clip failed validation | `422` | `{"error":"unreadable"}` |
 | provider rejected the request (4xx) | `422` | `{"error":"rejected-request"}` |
 | provider rate limit, after 3 attempts | `429` + `Retry-After` | `{"error":"rate-limited"}` |
+| body lost after a billed 2xx | `422` | `{"error":"billed-failure"}` |
 | account out of credit | `402` | `{"error":"quota"}` |
 | key missing or refused | `503` | `{"error":"not-configured"}` |
-| body lost after a billed 2xx | `502` | `{"error":"billed-failure"}` |
 | 5xx or no answer, after 3 attempts | `502` | `{"error":"upstream"}` / `{"error":"network"}` |
 
 A `202` is not a failure: the job runs on without the request, and the
 device's next ask (the same `POST`) finds the clip in the store or joins the
 job still running. A re-ask never resets a queued job's attempts or backoff.
-`422` is terminal on the device; a `502` is retried as a network blip.
+`422` is terminal on the device; a `502` is retried as a network blip. So
+every kind the provider already billed for (`unreadable`, `billed-failure`)
+is `422`: as a `502`, `billed-failure` was re-asked by the device, the re-ask
+re-queued the failed job, and ElevenLabs billed a second time for one phrase.
+The body keeps the real kind for logs and `/api/status`; the device reads only
+the status.
 
 **States.** `queued` → claimed `running` → `done`, `failed`, or back to
 `queued` for a retry. A request for a `done` hash (the clip was evicted, or its
@@ -613,8 +618,8 @@ call, hence the lower number.
 **ElevenLabs bills every 2xx it returns**, so ElevenLabs is retried only where
 nothing can have been billed: `network` (fetch threw, or the 30s per-attempt
 timeout aborted it), `upstream` (a 5xx) and `rate-limited` (a 429). A failure
-reading the body *after* a 2xx is `billed-failure` and is never retried — it
-used to be, and one phrase cost up to 9 charges (3 server attempts x 3 device
+reading the body *after* a 2xx is `billed-failure` and is never retried —
+by the server, or (since it answers `422`) by the device. It used to be, and one phrase cost up to 9 charges (3 server attempts x 3 device
 attempts, 2026-09-02 to 2026-10-03). Those retries are the clip job runner's,
 not the provider's: 3 attempts, 1 s then 4 s apart, and the provider makes one
 call per `synthesize`. The table is in "/api/tts — the clip job queue".

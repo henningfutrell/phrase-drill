@@ -740,20 +740,20 @@ function statusForProviderError(err) {
     case 'quota':
       return 402
     // 422 is terminal on the device. 'unreadable' is a billed body that was
-    // not a usable clip; 'rejected-request' is a 4xx for a request we built
-    // wrong, the same answer every time; 'billing-capped' is a phrase that
-    // has cost its two billed calls today (S5). A 502 for any of them was
-    // read by the device as a network blip and asked again.
+    // not a usable clip; 'billed-failure' is a billed 2xx whose body failed
+    // to read; 'rejected-request' is a 4xx for a request we built wrong, the
+    // same answer every time; 'billing-capped' is a phrase that has cost its
+    // two billed calls today (S5). A 502 for any of them was read by the
+    // device as a network blip and asked again — and for the two billed
+    // kinds that ask re-queued the job and paid a second time (R3).
     case 'unreadable':
+    case 'billed-failure':
     case 'rejected-request':
     case 'billing-capped':
       return 422
-    // Both reach the device as 502, which it treats as 'network'. 'upstream'
-    // is a provider 5xx that survived the runner's three attempts;
-    // 'billed-failure' is a 2xx whose body failed to read — billed, never
-    // retried server-side.
+    // A provider 5xx that survived the runner's three attempts, none of
+    // them billed. 502 reaches the device as 'network', which it retries.
     case 'upstream':
-    case 'billed-failure':
       return 502
     default:
       return 502
