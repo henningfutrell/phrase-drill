@@ -90,6 +90,22 @@ function fetchElevenLabsTruncated(byteLength) {
   return impl
 }
 
+/** A 2xx (billed) whose body then fails to read — the shape that used to be retried and re-billed. */
+function fetchElevenLabsBodyFails() {
+  const impl = async () => {
+    impl.calls += 1
+    return {
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => {
+        throw new Error('premature close')
+      },
+    }
+  }
+  impl.calls = 0
+  return impl
+}
+
 /**
  * The fake ElevenLabs upstream, counting its own calls. `calls` is the whole
  * point of T063: the shared Clip store exists so that the same phrase in the
@@ -585,6 +601,18 @@ describe('server app (integration, fake upstreams)', () => {
       })
       expect(second.status).toBe(422)
       expect(elevenLabsUpstream.calls).toBe(2)
+    })
+
+    it('answers 502 billed-failure for a body that fails after a 2xx, with ONE provider call', async () => {
+      await boot({ elevenLabsFetch: fetchElevenLabsBodyFails() })
+      const res = await fetch(`${baseUrl}/api/tts`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: ttsBody(),
+      })
+      expect(res.status).toBe(502)
+      expect(await res.json()).toEqual({ error: 'billed-failure' })
+      expect(elevenLabsUpstream.calls).toBe(1)
     })
 
     it('enforces the per-key rate limit, and says how long to wait', async () => {
