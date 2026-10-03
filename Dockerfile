@@ -18,9 +18,9 @@ COPY . .
 # cache for `npm ci` on every deploy. Empty for a plain `docker build`, which
 # build-sha.ts then answers with git or `unknown`.
 ARG RENDER_GIT_COMMIT
-# The device's Supabase project URL and publishable key, baked into the bundle
-# (the build fails without them). Both are public by design: row-level
-# security and a disabled Data API are what protect the data, not these.
+# Public, per-project Supabase values the PWA bundle is built with. Vite
+# inlines VITE_* at build time; Render passes service env vars into a Docker
+# build only through declared ARGs (same rule as above).
 ARG VITE_SUPABASE_URL
 ARG VITE_SUPABASE_PUBLISHABLE_KEY
 RUN npm run build
@@ -31,6 +31,7 @@ ENV NODE_ENV=production
 ENV PORT=8080
 ENV DIST_DIR=/app/dist
 COPY --from=builder /app/dist ./dist
+# server/ includes certs/supabase-prod-ca.crt, which server/db.js reads at connect time.
 COPY server ./server
 # clip-delete needs only server/.
 COPY scripts/clip-delete.mjs ./scripts/clip-delete.mjs

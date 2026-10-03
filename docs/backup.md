@@ -1,181 +1,102 @@
 # Backups and restore (T054, re-scoped T065)
 
-Her phrases exist in exactly one Postgres database. They were typed by hand
-and exist nowhere else — not on her phone (the IndexedDB clip cache holds
-generated audio, not the phrases themselves as a system of record; `PUT
-/api/library` on the server is the only durable copy), not in a document,
-not anywhere she could re-type them from. Losing them is the one failure
+Her phrases are typed by hand and the server's Postgres database (Supabase)
+is their system of record. Her phone holds a synced copy in IndexedDB
+(`docs/sync.md`), which is the second copy but not a backup: a bad push
+overwrites it, and iOS can evict it. Losing them is the one failure
 this whole system exists to prevent. Read this document end to end before
 you need it — it is written for the version of you who is stressed, it is
 late, and something just went wrong.
+
+## Decision D1: no managed backups
+
+**2026-10-03, owner (Henning): Supabase Free tier accepted; no managed
+backups; replaced by a daily backup.mjs timer on archbox plus the device copy;
+restore-drill monthly.**
+
+This reverses an earlier signed decision that paid managed Postgres backups
+(Render `basic-256mb`) were the primary backup. Supabase Free has no project
+backups at all; daily backups start at Pro. Do not assume the platform holds
+a copy of her library. It does not.
 
 ## The arrangement, in one table
 
 | | What it is | Who runs it | Where the copy lives |
 |---|---|---|---|
-| **Render managed Postgres backups** | **The primary mechanism.** Point-in-time recovery, plus downloadable logical exports, both provided by Render for every paid database. | Render, continuously, with no configuration in this repo | Inside Render |
-| **`scripts/backup.mjs`** | The **secondary, manual, off-platform** copy. A human runs it and gets a `.sql.gz` file on a machine they own. | You, by hand, when you want one | Wherever you point `BACKUP_DEST` — a directory on your own machine |
+| **`scripts/backup.mjs` on a daily timer** | **The primary backup.** `pg_dump` of the Supabase database through the session pooler, gzipped, 180-day retention. | systemd `--user` timer on archbox (`ops/archbox/`) | `BACKUP_DEST` on archbox |
+| **The device copy** | Her phone holds her library in IndexedDB and syncs it; after a total server loss the next push restores it. | Her phone, continuously | Her iPhone |
+| **`scripts/restore-drill.mjs`, monthly** | Proves a real backup restores. A backup nobody restored is a guess. | You, by hand, monthly | A scratch database on archbox |
 
-**There is no scheduled off-site backup, and this repo does not pretend
-there is one.** An earlier version of this document described an `s3://`
-cron job to a Backblaze B2 bucket. The owner has no S3 account and no
-Backblaze account and is not getting one, so that path was deleted in T065
-rather than left standing as a plan nobody would execute. What replaced it
-is not a downgrade — it is the decision `render.yaml` already made, written
-down: pay for a managed database whose backups are somebody else's job.
+Topology: the server runs on Render (`starter`); the database, Auth and
+Storage are Supabase (Free). Session pooler, port 5432. **Enforce SSL** is on,
+sign-ups are off, the Data API is off (RLS on every table anyway).
 
-## Primary: Render's managed Postgres backups
+## What the dump holds, and what it does not
 
-`render.yaml` pins `plan: basic-256mb` — the smallest **paid** Postgres tier
-— and its own comment says why: Render's free Postgres "expires 30 days
-after creation and carries no backups of any kind — unacceptable for the
-one copy of her phrase library". That is not a cost decision that happens to
-have a backup side effect. **Buying the backups is the point of the paid
-tier**, and it is the primary backup mechanism for this application.
+The dump is the `public` schema: `libraries` (her phrases, irreplaceable),
+`library_versions` (the recoverable history), and `clips` (metadata rows).
 
-What that buys, from Render's own documentation (see "What is confirmed and
-what is not" below before betting on a number):
+- **Clip audio is not in the dump.** The bytes live in Supabase Storage. They
+  are derived: every Clip is content-addressed audio ElevenLabs generates
+  again from the same phrase, so losing them costs provider calls and
+  waiting, never her work. That is why Storage is not backed up.
+- **Users are not in the dump.** Supabase Auth owns them (`auth.users`).
+  There is one user. Re-create her with the admin API if the project is
+  lost (`scripts/useradd.mjs`); her library is keyed by that user's id, so
+  restoring a library into a new project needs the new id (rekey the row
+  `library_key` and every `library_versions.library_key`).
 
-- **Point-in-time recovery (PITR), automatically.** Render "continually
-  backs up paid Render Postgres databases to provide point-in-time
-  recovery". Nothing in this repo configures it; it is on because the plan
-  is paid.
-- **Retention: 3 days on a Hobby workspace, 7 days on Pro or higher.**
-  Render states the window "depends on your workspace's plan", not on the
-  instance type — so `basic-256mb` versus `pro-*` does **not** change the
-  window. Upgrading the workspace later does not backfill it.
-- **Logical exports, downloadable.** Render also produces logical backups
-  for paid databases, retained "for seven days after creation, regardless of
-  your workspace plan", and offers them on the database's Recovery page as a
-  compressed archive (e.g. `2025-02-03T19_21Z.dir.tar.gz`) with a download
-  link.
-- Render's own stated preference between the two: "PITR almost always
-  enables you to recover more recent data than what's available in your
-  latest export."
+## The project can pause
 
-### Restoring from Render — the exact path
+Supabase Free projects pause after about 7 days without activity, and a
+project paused for more than 90 days cannot be restored from the dashboard.
+She drills daily, but travel and illness happen.
+`.github/workflows/keep-alive.yml` calls
+`https://phrase-drill.onrender.com/api/status` every day; that route runs a
+database query (the clip job queue counts), which Supabase should count as
+activity. **Unverified:** whether Supabase counts a pooler query as activity;
+confirm after cutover by watching the project stay active past day 7. If the
+project does pause, un-pause it in the dashboard
+(https://supabase.com/dashboard) within the 90 days.
 
-**A Render restore creates a NEW database instance. It never restores in
-place.** Render: "Render spins up a new database instance that reflects your
-original instance's state at a specified time in the past." Plan for the
-repoint, not just the restore.
+Region: the Supabase project is in West US (Oregon) if offered, else North
+California, next to the Render `oregon` service. The server makes several
+database round trips per request.
 
-1. Render dashboard → select the `phrase-drill-db` database → **Recovery**
-   page.
-2. Scroll to **Point-in-Time Recovery** → **Restore Database**.
-3. Name the new instance.
-4. Pick the date and time. **You cannot restore to a time within ten minutes
-   of now.**
-5. **Copy Existing Settings** — "No" lets you change instance type, Datadog
-   API key, and/or project. Either way the new instance always copies the IP
-   address allow list.
-6. **Start Recovery** (or **Customize Recovery** if you declined step 5).
-7. Watch the status: **Recovery In Progress** → **Creating** → **Available**.
-8. Verify with the **PSQL Command** on the new instance's **Info** page
-   before touching anything else.
-9. **Repoint the app at the new instance.** `render.yaml` wires
-   `DATABASE_URL` with `fromDatabase: {name: phrase-drill-db}`, which names
-   the *old* resource — the recovery instance has a different name, so this
-   is a manual change on the `phrase-drill` service's Environment tab
-   (a change there redeploys automatically — `docs/deploy.md`). The
-   redeploy re-runs the idempotent `init()` calls against the restored
-   schema, which is safe.
-10. Delete or suspend the original once the app is confirmed working against
-    the new one. "Your recovery instance is now your primary instance."
+## Environment (Render service): see docs/deploy.md
 
-If the timestamp was wrong: delete the recovery instance and start a new
-recovery at a different point in time. Nothing was destroyed by getting it
-wrong, which is the property that makes this path safe to attempt under
-stress.
+| Var | Value | Secret |
+|---|---|---|
+| `DATABASE_URL` | Supavisor **session** pooler URI, port 5432, **without** `sslmode=` (`server/db.js` pins the CA; a `sslmode` in the URL replaces it) | yes, `sync: false` |
+| `SUPABASE_URL` | `https://<ref>.supabase.co` | no |
+| `SUPABASE_SECRET_KEY` | `sb_secret_...` (Storage, token verification) | yes, `sync: false` |
+| `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` | public per-project values, build args for the PWA | no |
+| `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY` | unchanged | yes |
 
-### What is confirmed and what is not
+## The daily export (`scripts/backup.mjs`)
 
-Every number above is quoted from Render's own documentation
-([Recovery & Backups](https://render.com/docs/postgresql-backups),
-[Flexible plans](https://render.com/docs/postgresql-refresh)) as of
-2026-08. Two gaps, stated rather than papered over:
-
-- **Which workspace plan this account is on has not been confirmed** — no
-  live Render account was used to write this. That decides whether the PITR
-  window is **3 days or 7**. Check it in the Render dashboard and write the
-  answer here.
-- **Whether Render's logical exports run on an automatic schedule is not
-  established from Render's docs.** The documentation describes a manual
-  **Create export** button and a seven-day retention, but names no cadence.
-  Do not assume a nightly export exists until the Recovery page shows a
-  series of them appearing without anyone pressing anything.
-- Render's docs never state that `basic-256mb` specifically is a paid
-  instance type; that follows from the blueprint spec listing `free` and
-  `basic-256mb` as separate values and from Render gating features on
-  "paid instance type". It is an inference, not a quote — a confident one,
-  but worth knowing it is one.
-
-### The failure Render's backups do NOT cover
-
-PITR answers exactly one question: **"the database broke at a known moment,
-put it back the way it was just before."** It does not answer the question
-that is most likely to actually happen here: **"she deleted a deck five
-weeks ago and only just noticed."** Three days — or seven, or Render's
-seven-day export retention — has already closed on that mistake long before
-anyone knows to look. A slow, quiet, human mistake is the likely failure
-mode for one non-technical user typing phrases by hand, and it is exactly
-the shape PITR is worst at.
-
-**Nothing in this system currently covers that failure automatically.** The
-manual export below covers it only as often as somebody remembers to run it.
-That is the honest state of things, and it is the gap to close if this ever
-gets more attention.
-
-## Secondary: the manual export (`scripts/backup.mjs`)
-
-A human runs it, on demand, and gets a compressed logical dump on a machine
-they control. It is the answer to two questions Render cannot answer:
-"give me a copy that survives losing the Render account entirely", and
-"give me a copy older than Render's retention window".
+It produces a compressed logical dump on a machine you control.
 
 `npm run backup`:
 
-1. `pg_dump`s the database named by `DATABASE_URL` (plain SQL, `--no-owner
-   --no-privileges` — a database name or owner role is deployment detail,
-   not part of her data).
-2. Gzips the dump (Node's built-in `zlib`, streamed — no whole dump ever
-   sits uncompressed on disk).
+1. `pg_dump`s the `public` schema of the database named by `DATABASE_URL`
+   (plain SQL, `--no-owner --no-privileges --schema=public`: the pooler role
+   cannot read Supabase-owned schemas, and they are not her data).
+2. Gzips the dump (Node's built-in `zlib`, streamed).
 3. Writes it into the directory named by `BACKUP_DEST`, creating it if
    needed.
 4. Deletes anything in that directory older than `BACKUP_RETENTION_DAYS`.
 
-**Run it from a machine you own, never from the Render container.** A
-directory on Render's filesystem is not a backup: that filesystem is
-ephemeral and evaporates on the next redeploy, and even if it did not,
-a second copy inside the same account survives none of the failures the
-first copy does not.
+**Run it from a machine you own, never from the Render container.** That
+filesystem evaporates on the next redeploy.
 
 **`BACKUP_DEST` is a directory path, not a URI.** A `<scheme>://` value is
-refused with an error rather than taken as a literal directory name — a
-leftover `s3://phrase-drill-backups` would otherwise create `./s3:/…` and
-report success.
+refused with an error.
 
 ### What is in the dump
 
-Four tables, every one of them created by the server's own idempotent
-`init()` calls (`server/db.js`): `users` and `sessions` (T050), `libraries`
-(T043 — her phrases, the thing this exists for), and `clips` (T063 — the
-shared Clip store, a `bytea` column holding the generated audio itself).
-`pg_dump` takes all four; the restore drill checks all four.
-
-**The two are not equally precious, and the drill says so out loud.**
-`libraries` is irreplaceable — hand-typed, exists nowhere else. `clips` is
-merely expensive: every row is content-addressed audio that ElevenLabs would
-generate again from the same phrase, so losing it costs provider calls and
-her waiting, not her work. Both are backed up anyway (the dump is a few KB
-either way), but if you are ever choosing under pressure, `libraries` is the
-one that cannot be rebuilt.
-
-**`clips` is `bytea`, and binary columns are where a logical backup quietly
-goes wrong** — a byte range mangled through a text path restores without an
-error and plays as noise or nothing. That is why the drill's clip checks
-compare the actual bytes rather than a row count (see "Restore, step by
-step").
+The `public` schema, as in "What the dump holds" above. The dump has no
+audio bytes: `clips` rows carry a `storage_path`, not the bytes.
 
 Every step fails loudly: a non-zero exit and a `level: "error"` log line on
 any failure — a wrong password, `pg_dump` missing, disk full. **It never
@@ -221,39 +142,65 @@ is safe.
 
 ### What must be installed
 
-- `pg_dump` (export) and `psql` (restore drill) — same major version family
-  as the server's Postgres (17, per `docker-compose.yml`); both ship in the
-  `postgresql-client` package on Debian/Ubuntu, `postgresql17` (or similar)
-  on Alpine/RHEL.
+- `pg_dump` (export) and `psql` (restore drill), **version 18 or newer**: the
+  client must be at least the server's major version
+  (`pacman -S postgresql` on archbox). Check the server version in the
+  Supabase dashboard.
+- Node, to run the script.
 
-Nothing else. There is no CLI to install for a cloud provider, because there
-is no cloud provider.
+Nothing else. There is no cloud-provider CLI to install.
 
 ### Environment variables
 
 | Var | Required | Default | Meaning |
 |---|---|---|---|
-| `DATABASE_URL` | yes | — | Same variable the server itself reads. For a pull off Render, this is the **External Database URL** from the database's page in the Render dashboard, with `?sslmode=require`. |
+| `DATABASE_URL` | yes | — | The Supabase **session pooler** URI (`postgres://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`). Here `sslmode=require` is right: `pg_dump` is libpq, not `pg`. The direct host `db.<ref>.supabase.co` is IPv6-only on Free. |
 | `BACKUP_DEST` | yes | — | A local directory path, created if it does not exist. Not a URI — a `<scheme>://` value is refused. |
 | `BACKUP_RETENTION_DAYS` | no | `180` | See "Retention policy" above. |
 
 ### Run an export by hand, right now
 
-From your own machine, pulling the production database off Render:
-
 ```sh
-export DATABASE_URL='postgres://phrase_drill:<password>@<external-host>.oregon-postgres.render.com/phrase_drill?sslmode=require'
+export DATABASE_URL='postgres://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require'
 export BACKUP_DEST="$HOME/phrase-drill-backups"
 npm run backup
 ```
 
-Exit 0 and a final `"backup: done"` log line mean it worked. Anything else —
-a non-zero exit, a `"level":"error"` line — means it did not; read the
-`error` field, it names the failing step.
+Exit 0 and a final `"backup: done"` log line mean it worked. Anything else
+means it did not; read the `error` field, it names the failing step.
 
-Then put the resulting `.sql.gz` somewhere that survives losing that machine
-too — whatever you already do with files you care about. This script's job
-ends at writing the file.
+## The daily timer on archbox
+
+Units: `ops/archbox/phrase-drill-backup.service` and `.timer` (systemd
+`--user`, daily, `Persistent=true` so a missed run happens at next boot).
+Nothing here installs itself. On archbox:
+
+1. Create `~/.config/phrase-drill/backup.env`, mode 600:
+   ```sh
+   DATABASE_URL=postgres://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+   BACKUP_DEST=/home/<you>/phrase-drill-backups
+   PHRASE_DRILL_DIR=/home/<you>/<path to the phrase-drill checkout>
+   ```
+   (`chmod 600 ~/.config/phrase-drill/backup.env`.)
+2. Copy the units and enable the timer:
+   ```sh
+   mkdir -p ~/.config/systemd/user
+   cp ops/archbox/phrase-drill-backup.service ops/archbox/phrase-drill-backup.timer ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user enable --now phrase-drill-backup.timer
+   ```
+3. Run it once now and read the log: `systemctl --user start phrase-drill-backup.service; journalctl --user -u phrase-drill-backup.service -e`.
+   Check the file landed in `BACKUP_DEST`.
+4. `systemctl --user list-timers phrase-drill-backup.timer` shows the next run.
+   For the timer to fire while you are logged out, run
+   `loginctl enable-linger $USER` once.
+5. Edit the `ExecStart` node path in the service if node is not `/usr/bin/node`.
+
+The monthly restore drill, against a local Postgres (never Supabase):
+`DATABASE_URL=postgres://...@localhost:5432/postgres npm run restore-drill -- <latest backup>`.
+
+Then put the `.sql.gz` somewhere that survives losing that machine too —
+whatever you already do with files you care about.
 
 ## Restore, step by step
 
@@ -263,14 +210,11 @@ destructive, not just unhelpful.**
 
 | | The failure it's for | What it does to the live database | Command |
 |---|---|---|---|
-| **Whole-database restore** | The database itself is gone or destroyed — a botched migration, a deleted Render resource, corruption with no PITR window left. | Replaces it entirely with the backup's contents. | "Whole-database restore" below |
+| **Whole-database restore** | The database itself is gone or destroyed — a botched migration, a deleted or paused-and-expired Supabase project, corruption. | Replaces it entirely with the backup's contents. | "Whole-database restore" below |
 | **Single-library recovery** | A mistake nobody noticed for a while — a deleted deck, a bad import — but the live database is otherwise fine and has real data added *since* the backup. | Touches **one row**; everything else in the live database is untouched. | "Recovering a single library" below |
 
-For the whole-database case, **try Render's own PITR first** ("Restoring
-from Render" above) — it recovers more recent data than any export, and it
-does not destroy the original while you try it. Reach for the export file
-when the mistake is older than Render's window, or when Render itself is
-the thing that is unavailable.
+For the whole-database case there is no platform recovery to try first (Free
+has none): the export file is the way back.
 
 **Restoring the whole database over a live one that has since gained new
 data is the wrong tool and actively destroys work.** If she deleted a deck
@@ -295,23 +239,17 @@ restore the backup into this disposable scratch database first.
 
 ### 0. Get the backup file, and rehearse the restore
 
-1. **Get the backup file onto the machine running the drill.** If it came
-   from `npm run backup` it is already a local `.sql.gz`. If it is one of
-   Render's own logical exports, download it from the database's **Recovery**
-   page in the dashboard — note that Render's export is a
-   `.dir.tar.gz` directory-format archive restored with `pg_restore`, not
-   the plain gzipped SQL this repo's drill expects.
-2. **Run the drill** against the *same Postgres server* the production
-   database lives on (its host/port/user/password — again, its database
-   name is ignored):
+1. **Get the backup file onto the machine running the drill.** `npm run backup`
+   already writes a local `.sql.gz`.
+2. **Run the drill** against a Postgres where you may `CREATE DATABASE` (a
+   local one on archbox; the Supabase pooler cannot, and a drill must not
+   touch production). Its database name is ignored:
    ```sh
-   export DATABASE_URL='postgres://phrase_drill:<password>@<host>:5432/phrase_drill'
+   export DATABASE_URL='postgres://postgres:<password>@localhost:5432/postgres'
    npm run restore-drill -- ./phrase-drill-2026-08-03T14-30-00Z.sql.gz
    ```
    This creates a scratch database, restores the dump into it with `psql`,
-   checks that `users`, `sessions`, `libraries` and `clips` all exist, checks
-   that every restored clip's audio came back as *binary* rather than text,
-   reports the clip store's digest and row count, and (with no
+   checks that `libraries`, `library_versions` and `clips` all exist, and (with no
    `--keep-scratch`, the default) drops the scratch database again — pass
    or fail. Read the `PASS`/`FAIL` lines it prints; a non-zero exit means at
    least one failed.
@@ -326,32 +264,17 @@ restore the backup into this disposable scratch database first.
    npm run restore-drill -- ./phrase-drill-....sql.gz \
      --library-key=her-user-id --expect-sha256=<hash from above>
    ```
-4. **To prove the audio round-trips byte-identical too**, capture the clip
-   store's digest the same way — one statement, run against the live
-   database *before* the backup, and run again by the drill against the
-   scratch database afterward:
-   ```sh
-   # before: capture it (this is exactly CLIPS_DIGEST_SQL in restore-drill.mjs)
-   psql "$DATABASE_URL" -t -A -c \
-     "SELECT encode(sha256(coalesce(string_agg(hash || ':' || encode(bytes,'hex') || ':' || mime, E'\n' ORDER BY hash),'')::bytea),'hex') FROM clips"
-   # after restoring:
-   npm run restore-drill -- ./phrase-drill-....sql.gz \
-     --expect-clips-sha256=<digest from above>
-   ```
-   Without `--expect-clips-sha256` the drill prints the digest and the clip
-   count rather than comparing them — capture that number somewhere the next
-   drill can reach it. Without `--expect-sha256`/`--expect-clips-sha256` the
-   drill still fails on a missing table or on any clip that came back as
-   text, which is the corruption a plain "it restored" would hide.
+   Without `--expect-sha256` the drill still fails on a missing table.
+   Clip audio is not in the dump, so there is no clip check.
 
 ### Whole-database restore
 
 Only when the database itself is gone or unusable — not for a deleted deck
 with an otherwise-healthy database (see "Recovering a single library"
-below), and not before checking whether Render's PITR window still covers
-the incident.
+below). There is no platform recovery to try first: Free has none.
 
-- Point `DATABASE_URL` at the real production database.
+- Point `DATABASE_URL` at the real production database (the session pooler
+  URI).
 - Restore the backup file into it directly:
   ```sh
   gunzip -c phrase-drill-2026-08-03T14-30-00Z.sql.gz | \
@@ -361,13 +284,12 @@ the incident.
   (it will hit "already exists" errors on `CREATE TABLE`) — run this against
   an **empty** database. If the production database still has data in it,
   either restore into a **new** database and repoint `DATABASE_URL` at it
-  (Render: update the env var on the `phrase-drill` service's Environment
-  tab, which redeploys automatically — `docs/deploy.md`), or drop and
+  (update the env var on the `phrase-drill` service's Environment tab in
+  Render, which redeploys automatically — `docs/deploy.md`), or drop and
   recreate the production database first if you are certain the backup is
   the source of truth going forward.
-- Redeploy so `createLibraryStore(pool).init()` / `createClipStore(pool).init()`
-  run against the restored schema (Render redeploys automatically on an env
-  var change; `docker compose up --build` locally) — both are idempotent
+- Redeploy so the stores' `init()` calls run against the restored schema (Render redeploys automatically on an env var
+  change; `docker compose up --build` locally) — both are idempotent
   (`CREATE TABLE IF NOT EXISTS`, `docs/server.md` "Schema: creation and
   change"), so this is safe to run again even against an already-restored
   database.
@@ -437,20 +359,16 @@ reading the *old* blob out of the backup and reconciling it with the
 
 ## Scheduling
 
-**Nothing here is scheduled, and that is the current decision.** Render's
-managed backups are continuous and need no cron; this script is deliberately
-manual, run when a human wants an off-platform copy.
-
-The cost of that is stated plainly under "The failure Render's backups do
-NOT cover": a slow mistake noticed after Render's window has closed is only
-covered if somebody happened to run an export recently. Closing that gap
-means finding a machine that is reliably online to run `npm run backup` on a
-timer against Render's **External Database URL**. That is a real piece of
-operational surface — a machine to keep alive, a credential to rotate —
-and it has not been taken on. Revisit it if the phrase library grows into
-something whose loss would hurt more than it does today.
+Daily, by the archbox timer ("The daily timer on archbox"). A backup that
+stops running is silent, so once a month, when you run the restore drill,
+also look at the newest file in `BACKUP_DEST`: it must be under two days old.
 
 ## Verified proof this works (T054, re-confirmed T065)
+
+**Historical.** This section was written against the Render-era schema
+(`users`, `sessions`, `bytea` clips) and a seeded local Postgres. The
+method still holds; the table list and the clip-digest checks no longer
+exist. Re-run it against the Supabase pooler after cutover.
 
 Every claim below is a command that was run, against a real Postgres, with
 its real output. "The script exits 0" is not on this list — the whole point
@@ -584,10 +502,8 @@ printed.
   not her library and not Render's Postgres. It proves the scripts are
   correct; it does not prove any particular real backup file is good. Only
   running the drill against a real backup does that.
-- **Nothing has been run against Render.** Neither this script against the
-  External Database URL, nor a PITR restore, nor a logical export download.
-  The Render half of this document is read off Render's documentation, not
-  off a dashboard.
+- **Nothing has been run against Supabase.** Neither this script against the
+  pooler URL, nor the archbox timer. Do both after cutover.
 - **Retention was never exercised against a real expiry.** `prunedCount: 0`
   — no file in the destination was older than 180 days. `selectExpiredBackups`
   is unit-tested; the live prune is not proven here.

@@ -1,9 +1,10 @@
-# Deploying to Render (T053)
+# Deploying: Render server, Supabase database (T053)
 
 For someone doing this once, with no memory of how `render.yaml` came to
 look the way it does. Read `docs/server.md` first if you need the app's
 endpoints, env vars, or its identity model — this document only covers
-getting it running on Render.
+getting it running: the server on Render, the database, Auth and Storage
+on Supabase.
 
 Production runs on [Render](https://render.com), from `render.yaml` at the
 repo root (a "Blueprint"). `docker-compose.yml` is **local dev only** —
@@ -16,36 +17,62 @@ hostname from `render.yaml`'s `name: phrase-drill`. Measured 2026-08-24:
 `{"status":"ok"}`; `phrase-drill-app.onrender.com` and
 `phrase-drill-web.onrender.com` both 404, so the name is unambiguous.
 
-## Hard requirement: never the free Postgres tier
+## Topology, and the backup decision (D1)
 
-Render's free Postgres plan expires 30 days after creation and has **no
-backups of any kind** — not "worse backups," none. Her phrase library would
-be gone with no recovery path the day it happened to expire. `render.yaml`
-already pins `plan: basic-256mb`; do not change it to `free`, and do not let
-Render's dashboard "downgrade" prompt talk you into it.
+- **Render** runs the server (`phrase-drill`, `starter`, `oregon`) from
+  `render.yaml`. It serves the PWA and the API.
+- **Supabase** (Free tier) holds the database (Postgres), Auth and Storage
+  (the Clip bytes). The server reaches Postgres through the **session
+  pooler**, port 5432 (`aws-0-<region>.pooler.supabase.com`). **Enforce SSL**
+  is on; the server verifies the certificate against
+  `server/certs/supabase-prod-ca.crt`. Sign-ups are off and the Data API is
+  off. Region: West US (Oregon) if offered, else North California, next to
+  Render.
+- The old Render Postgres (`databases:` in `render.yaml`) stays until 30 days
+  after cutover as a rollback copy, then goes. **Removing it from a synced
+  Blueprint may delete the database**: read the sync preview first and take a
+  `backup.mjs` dump.
 
-**The backups that plan buys are the primary backup mechanism for this
-app** — there is no scheduled off-site job anywhere in this repo, by
-decision (T065). `docs/backup.md` documents what Render's managed backups
-cover, the exact dashboard path to restore from one, and the failure they
-do not cover.
+**2026-10-03, owner (Henning): Supabase Free tier accepted; no managed
+backups; replaced by a daily backup.mjs timer on archbox plus the device copy;
+restore-drill monthly.** This replaces the earlier rule never to use a free
+Postgres tier. The backup is yours to keep running: `docs/backup.md`.
+
+**The Free project pauses after about 7 days without activity.**
+`.github/workflows/keep-alive.yml` calls `/api/status` daily, which runs a
+database query. A project paused over 90 days cannot be restored from the
+dashboard. If the app says the database is unreachable, check
+https://supabase.com/dashboard first.
+
+### Environment variables on the Render service
+
+| Var | Value | Secret |
+|---|---|---|
+| `DATABASE_URL` | Supavisor **session** pooler URI, port 5432, no `sslmode=` | yes, `sync: false` |
+| `SUPABASE_URL` | `https://<ref>.supabase.co` | no |
+| `SUPABASE_SECRET_KEY` | `sb_secret_...` | yes, `sync: false` |
+| `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` | public per-project values; build args (declared as `ARG` in the `Dockerfile`) | no |
+| `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY` | unchanged | yes, `sync: false` |
+
+All `sync: false` vars are asked for at Blueprint creation and edited on the
+service's Environment tab afterwards. A `VITE_*` change needs a rebuild
+(redeploy), not a restart.
 
 ## One-time setup
 
 1. **Connect the repo.** In the Render dashboard: New → Blueprint → pick
    this GitHub repo, this branch (`main`). Render reads `render.yaml` and
    shows you the plan: one web service (`phrase-drill`, `docker`, plan
-   `starter`) and one Postgres database (`phrase-drill-db`, plan
-   `basic-256mb`), both in the `oregon` region.
+   `starter`, `oregon`) and, until its decommission, the old Postgres
+   database (`phrase-drill-db`).
 
-2. **Set the two secrets.** `render.yaml` declares `ELEVENLABS_API_KEY` and
-   `ANTHROPIC_API_KEY` with `sync: false`, which makes Render prompt for
-   them during this same Blueprint-creation flow (a `sync: false` var is
+2. **Set the secrets.** `render.yaml` declares the `sync: false` variables
+   in the table above, which makes Render prompt for them during this same Blueprint-creation flow (a `sync: false` var is
    only prompted for at creation, not on every later sync — if you need to
    change one afterward, edit it directly on the service's Environment tab).
    Paste real values here; neither one is ever written to this repo.
-   `DATABASE_URL` needs nothing from you — it's wired automatically from the
-   database resource (`fromDatabase`, see the comment in `render.yaml`).
+   `DATABASE_URL` is the Supabase pooler URI, no longer wired from a Render
+   database.
 
 3. **Deploy.** Render builds the image from `Dockerfile` and starts it.
    `healthCheckPath: /api/health` is what Render polls to decide the
@@ -250,37 +277,29 @@ same stamp, but it costs a round trip through a non-technical user in another
 country. That cost was paid twice — 2026-08-04 and again 2026-08-24 — because
 this check did not exist.
 
-## Postgres SSL — why this shouldn't come up, and what to check if it does
+## Postgres SSL
 
-Render's managed Postgres has two hostnames for the same database: an
-*internal* one (no domain suffix, private network only) and an *external*
-one (`....<region>-postgres.render.com`, reachable from anywhere, requires
-TLS). `render.yaml` wires `DATABASE_URL` via `fromDatabase: {property:
-connectionString}`, which resolves to the **internal** URL when the web
-service and the database share a region — both are pinned to `region:
-oregon` in `render.yaml` for exactly this reason. An internal connection
-needs no TLS at all, so this is expected to just work with no certificate
-handling.
+`server/db.js#sslConfigFor` decides from `DATABASE_URL` alone:
 
-`server/db.js#sslConfigFor` is the code that decides this from
-`DATABASE_URL` alone (no new env var): no `ssl` option for the internal
-hostname (or `localhost`/`postgres`, the local `docker compose` case),
-`ssl: { rejectUnauthorized: false }` **scoped to Render's external
-hostname only** if you ever connect through it (e.g. a one-off `psql` from
-your own laptop against the *External Database URL* shown in Render's
-database dashboard, for a manual query or backup pull) — Render's
-certificate chain isn't in Node's default CA trust store, which is a known,
-documented Render/`node-postgres` interaction, not a general "skip TLS
-verification" default. `server/db.test.js`'s `sslConfigFor` suite pins both
-branches.
+- `*.pooler.supabase.com` and `*.supabase.co`: verify against the pinned
+  Supabase root CA, `server/certs/supabase-prod-ca.crt` (hostname checked
+  too). `server/certs/README.md` has its fingerprint and expiry (2031-04-26).
+- `localhost`, loopback, and hostnames with no dot (the local
+  `docker compose` case): no SSL.
+- Any other remote host: the server refuses to start, naming the host. There
+  is no "skip verification" fallback.
 
-If a deploy nonetheless fails to reach Postgres with a TLS-shaped error,
-first check that both resources in the Render dashboard show the *same
-region* — if the database was ever recreated in a different region than the
-web service, `connectionString` may resolve to the external hostname
-instead, at which point `sslConfigFor` should still handle it (it matches on
-hostname, not on internal-vs-external assumption), but it's worth
-confirming the region match rather than treating that path as untested.
+**Do not put `sslmode=` in the server's `DATABASE_URL`.** `pg` lets it
+replace the pinned CA and the connection then fails certificate
+verification. (`backup.mjs` is `pg_dump`, which does want `sslmode=require`.)
+
+Before cutover, compare the CA file's SHA-256 fingerprint with the
+certificate offered in the Supabase dashboard (Project Settings -> Database
+-> SSL). If they differ, replace the file.
+
+A TLS error from the server: check the CA file is in the image (`COPY server`
+in `Dockerfile` ships `server/certs/`), that the URL has no `sslmode=`, and
+that the CA has not expired or been rotated.
 
 ## Local dev trap: `docker compose down` leaves orphans
 
