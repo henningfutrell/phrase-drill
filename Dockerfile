@@ -1,8 +1,8 @@
 # phrase-drill server (T041/T050) — one container serves the built PWA and
-# the API that owns both provider credentials and login. Two stages: the
+# the API that owns both provider credentials and verifies Supabase tokens. Two stages: the
 # first has the devDependencies needed to build the static PWA (vite,
 # typescript); the second ships only the built assets and the server, whose
-# only npm dependency is `pg` (Postgres — server/db.js).
+# npm dependencies are `pg` (Postgres — server/db.js) and `@supabase/supabase-js`.
 
 FROM node:26-alpine AS builder
 WORKDIR /app
@@ -27,9 +27,7 @@ ENV PORT=8080
 ENV DIST_DIR=/app/dist
 COPY --from=builder /app/dist ./dist
 COPY server ./server
-COPY scripts/useradd.mjs ./scripts/useradd.mjs
-# clip-delete imports describeTarget from useradd.mjs, copied above; the rest
-# of what it needs is server/.
+# clip-delete needs only server/.
 COPY scripts/clip-delete.mjs ./scripts/clip-delete.mjs
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev

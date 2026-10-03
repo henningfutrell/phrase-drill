@@ -65,8 +65,13 @@ describe.skipIf(!url || !secretKey || !publishableKey)('createAccessTokenVerifie
     const created = await admin.auth.admin.createUser({ email, password, email_confirm: true })
     if (created.error) throw created.error
     userId = created.data.user.id
+    // The local stack's config.toml disables the email provider (sign-ups are
+    // off), which also refuses signInWithPassword; a magic-link token exchange
+    // yields the same real session without it.
+    const link = await admin.auth.admin.generateLink({ type: 'magiclink', email })
+    if (link.error) throw link.error
     const client = createSupabase({ url, secretKey: publishableKey })
-    const signedIn = await client.auth.signInWithPassword({ email, password })
+    const signedIn = await client.auth.verifyOtp({ token_hash: link.data.properties.hashed_token, type: 'magiclink' })
     if (signedIn.error) throw signedIn.error
     accessToken = signedIn.data.session.access_token
     verify = createAccessTokenVerifier(admin)
