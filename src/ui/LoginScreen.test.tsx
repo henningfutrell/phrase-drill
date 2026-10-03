@@ -45,30 +45,30 @@ afterEach(() => {
 })
 
 describe('LoginScreen', () => {
-  it('offers a username and password field and a submit control', () => {
+  it('offers an email and password field and a submit control', () => {
     render(<LoginScreen onLogin={vi.fn()} />)
-    expect(container.querySelector('[data-testid="login-username"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="login-email"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="login-password"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="login-submit"]')).not.toBeNull()
   })
 
-  it('calls onLogin with the entered username and password on submit', async () => {
+  it('calls onLogin with the entered email and password on submit', async () => {
     const onLogin = vi.fn().mockResolvedValue({ ok: true })
     render(<LoginScreen onLogin={onLogin} />)
 
-    typeInto(container.querySelector('[data-testid="login-username"]') as HTMLInputElement, 'the-user')
+    typeInto(container.querySelector('[data-testid="login-email"]') as HTMLInputElement, 'user@example.com')
     typeInto(container.querySelector('[data-testid="login-password"]') as HTMLInputElement, 'correct-password')
     submit()
     await flush()
 
-    expect(onLogin).toHaveBeenCalledWith('the-user', 'correct-password')
+    expect(onLogin).toHaveBeenCalledWith('user@example.com', 'correct-password')
   })
 
   it('shows a calm error message and never the raw reason code when login fails', async () => {
     const onLogin = vi.fn().mockResolvedValue({ ok: false, reason: 'invalid-credentials' })
     render(<LoginScreen onLogin={onLogin} />)
 
-    typeInto(container.querySelector('[data-testid="login-username"]') as HTMLInputElement, 'the-user')
+    typeInto(container.querySelector('[data-testid="login-email"]') as HTMLInputElement, 'user@example.com')
     typeInto(container.querySelector('[data-testid="login-password"]') as HTMLInputElement, 'wrong-password')
     submit()
     await flush()
@@ -86,7 +86,7 @@ describe('LoginScreen', () => {
     const onLogin = vi.fn().mockReturnValue(pending)
     render(<LoginScreen onLogin={onLogin} />)
 
-    typeInto(container.querySelector('[data-testid="login-username"]') as HTMLInputElement, 'the-user')
+    typeInto(container.querySelector('[data-testid="login-email"]') as HTMLInputElement, 'user@example.com')
     typeInto(container.querySelector('[data-testid="login-password"]') as HTMLInputElement, 'correct-password')
     submit()
     await flush()
@@ -108,7 +108,7 @@ describe('LoginScreen', () => {
     const onLogin = vi.fn().mockReturnValue(pending)
     render(<LoginScreen onLogin={onLogin} />)
 
-    typeInto(container.querySelector('[data-testid="login-username"]') as HTMLInputElement, 'the-user')
+    typeInto(container.querySelector('[data-testid="login-email"]') as HTMLInputElement, 'user@example.com')
     typeInto(container.querySelector('[data-testid="login-password"]') as HTMLInputElement, 'correct-password')
     submit()
     submit()
@@ -119,5 +119,21 @@ describe('LoginScreen', () => {
       resolveLogin({ ok: true })
       await Promise.resolve()
     })
+  })
+
+  it('asks for an email address that iOS Safari offers saved passwords for', () => {
+    render(<LoginScreen onLogin={vi.fn()} />)
+    const input = container.querySelector('[data-testid="login-email"]') as HTMLInputElement
+    expect(input.type).toBe('email')
+    expect(input.autocomplete).toBe('username')
+    expect(container.textContent).toContain('Email')
+    expect(container.textContent).not.toContain('Username')
+  })
+
+  it('names the email, not a username, in the error copy', async () => {
+    render(<LoginScreen onLogin={vi.fn().mockResolvedValue({ ok: false, reason: 'invalid-credentials' })} />)
+    submit()
+    await flush()
+    expect(container.querySelector('[data-testid="login-error"]')!.textContent).toContain('email')
   })
 })
