@@ -33,6 +33,15 @@ const DEFAULT_MAX_CONCURRENT = 4
 const DEFAULT_MAX_RATE_LIMIT_WAITS = 50
 
 /**
+ * How many times one Clip will wait out a `queued` (202) reply before giving
+ * up. The server sends `Retry-After: 5`, so twenty is about 100 s of its
+ * generating — well past a normal synth, short enough that a job the server
+ * lost does not park the sweep. Its own budget: a 202 is progress, not a
+ * network failure and not a limiter, so it spends neither of those.
+ */
+const DEFAULT_MAX_QUEUED_WAITS = 20
+
+/**
  * The visible state of one Phrase's generation, combined across its two
  * Clips (worse of the two wins): `generating` while in flight, `ready` once
  * both Clips are cached, `unauthorized`/`quota` per `SynthError` (never
@@ -40,7 +49,8 @@ const DEFAULT_MAX_RATE_LIMIT_WAITS = 50
  * on our own server's rate limit alike — or at once on `unreadable` (the
  * server's terminal 422, never retried).
  *
- * There is deliberately no `rate-limited` state here. Being paced is not an
+ * There is deliberately no `rate-limited` or `queued` state here. Being
+ * paced, or waiting on a server that is still generating (202), is not an
  * outcome: it is the queue working. A Phrase that is waiting its turn is
  * `generating`, which is what it is, and only a Phrase that ran out of turns
  * is `failed`.
@@ -69,6 +79,8 @@ export interface GenerationQueueDeps {
   readonly maxConcurrent?: number
   /** Waits on our own server's rate limit before one Clip gives up. Default 50. */
   readonly maxRateLimitWaits?: number
+  /** `queued` (202) replies one Clip will wait out before giving up. Default 20. */
+  readonly maxQueuedWaits?: number
   /** The visible-state seam: called whenever a Phrase's combined status changes. */
   onStatusChange?(phraseId: string, status: GenerationStatus): void
   readonly now?: () => number
@@ -148,6 +160,7 @@ export interface GenerationQueue {
 export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueue {
   const maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
   const maxRateLimitWaits = deps.maxRateLimitWaits ?? DEFAULT_MAX_RATE_LIMIT_WAITS
+  const maxQueuedWaits = deps.maxQueuedWaits ?? DEFAULT_MAX_QUEUED_WAITS
   const now = deps.now ?? Date.now
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const statuses = new Map<string, GenerationStatus>()
@@ -210,6 +223,7 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   async function requestClip(text: string, lang: Language, voice: Voice, hash: string): Promise<GenerationStatus> {
     let networkAttempts = 0
     let rateLimitWaits = 0
+    let queuedWaits = 0
 
     for (;;) {
       await waitUntilAllowed()
@@ -232,6 +246,18 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
         if (error.kind === 'unauthorized') return { kind: 'unauthorized' }
         if (error.kind === 'quota') return { kind: 'quota' } // the provider is out of credits: waiting changes nothing
         if (error.kind === 'unreadable') return { kind: 'failed' } // terminal: the provider's output is unusable or the billing cap hit; asking again spends money
+        if (error.kind === 'queued') {
+          // The server is still generating this one Clip. Wait for THIS
+          // request only: no `resumeAt`, because a job in progress is not a
+          // limiter telling the whole device to back off. Suspension is
+          // honoured before the sleep as well as by the gate on the next
+          // pass, so a parked queue does not start a fresh timer.
+          if (queuedWaits >= maxQueuedWaits) return { kind: 'failed' }
+          queuedWaits++
+          await whenNotSuspended()
+          await sleep(error.retryAfterMs)
+          continue
+        }
         if (error.kind === 'rate-limited') {
           if (rateLimitWaits >= maxRateLimitWaits) return { kind: 'failed' }
           rateLimitWaits++
