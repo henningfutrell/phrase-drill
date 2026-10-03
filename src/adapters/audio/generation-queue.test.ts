@@ -17,6 +17,9 @@ function quota(): SynthError {
 function network(): SynthError {
   return { kind: 'network', detail: 'Failed to fetch' }
 }
+function unreadable(): SynthError {
+  return { kind: 'unreadable' }
+}
 function rateLimited(retryAfterMs = 1000): SynthError {
   return { kind: 'rate-limited', retryAfterMs }
 }
@@ -255,6 +258,26 @@ describe('createGenerationQueue', () => {
     // real millisecond away from 1999, and asserting it would flake.
     expect(sleeps).toHaveLength(2)
     expect(sleeps[0]).toBe(2000)
+  })
+
+  // `unreadable` is the server's terminal 422: the provider produced
+  // something unusable, or the phrase hit the server's 24 h billing cap.
+  // Retrying spends money or is refused, so the Clip fails at once.
+  it('fails an unreadable Clip immediately, with no retry', async () => {
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockRejectedValue(unreadable())
+    const queue = createGenerationQueue({
+      synthClient: { synthesize },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => VOICE,
+      sleep: async () => {},
+    })
+
+    queue.enqueue({ id: 'p4', french: 'Salut', english: 'Hi' })
+    await queue.whenIdle()
+
+    // One call per Clip (French, English): neither is retried.
+    expect(synthesize).toHaveBeenCalledTimes(2)
+    expect(queue.statusFor('p4')).toEqual<GenerationStatus>({ kind: 'failed' })
   })
 
   it('gives up after a bounded number of rate-limit waits — the sweep always terminates', async () => {
