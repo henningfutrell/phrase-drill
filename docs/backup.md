@@ -42,7 +42,7 @@ The dump is the `public` schema: `libraries` (their phrases, irreplaceable),
   waiting, never their work. That is why Storage is not backed up.
 - **Users are not in the dump.** Supabase Auth owns them (`auth.users`).
   There is one user. Re-create them with the admin API if the project is
-  lost (`scripts/useradd.mjs`); their library is keyed by that user's id, so
+  lost (`scripts/auth-user-create.mjs`); their library is keyed by that user's id, so
   restoring a library into a new project needs the new id (rekey the row
   `library_key` and every `library_versions.library_key`).
 
