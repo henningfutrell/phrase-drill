@@ -51,17 +51,8 @@ import { createRateLimiter } from './rate-limiter.js'
 
 const TOKEN = 'valid-token'
 
-function fakeSessionAuth() {
-  return {
-    async verify(token) {
-      if (token !== TOKEN) throw new Error('invalid token')
-      return { sub: 'the-user' }
-    },
-    async login() {
-      return null
-    },
-    async logout() {},
-  }
+async function fakeVerifyAccessToken(token) {
+  return token === TOKEN ? { sub: 'the-user' } : null
 }
 
 const silentLogger = { info() {}, warn() {}, error() {} }
@@ -104,11 +95,10 @@ describe('/api/library — the server never stores an envelope it will later ref
       ttsLimiter: createRateLimiter({ capacity: 50, refillMs: 60_000 }),
       scanLimiter: createRateLimiter({ capacity: 50, refillMs: 60_000 }),
       libraryLimiter: createRateLimiter({ capacity: 50, refillMs: 60_000 }),
-      loginLimiter: createRateLimiter({ capacity: 50, refillMs: 60_000 }),
       translateLimiter: createRateLimiter({ capacity: 50, refillMs: 60_000 }),
       distDir,
       logger: silentLogger,
-      sessionAuth: fakeSessionAuth(),
+      verifyAccessToken: fakeVerifyAccessToken,
     })
     server = createServer(handleRequest)
     await new Promise((resolve) => {
