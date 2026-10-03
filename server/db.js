@@ -306,9 +306,31 @@ export const LIBRARY_VERSION_MAX_BYTES = 32 * 1024 * 1024
  */
 export function createClipStore(
   pool,
-  { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES, evictBatchSize = CLIP_EVICT_BATCH_SIZE, logger = console, now = Date.now } = {},
+  { storage, maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES, evictBatchSize = CLIP_EVICT_BATCH_SIZE, logger = console, now = Date.now } = {},
 ) {
+  if (!storage) throw new Error('createClipStore needs a `storage` (supabase.storage.from(bucket)): the bytes live there, not in the table')
   const evictTo = Math.floor(maxBytes * CLIP_EVICT_TO_FRACTION)
+
+  /**
+   * Takes objects out of Storage after their rows are gone. A failure leaves
+   * an orphan object — storage spent, no wrong answer possible, since nothing
+   * points at it — so it is logged and never fails the request. Batches of at
+   * most `STORAGE_REMOVE_BATCH_SIZE` keep each call small.
+   */
+  async function removeObjects(paths) {
+    for (let i = 0; i < paths.length; i += STORAGE_REMOVE_BATCH_SIZE) {
+      const batch = paths.slice(i, i + STORAGE_REMOVE_BATCH_SIZE)
+      try {
+        const { error } = await storage.remove(batch)
+        if (error) throw error
+      } catch (err) {
+        logger.error('could not remove clip objects from storage — they are orphaned', {
+          count: batch.length,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+  }
 
   async function totalBytes() {
     const { rows } = await pool.query('SELECT COALESCE(SUM(byte_size), 0)::bigint AS total FROM clips')
@@ -356,7 +378,8 @@ export function createClipStore(
         doomed.push(row.hash)
         remaining -= Number(row.byteSize)
       }
-      await pool.query('DELETE FROM clips WHERE hash = ANY($1::text[])', [doomed])
+      const { rows: deleted } = await pool.query('DELETE FROM clips WHERE hash = ANY($1::text[]) RETURNING storage_path AS "storagePath"', [doomed])
+      await removeObjects(deleted.map((row) => row.storagePath))
     }
   }
 
@@ -383,48 +406,46 @@ export function createClipStore(
      * Idempotent: safe on every boot, including against a database that
      * already has the table — the same `CREATE TABLE IF NOT EXISTS` rule the
      * two stores around it follow (docs/server.md "Schema: creation and
-     * change"). Adding this table needs no migration runner and no manual
-     * step: a running deployment gets it on its next restart, and it touches
-     * no existing row.
+     * change").
      *
-     * `byte_size` (T071) is the one column added after the table shipped, so
-     * it follows the documented shape for that: `ADD COLUMN IF NOT EXISTS`
-     * plus a backfill whose `WHERE` matches nothing once it has run. Summing
-     * a narrow integer column is a cheap scan of the heap tuples; summing
-     * `octet_length(bytes)` would detoast every clip on every cache miss,
-     * and `pg_total_relation_size` does not shrink after a DELETE until
-     * VACUUM, which would make the eviction loop empty the table.
-     *
-     * `last_used_at` (S8b) is the second, same shape. Its backfill is
-     * `created_at`: for a row written before the column existed, when it
-     * was made is the most anything can say about when it was last used.
-     * A row an older instance writes during a deploy overlap has it NULL
-     * until the next boot's backfill; Postgres sorts NULL last, so for that
-     * window such a row is evicted last, which is right for a fresh Clip.
+     * The row is metadata only. The audio is the object at `storage_path`
+     * (the content hash) in the `clips` bucket, which is what keeps the 500 MB
+     * database quota for her library. `byte_size` stays on the row so the
+     * eviction ceiling sums a narrow integer column instead of listing the
+     * bucket.
      */
     async init() {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS clips (
           hash TEXT PRIMARY KEY,
-          bytes BYTEA NOT NULL,
+          storage_path TEXT NOT NULL,
           mime TEXT NOT NULL,
           duration_ms BIGINT NOT NULL,
           created_at BIGINT NOT NULL,
-          byte_size BIGINT,
-          last_used_at BIGINT
+          byte_size BIGINT NOT NULL,
+          last_used_at BIGINT NOT NULL
         )
       `)
-      await pool.query('ALTER TABLE clips ADD COLUMN IF NOT EXISTS byte_size BIGINT')
-      await pool.query('UPDATE clips SET byte_size = octet_length(bytes) WHERE byte_size IS NULL')
-      await pool.query('ALTER TABLE clips ADD COLUMN IF NOT EXISTS last_used_at BIGINT')
-      await pool.query('UPDATE clips SET last_used_at = created_at WHERE last_used_at IS NULL')
     },
 
+    /**
+     * A row whose object is gone is a miss, not a failure: the row is deleted
+     * so the request regenerates the Clip. That regeneration is a billed
+     * provider call, so it is logged at error level — it means the bucket and
+     * the table disagree. Any other download failure throws; the row is kept.
+     */
     async get(hash) {
-      const { rows } = await pool.query('SELECT bytes, mime, duration_ms AS "durationMs" FROM clips WHERE hash = $1', [hash])
+      const { rows } = await pool.query('SELECT storage_path AS "storagePath", mime, duration_ms AS "durationMs" FROM clips WHERE hash = $1', [hash])
       if (rows.length === 0) return null
+      const { data, error } = await storage.download(rows[0].storagePath)
+      if (error) {
+        if (!isObjectNotFound(error)) throw error
+        logger.error('a clip row points at a missing storage object — dropping the row so it regenerates', { message: error.message })
+        await pool.query('DELETE FROM clips WHERE hash = $1 RETURNING storage_path AS "storagePath"', [hash])
+        return null
+      }
       bumpLastUsed(hash)
-      return { bytes: rows[0].bytes, mime: rows[0].mime, durationMs: Number(rows[0].durationMs) }
+      return { bytes: Buffer.from(await data.arrayBuffer()), mime: rows[0].mime, durationMs: Number(rows[0].durationMs) }
     },
 
     /**
@@ -434,10 +455,15 @@ export function createClipStore(
      * second write must be a no-op rather than an error or a rewrite.
      */
     async put({ hash, bytes, mime, durationMs, createdAt }) {
+      // Object first, then row: a row never points at an object that does not
+      // exist. The object key is the hash; "already exists" is a put that
+      // died after the upload, or a concurrent double-miss — the same bytes.
+      const { error } = await storage.upload(hash, bytes, { contentType: mime, upsert: false })
+      if (error && !isObjectExists(error)) throw error
       await pool.query(
-        `INSERT INTO clips (hash, bytes, mime, duration_ms, created_at, byte_size, last_used_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO clips (hash, storage_path, mime, duration_ms, created_at, byte_size, last_used_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (hash) DO NOTHING`,
-        [hash, bytes, mime, durationMs, createdAt, bytes.byteLength, createdAt],
+        [hash, hash, mime, durationMs, createdAt, bytes.byteLength, createdAt],
       )
       await evictIfOverBudget()
     },
@@ -450,8 +476,9 @@ export function createClipStore(
      * `scripts/clip-delete.mjs` reports it to the operator.
      */
     async delete(hash) {
-      const { rowCount } = await pool.query('DELETE FROM clips WHERE hash = $1', [hash])
-      return rowCount > 0
+      const { rows } = await pool.query('DELETE FROM clips WHERE hash = $1 RETURNING storage_path AS "storagePath"', [hash])
+      await removeObjects(rows.map((row) => row.storagePath))
+      return rows.length > 0
     },
 
     /** Live size of the store, for the eviction loop and for anyone asking how close the ceiling is. */
@@ -508,6 +535,12 @@ const MIN_CLIP_STORE_MAX_BYTES = 128 * 1024
 const CLIP_EVICT_TO_FRACTION = 0.9
 /** How stale `last_used_at` may get before a hit writes it again: one day (S8b). */
 const LAST_USED_GRAIN_MS = 24 * 60 * 60 * 1000
+/** Objects per `storage.remove` call. */
+const STORAGE_REMOVE_BATCH_SIZE = 200
+/** Storage answers a missing object with `statusCode: '404'` (its `status` is 400). */
+const isObjectNotFound = (error) => error.statusCode === '404' || error.status === 404
+/** ...and a second upload of one key with `statusCode: '409'`. */
+const isObjectExists = (error) => error.statusCode === '409' || error.status === 409
 /** Rows read per eviction sweep: bounded so a badly over-budget table is drained in passes rather than one unbounded result set. */
 const CLIP_EVICT_BATCH_SIZE = 200
 

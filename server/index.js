@@ -12,6 +12,7 @@ import { validateClip } from './clip-validation.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
 import { createAnthropicProvider } from './providers/anthropic-client.js'
 import { createShutdown } from './shutdown.js'
+import { createSupabase } from './supabase.js'
 
 /**
  * Wires every real dependency from the environment (T041 "secrets come from
@@ -59,7 +60,8 @@ export async function buildServer(env = process.env) {
   // (`''`), and the first of those ends with `libraryStore.put` as the write
   // that fails. `clipStoreMaxBytesFrom` falls back to the default, loudly.
   const clipStoreMaxBytes = clipStoreMaxBytesFrom(env.CLIP_STORE_MAX_BYTES, logger)
-  const clipStore = createClipStore(pool, { maxBytes: clipStoreMaxBytes, logger })
+  const supabase = createSupabase({ url: env.SUPABASE_URL, secretKey: env.SUPABASE_SECRET_KEY })
+  const clipStore = createClipStore(pool, { storage: supabase.storage.from('clips'), maxBytes: clipStoreMaxBytes, logger })
   await clipStore.init()
 
   // T050: identity is a session row in Postgres, not a Keycloak-issued
