@@ -1,5 +1,6 @@
 import { getBearerToken } from './auth.js'
 import { computeClipHash } from './clip-hash.js'
+import { validateClip } from './clip-validation.js'
 import { readBody, sendJson, PayloadTooLargeError } from './http-helpers.js'
 import { createStaticHandler } from './static.js'
 
@@ -21,28 +22,6 @@ const LIBRARY_FORMAT = 'phrase-drill-library'
  * this number is a cost decision, not a caching nicety.
  */
 const PROBE_TTL_MS = 5 * 60 * 1000
-
-/**
- * The floor a synthesized clip's body must clear before it is trusted enough
- * to cache (F6 audit, defect 2). There was no floor at all: no minimum size,
- * no checksum, no MP3 validity check anywhere between what the provider
- * returned and what `clipStore.put` wrote — and `clipStore.put` is
- * `ON CONFLICT (hash) DO NOTHING` (`server/db.js`), so the first bytes ever
- * stored under a hash are served forever. A response that is well-framed at
- * the HTTP level but short on audio — a mid-stream cut, a flaky proxy, a bad
- * client-library version — got cached as a complete clip, permanently, and
- * every future play of that phrase came back truncated.
- *
- * 1,000 bytes is ~62 ms of audio at the pinned 128 kbps output format
- * (`elevenlabs-client.js`'s `MP3_BYTES_PER_MS_AT_128KBPS`) — far short of any
- * phrase actually worth asking for (even "Merci" spoken as fast as humanly
- * possible runs several hundred milliseconds), but far above what a bare
- * framing artifact or a connection cut moments in could produce. Deliberately
- * loose: a false rejection costs her one phrase to regenerate, a missed
- * truncation costs a permanently botched one served to every device forever
- * — the two costs are not symmetric, so the floor errs toward under-rejecting.
- */
-const MIN_PLAUSIBLE_CLIP_BYTES = 1_000
 
 /**
  * The highest `schemaVersion` this build will accept in a push (T082).
@@ -351,14 +330,13 @@ export function createApp({
 
     try {
       const result = await elevenLabs.synthesize({ text, voiceId, modelId })
-      if (result.bytes.byteLength < MIN_PLAUSIBLE_CLIP_BYTES) {
+      const invalid = validateClip({ bytes: result.bytes, contentType: result.contentType, text })
+      if (invalid) {
         // Thrown, not just logged: it must reach the outer catch below so
         // this response is neither cached (the `clipStore.put` a few lines
-        // down never runs) nor served as if it were complete.
-        throw providerLikeError(
-          'unreadable',
-          `ElevenLabs returned an implausibly short body (${result.bytes.byteLength} bytes) for this text`,
-        )
+        // down never runs) nor served as if it were complete. Never retried
+        // either — the provider already billed for this body.
+        throw providerLikeError('unreadable', `ElevenLabs returned an unusable clip: ${invalid}`)
       }
       const clip = { bytes: result.bytes, mime: 'audio/mpeg', durationMs: result.durationMs }
       // A failed write must not fail the request: these bytes have already

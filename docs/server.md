@@ -277,7 +277,8 @@ impractical without punishing her for a typo.
 
 Provider failures map to HTTP status: `not-configured` (no key set on the
 server) → 503; `quota` (the provider is out of credits) → **402**;
-`unreadable` (vision model found no usable phrases) → 422; anything else →
+`unreadable` (vision model found no usable phrases, or a synthesized clip
+failed validation) → 422; `billed-failure`, `upstream` and anything else →
 502.
 
 ## 429 is ours, 402 is the provider's (T035)
@@ -368,6 +369,22 @@ and already paid for; the caller gets them, and the failure is logged. The
 same is true of a failed eviction — it happens inside `clipStore.put`, whose
 errors this route already swallows and logs.
 
+### Validated before it is cached
+
+`clipStore.put` is `ON CONFLICT (hash) DO NOTHING`, so the first bytes stored
+under a hash are served to every device forever. `server/clip-validation.js`
+therefore checks every synthesized body first; any failure is `422
+unreadable`, is never cached, is never retried, and counts as a billed failure
+in `/api/status` (the provider charged for it):
+
+- `content-type` must start with `audio/mpeg` (absent is a failure). The
+  request sends `accept: audio/mpeg`.
+- The body must open with an `ID3` tag or an MP3 frame sync (`0xFF`, then a
+  byte whose top three bits are set).
+- Size: at least `max(1000, 100 x characters)` bytes and at most `6400 x
+  characters + 48000`. Loose on purpose — a false rejection costs one
+  regeneration, a missed truncation costs a botched clip on every device.
+
 ### The ceiling on it (T071)
 
 As shipped, `clips` had no eviction, no TTL and no `DELETE` anywhere in
@@ -454,8 +471,14 @@ ceiling — Anthropic's vision calls are heavier per-request than a short TTS
 call, hence the lower number.
 
 Each provider call also retries with exponential backoff and jitter
-(`server/retry.js`), retrying only `kind === 'quota'` (a 429) — a bad key or a
-malformed request is never worth retrying:
+(`server/retry.js`). **ElevenLabs bills every 2xx it returns**, so ElevenLabs
+retries only where nothing can have been billed: `network` (fetch threw, or
+the 30s per-attempt timeout aborted it), `upstream` (a 5xx) and
+`rate-limited` (a 429). A failure reading the body *after* a 2xx is
+`billed-failure` and is never retried — it used to be, and one phrase cost up
+to 9 charges (3 server attempts x 3 device attempts, 2026-09-02 to
+2026-10-03). A 4xx other than 401/403/429 is `rejected-request`: terminal, and
+502 on the wire. A bad key or a malformed request is never worth retrying:
 
 - ElevenLabs: `baseMs=500`, `retries=2`, ±20% jitter
 - Anthropic: `baseMs=800`, `retries=2`, ±20% jitter
