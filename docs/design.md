@@ -489,11 +489,17 @@ account.
      anything, there is a control that does, and it is hers to press: *Redo
      audio in the current voice* on a Deck (confirmed, naming the phrase
      count — it is the one control that spends real money in bulk) and *Redo
-     audio* on a single Phrase (one tap; two Clips). It ADDS Clips and
-     deletes none: a Clip is content-addressed by
-     `provider|modelId|voiceId|lang|text`, so the old voice's audio sits at a
-     different hash and simply stays, and asking twice for the same voice and
-     statement costs no request at all — the second ask hits the cache.
+     audio* on a single Phrase (one tap; two Clips). Both are a
+     **Regenerate** (docs/glossary.md): in the pinned voice only, each Clip
+     is deleted on this phone, the server is asked once to throw its stored
+     Clip away and make a new one (`POST /api/tts/regenerate`), and the new
+     audio is polled from `/api/tts`. That is what makes them the control for
+     broken audio — until 2026-10 they only queued generation, which skips a
+     Clip the phone holds and is served the server's stored one, so a
+     truncated Clip could never be replaced. Other voices' Clips sit at other
+     hashes (`provider|modelId|voiceId|lang|text`) and are left alone. Each
+     Clip may be regenerated at most twice in 24 h (the server's billing
+     cap); past that the Phrase shows as failed until the day has passed.
      There is deliberately **no library-wide button**: a one-tap
      re-generation of everything is precisely the event this design exists to
      prevent, and making it one tap would make the failure mode a feature.

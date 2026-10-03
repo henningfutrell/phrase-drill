@@ -1103,12 +1103,15 @@ function App({
           onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
           onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
           onDrillDeck={() => setDrillTarget({ title: selectedDeck.name, phrases: selectedDeck.phrases })}
+          // Regenerate, never enqueue: enqueue skips a Clip the device holds
+          // and is served the server's stored one, so it cannot replace a
+          // broken Clip (docs/glossary.md "Regenerate").
           onRegenerateDeckAudio={() => {
-            for (const phrase of selectedDeck.phrases) generationQueue.enqueue(phrase)
+            for (const phrase of selectedDeck.phrases) generationQueue.regenerate(phrase)
           }}
           onRegeneratePhraseAudio={(id: PhraseId) => {
             const phrase = selectedDeck.phrases.find((p) => p.id === id)
-            if (phrase) generationQueue.enqueue(phrase)
+            if (phrase) generationQueue.regenerate(phrase)
           }}
           onAddPhrase={(french, english) => {
             const id = crypto.randomUUID()
