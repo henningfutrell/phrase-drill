@@ -1,16 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
 import { createElevenLabsProvider } from './elevenlabs-client.js'
-import { createBoundedQueue } from '../bounded-queue.js'
-
-function queue() {
-  return createBoundedQueue({ concurrency: 4 })
-}
 
 describe('createElevenLabsProvider', () => {
   it('throws not-configured without an apiKey, and never calls fetch', async () => {
     const fetchImpl = vi.fn()
-    const provider = createElevenLabsProvider({ apiKey: null, fetchImpl, queue: queue() })
+    const provider = createElevenLabsProvider({ apiKey: null, fetchImpl })
     await expect(provider.synthesize({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' })).rejects.toMatchObject({
       kind: 'not-configured',
     })
@@ -23,7 +18,7 @@ describe('createElevenLabsProvider', () => {
       status: 200,
       arrayBuffer: async () => new ArrayBuffer(1600),
     })
-    const provider = createElevenLabsProvider({ apiKey: 'sk-secret', fetchImpl, queue: queue() })
+    const provider = createElevenLabsProvider({ apiKey: 'sk-secret', fetchImpl })
     await provider.synthesize({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' })
 
     expect(fetchImpl).toHaveBeenCalledTimes(1)
@@ -43,7 +38,7 @@ describe('createElevenLabsProvider', () => {
       status: 200,
       arrayBuffer: async () => new ArrayBuffer(1600),
     })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue() })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await provider.synthesize({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' })
 
     const [url] = fetchImpl.mock.calls[0]
@@ -56,7 +51,7 @@ describe('createElevenLabsProvider', () => {
       status: 200,
       arrayBuffer: async () => new ArrayBuffer(1600),
     })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue() })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     const result = await provider.synthesize({ text: 'bonjour', voiceId: 'v1', modelId: 'm1' })
     expect(result.durationMs).toBe(100)
     expect(result.bytes.byteLength).toBe(1600)
@@ -64,7 +59,7 @@ describe('createElevenLabsProvider', () => {
 
   it('maps 401/403 to not-configured', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 401 })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
       kind: 'not-configured',
     })
@@ -79,12 +74,12 @@ describe('createElevenLabsProvider', () => {
    */
   it('maps a persistent 429 to rate-limited, with the wait it asks for', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 429 })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
       kind: 'rate-limited',
       retryAfterMs: 1000,
     })
-    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   it('honours an upstream Retry-After, in seconds', async () => {
@@ -93,7 +88,7 @@ describe('createElevenLabsProvider', () => {
       status: 429,
       headers: { get: (name) => (name === 'retry-after' ? '4' : null) },
     })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
       kind: 'rate-limited',
       retryAfterMs: 4000,
@@ -112,41 +107,44 @@ describe('createElevenLabsProvider', () => {
       status: 401,
       json: async () => ({ detail: { status: 'quota_exceeded' } }),
     })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({ kind: 'quota' })
     expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
-  it('retries a 429 and succeeds if a later attempt is ok', async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, status: 429 })
-      .mockResolvedValueOnce({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(160) })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
-    const result = await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })
-    expect(result.bytes.byteLength).toBe(160)
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
-  })
-
-  it('maps a transport failure to network, and retries it', async () => {
+  it('maps a transport failure to network', async () => {
     const throwingFetch = vi.fn().mockRejectedValue(new Error('offline'))
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl: throwingFetch, queue: queue(), retries: 1, backoffMs: 1 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl: throwingFetch })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({ kind: 'network' })
-    expect(throwingFetch).toHaveBeenCalledTimes(2)
   })
 
   // A 5xx is the provider failing before it produced audio: not billed, and
-  // transient by nature, so it is the one non-429 status worth another try.
-  it('maps a 5xx to upstream, and retries it', async () => {
+  // transient — the runner (`clip-job-runner.js`) is what tries it again.
+  it('maps a 5xx to upstream', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 500 })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 1, backoffMs: 1 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({ kind: 'upstream' })
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  /**
+   * S5. Retries moved to the clip job runner, which knows what each attempt
+   * cost. A provider that also retried would multiply the runner's attempts
+   * by its own — the shape of the 2026-09 bill, one layer down.
+   */
+  it.each([
+    ['a transport failure', () => vi.fn().mockRejectedValue(new Error('offline'))],
+    ['a 5xx', () => vi.fn().mockResolvedValue({ ok: false, status: 503 })],
+    ['a 429', () => vi.fn().mockResolvedValue({ ok: false, status: 429 })],
+  ])('makes exactly one call per synthesize on %s — the runner owns retries', async (_name, makeFetch) => {
+    const fetchImpl = makeFetch()
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
+    await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' }).catch(() => {})
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   it('maps any other non-ok status to rejected-request, and never retries it', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 422 })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
       kind: 'rejected-request',
     })
@@ -164,14 +162,14 @@ describe('createElevenLabsProvider', () => {
         throw new Error('premature close')
       },
     })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
       kind: 'billed-failure',
     })
     expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
-  it('aborts a fetch that outlives timeoutMs, as a retryable network failure', async () => {
+  it('aborts a fetch that outlives timeoutMs, as a network failure', async () => {
     const fetchImpl = vi.fn().mockImplementation(
       (_url, init) =>
         new Promise((_resolve, reject) => {
@@ -181,59 +179,39 @@ describe('createElevenLabsProvider', () => {
     const provider = createElevenLabsProvider({
       apiKey: 'k',
       fetchImpl,
-      queue: queue(),
-      retries: 1,
-      backoffMs: 1,
       timeoutMs: 10,
     })
     await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
       kind: 'network',
     })
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
     expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
   })
 
   it('gives every synthesis fetch an abort signal by default', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(16) })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue() })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })
     expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
   })
 
   it('asks for audio/mpeg on synthesis and on probe', async () => {
     const fetchImpl = vi.fn().mockImplementation(async () => new Response(new Uint8Array(16), { status: 200 }))
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue() })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })
     await provider.probe()
     expect(fetchImpl.mock.calls[0][1].headers.accept).toBe('audio/mpeg')
     expect(fetchImpl.mock.calls[1][1].headers.accept).toBe('audio/mpeg')
   })
 
-  it('counts every attempt, retries included, but not probes', async () => {
+  it('counts every synthesis call, but not probes', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 500 })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
+    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
     expect(provider.stats().attempts).toBe(0)
     await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' }).catch(() => {})
+    await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' }).catch(() => {})
     await provider.probe()
-    expect(provider.stats().attempts).toBe(3)
-  })
-
-  it('runs calls through the given bounded queue, capping concurrency', async () => {
-    const q = createBoundedQueue({ concurrency: 2 })
-    let active = 0
-    let maxActive = 0
-    const fetchImpl = vi.fn().mockImplementation(async () => {
-      active++
-      maxActive = Math.max(maxActive, active)
-      await new Promise((r) => setTimeout(r, 5))
-      active--
-      return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(16) }
-    })
-    const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: q })
-    await Promise.all(
-      Array.from({ length: 5 }, () => provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })),
-    )
-    expect(maxActive).toBeLessThanOrEqual(2)
+    expect(provider.stats().attempts).toBe(2)
   })
 
   /**
@@ -251,7 +229,7 @@ describe('createElevenLabsProvider', () => {
       const fetchImpl = vi.fn().mockResolvedValue(
         new Response(new Uint8Array(1600), { status: 200, headers: { 'content-type': 'audio/mpeg' } }),
       )
-      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
       const result = await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })
       expect(result.bytes.byteLength).toBe(1600)
       expect(result.durationMs).toBe(100)
@@ -261,28 +239,28 @@ describe('createElevenLabsProvider', () => {
       const fetchImpl = vi.fn().mockResolvedValue(
         new Response(new Uint8Array(1600), { status: 200, headers: { 'content-type': 'audio/mpeg' } }),
       )
-      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
       const result = await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })
       expect(result.contentType).toBe('audio/mpeg')
     })
 
     it('reports a missing content-type as null, for the caller to reject', async () => {
       const fetchImpl = vi.fn().mockResolvedValue(new Response(new Uint8Array(1600), { status: 200 }))
-      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
       const result = await provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })
       expect(result.contentType).toBeNull()
     })
 
     it('maps 401 quota_exceeded to quota', async () => {
       const fetchImpl = vi.fn().mockResolvedValue(json(401, { detail: { status: 'quota_exceeded' } }))
-      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 2, backoffMs: 1 })
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
       await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({ kind: 'quota' })
       expect(fetchImpl).toHaveBeenCalledTimes(1)
     })
 
     it('maps 401 for a bad key to not-configured', async () => {
       const fetchImpl = vi.fn().mockResolvedValue(json(401, { detail: { status: 'invalid_api_key' } }))
-      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
       await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
         kind: 'not-configured',
       })
@@ -292,7 +270,7 @@ describe('createElevenLabsProvider', () => {
       const fetchImpl = vi
         .fn()
         .mockResolvedValue(json(429, { detail: { status: 'too_many_concurrent_requests' } }, { 'retry-after': '3' }))
-      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl, queue: queue(), retries: 0 })
+      const provider = createElevenLabsProvider({ apiKey: 'k', fetchImpl })
       await expect(provider.synthesize({ text: 't', voiceId: 'v', modelId: 'm' })).rejects.toMatchObject({
         kind: 'rate-limited',
         retryAfterMs: 3000,
