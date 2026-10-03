@@ -34,7 +34,15 @@ describe('PWA build output', () => {
     execFileSync('npm', ['run', 'build'], {
       cwd: rootDir,
       stdio: 'inherit',
-      env: { ...process.env, NODE_ENV: 'production' },
+      // The build refuses to run without the two public Supabase values
+      // (src/adapters/auth/supabase-env.ts), so give it the local stack's —
+      // demo values, public by design. A developer's own env wins.
+      env: {
+        VITE_SUPABASE_URL: 'http://127.0.0.1:54321',
+        VITE_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH',
+        ...process.env,
+        NODE_ENV: 'production',
+      },
     })
   }, 120_000)
 
