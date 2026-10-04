@@ -36,9 +36,9 @@ export function parseArgs(argv) {
 }
 
 /** First line of `input`, prompt on `output`, nothing typed is echoed back. Resolves on the first newline, not EOF. */
-export function readSecretFrom({ input, output }) {
+export function readSecretFrom({ input, output, prompt = 'password for the new account (not echoed): ' }) {
   return new Promise((resolve, reject) => {
-    output.write('password for the new account (not echoed): ')
+    output.write(prompt)
     const muted = new Writable({ write: (_c, _e, cb) => cb() })
     const rl = createInterface({ input, output: muted, terminal: Boolean(input.isTTY) })
     let settled = false
