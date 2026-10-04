@@ -102,7 +102,7 @@ describe('the script itself, run for real', () => {
 })
 
 describe('pgDumpArgs', () => {
-  it('dumps only the public schema: the pooler role cannot read Supabase-owned auth/storage, and they are not hers', () => {
-    expect(pgDumpArgs('postgres://u@h:5432/postgres')).toEqual(['-d', 'postgres://u@h:5432/postgres', '--no-owner', '--no-privileges', '--schema=public'])
+  it('dumps only the tables in public: the pooler role cannot read Supabase-owned auth/storage, and they are not hers', () => {
+    expect(pgDumpArgs('postgres://u@h:5432/postgres')).toEqual(['-d', 'postgres://u@h:5432/postgres', '--no-owner', '--no-privileges', '--table=public.*'])
   })
 })
