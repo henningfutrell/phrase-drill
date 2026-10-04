@@ -583,6 +583,71 @@ describe('App — existing audio', () => {
     })
     expect(container.querySelector('[data-testid="drill-open-settings"]')).toBeNull()
   })
+
+  async function openDeckWith(settingsStore: SettingsStore, generationQueue: GenerationQueue): Promise<void> {
+    await renderApp(
+      createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: PHRASES }]),
+      settingsStore,
+      createFakeSynthClient(),
+      generationQueue,
+      createFakeClipCache(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      await serverHoldingAllIn(GEORGE),
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+  }
+
+  async function settle(assertion: () => void): Promise<void> {
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await flushMicrotasks()
+      })
+      assertion()
+    })
+  }
+
+  // #6, the owner's own library: Rachel pinned, every Clip on the server in
+  // George. The Deck showed nothing but a count stuck at 0.
+  it('shows on each Phrase the voice its audio is in and that it is not on this phone yet, with the pinned voice and a way to change it', async () => {
+    const RACHEL: Voice = (({ provider, modelId, voiceId }) => ({ provider, modelId, voiceId }))(VOICE_CATALOGUE[0])
+    const generationQueue = createFakeGenerationQueue()
+    const enqueue = vi.spyOn(generationQueue, 'enqueue')
+    await openDeckWith(createFakeSettingsStore({ voice: RACHEL }), generationQueue)
+
+    await settle(() => {
+      expect(container.querySelector('[data-testid="phrase-audio-p1"]')?.textContent).toBe(
+        'Audio done in George · on the server, not on this phone yet',
+      )
+    })
+    expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in Rachel')
+    expect(enqueue, 'fetched in the voice the server holds, never made again in Rachel').toHaveBeenCalledWith(PHRASES[0], {
+      french: GEORGE,
+      english: GEORGE,
+    })
+
+    act(() => click(container.querySelector('[data-testid="change-voice"]')!))
+    expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
+  })
+
+  it('says on the row when a Phrase\'s audio could not be made', async () => {
+    const generationQueue = createFakeGenerationQueue()
+    vi.spyOn(generationQueue, 'statusFor').mockImplementation((id) => (id === 'p2' ? { kind: 'failed' } : undefined))
+    await openDeckWith(createFakeSettingsStore({ voice: GEORGE }), generationQueue)
+
+    await settle(() => {
+      expect(container.querySelector('[data-testid="phrase-audio-p2"]')?.textContent).toBe(
+        'Audio done in George · on the server, not on this phone yet · could not get it onto this phone',
+      )
+    })
+  })
 })
 
 describe('App wired to DeckStore', () => {
