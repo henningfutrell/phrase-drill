@@ -217,6 +217,10 @@ export function fakeClipPool() {
         return { rows: ordered.slice(0, params[0]).map((r) => ({ hash: r.hash, byteSize: String(r.byteSize) })) }
       }
 
+      if (sql.startsWith('SELECT hash FROM clips WHERE hash = ANY')) {
+        return { rows: params[0].filter((hash) => rows.has(hash)).map((hash) => ({ hash })) }
+      }
+
       if (sql.startsWith('SELECT storage_path')) {
         const row = rows.get(params[0])
         return { rows: row ? [{ storagePath: row.storagePath, mime: row.mime, durationMs: row.durationMs }] : [] }

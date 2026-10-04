@@ -67,6 +67,13 @@ function isAcceptableSchemaVersion(value) {
   return Number.isInteger(value) && value >= 1 && value <= LIBRARY_MAX_SCHEMA_VERSION
 }
 
+/** Hashes one `/api/tts/held` ask may carry: a whole Deck in every catalogue voice, with room. */
+const HELD_MAX_HASHES = 1000
+/** 1,000 quoted 64-character hashes and their commas, with room for the envelope. */
+const HELD_MAX_BODY_BYTES = 80 * 1024
+/** A content address as `clip-hash.js` writes it. */
+const CLIP_HASH_PATTERN = /^[0-9a-f]{64}$/
+
 /**
  * The one way this server refuses a request for being too fast (T035).
  *
@@ -311,6 +318,33 @@ export function createApp({
     const requested = await clipJobStore.request(fields, Date.now())
     if (requested.capped) return sendBillingCapped(res)
     return answerWhenGenerated(res, hash)
+  }
+
+  /**
+   * Detect existing audio (#4): which of a batch of content addresses the
+   * Clip store holds. One `ttsLimiter` token per ask, however many hashes it
+   * carries — it is one indexed read, and it is what spares the device both
+   * a regeneration of audio the server already has and a one-at-a-time probe
+   * of every voice. Knowing a hash is held discloses nothing a caller could
+   * not learn from `/api/tts` itself: it must already know all five fields.
+   */
+  async function handleTtsHeld(req, res, key) {
+    const budget = ttsLimiter.allow(key)
+    if (!budget.ok) return sendRateLimited(res, budget)
+
+    let parsed
+    try {
+      parsed = JSON.parse((await readBody(req, { maxBytes: HELD_MAX_BODY_BYTES })).toString('utf8'))
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) return sendJson(res, 413, { error: 'payload-too-large' })
+      return sendJson(res, 400, { error: 'invalid-json' })
+    }
+    const hashes = parsed?.hashes
+    if (!Array.isArray(hashes) || hashes.length > HELD_MAX_HASHES || !hashes.every((hash) => typeof hash === 'string' && CLIP_HASH_PATTERN.test(hash))) {
+      return sendJson(res, 400, { error: 'invalid-request' })
+    }
+    const held = await clipStore.held(hashes)
+    return sendJson(res, 200, { held: [...held] })
   }
 
   /**
@@ -721,6 +755,7 @@ export function createApp({
         const key = claims.sub
 
         if (url.pathname === '/api/tts' && req.method === 'POST') return await handleTts(req, res, key)
+        if (url.pathname === '/api/tts/held' && req.method === 'POST') return await handleTtsHeld(req, res, key)
         if (url.pathname === '/api/tts/regenerate' && req.method === 'POST') return await handleTtsRegenerate(req, res, key)
         if (url.pathname === '/api/scan' && req.method === 'POST') return await handleScan(req, res, key)
         if (url.pathname === '/api/translate' && req.method === 'POST') return await handleTranslate(req, res, key)
