@@ -79,9 +79,11 @@ It produces a compressed logical dump on a machine you control.
 
 `npm run backup`:
 
-1. `pg_dump`s the `public` schema of the database named by `DATABASE_URL`
-   (plain SQL, `--no-owner --no-privileges --schema=public`: the pooler role
-   cannot read Supabase-owned schemas, and they are not their data).
+1. `pg_dump`s the tables in `public` of the database named by `DATABASE_URL`
+   (plain SQL, `--no-owner --no-privileges --table=public.*`: the pooler role
+   cannot read Supabase-owned schemas, and they are not their data). `--table`,
+   not `--schema=public`: that one emits `CREATE SCHEMA public`, and every
+   restore target already has `public`, so the dump would never restore.
 2. Gzips the dump (Node's built-in `zlib`, streamed).
 3. Writes it into the directory named by `BACKUP_DEST`, creating it if
    needed.

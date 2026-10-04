@@ -106,6 +106,12 @@ function run(command, args, { env, stdinStream } = {}) {
     child.on('error', reject)
     child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${command} exited ${code}: ${stderr.trim()}`))))
     if (stdinStream) {
+      // A command that exits early (psql under ON_ERROR_STOP) closes its stdin
+      // mid-write. Its exit code and stderr, reported on 'close', are the error;
+      // an unhandled EPIPE here would crash the process and hide them.
+      child.stdin.on('error', (err) => {
+        if (err.code !== 'EPIPE') reject(err)
+      })
       stdinStream.pipe(child.stdin)
       stdinStream.on('error', reject)
     }

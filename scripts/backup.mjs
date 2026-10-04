@@ -83,9 +83,13 @@ export function resolveDestinationDir(dest) {
   return dest
 }
 
-/** Public schema only: Supabase owns `auth`/`storage`/..., and the pooler role cannot dump them. */
+/**
+ * The tables in `public` only: Supabase owns `auth`/`storage`/..., and the pooler role cannot dump them.
+ * `--table`, not `--schema=public`: selecting the schema emits `CREATE SCHEMA public`, which fails on
+ * every database a restore can target, since `public` always exists there.
+ */
 export function pgDumpArgs(uri) {
-  return ['-d', uri, '--no-owner', '--no-privileges', '--schema=public']
+  return ['-d', uri, '--no-owner', '--no-privileges', '--table=public.*']
 }
 
 async function dumpAndCompress({ databaseUrl, outFile }) {
