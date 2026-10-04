@@ -13,8 +13,9 @@ Supabase Postgres. See "Identity: Supabase access tokens" below.
 
 The user has no physical access to their own phone and is not technical. Any UX that
 asks them to paste an API key, pick a setting, or be walked through
-configuration is unworkable. The server holds the keys; the user signs in with the
-email and password the owner set up for them in Supabase Auth.
+configuration is unworkable. The server holds the keys; the user signs in with a
+6-digit code Supabase Auth emails to them (or, as the backup, the password the
+owner set up for them). See "Signing in" below.
 
 ## Endpoints
 
@@ -745,6 +746,28 @@ Anthropic calls retry with exponential backoff and jitter (`server/retry.js`):
 `baseMs=800`, `retries=2`, ±20% jitter.
 
 ## Identity: Supabase access tokens
+
+### Signing in
+
+The device talks to Supabase Auth directly (`src/adapters/auth/session-auth.ts`);
+this server is not involved until there is an access token.
+
+| Way in | Calls | Email template |
+|--------|-------|----------------|
+| Sign-in code (default) | `signInWithOtp({ shouldCreateUser: false })` → `verifyOtp({ type: 'email' })` | Magic Link → `supabase/templates/magic-link.html` |
+| Password (backup) | `signInWithPassword` | — |
+| Forgot password | `resetPasswordForEmail` → `verifyOtp({ type: 'recovery' })` → `updateUser({ password })` | Reset Password → `supabase/templates/recovery.html` |
+| Change password (Settings) | `updateUser({ password })` | — |
+
+Both emails carry `{{ .Token }}`, a code the user types in, never a link: the
+home-screen app cannot receive a link from Mail (it opens in Safari, with
+separate storage). Sign-ups stay off, and `shouldCreateUser: false` means an
+unknown address is refused (`422`), never created. Locally, Mailpit holds the
+emails at http://127.0.0.1:54324; the opt-in test
+`src/adapters/auth/email-code.integration.test.ts` reads the codes from it
+(`SMOKE_MAILPIT_URL=http://127.0.0.1:54324` plus the `SMOKE_SUPABASE_*` values).
+The hosted project needs its own SMTP and the same two templates —
+`docs/deploy.md`, step 5.
 
 Supabase Auth owns accounts, passwords and sessions; this server stores none
 of them. The device signs in against Supabase directly and sends the access

@@ -113,3 +113,28 @@
   margin-top: 4px;
   width: 100%;
 }
+
+/* Where the code went: their address in full, so a typo in it is visible. */
+.login-note {
+  font-size: var(--text-sm);
+  color: var(--ink-soft);
+  margin: 0;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+/* Six digits read and typed at a glance. */
+.login-input--code {
+  font-size: var(--text-lg);
+  letter-spacing: 0.4em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The other ways in, quieter than the one rose action. */
+.login-alternatives {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}

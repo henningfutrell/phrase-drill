@@ -43,9 +43,24 @@ export class AuthUnavailableError extends Error {
 
 export type LoginResult = { ok: true } | { ok: false; reason: 'invalid-credentials' | 'network' }
 
+/** Asking for a sign-in code. Never creates an account: an address with none is `unknown-email`. */
+export type SignInCodeRequestResult = { ok: true } | { ok: false; reason: 'unknown-email' | 'rate-limited' | 'network' }
+
+/** Asking for a reset email. An unknown address answers `ok` too — Supabase does not say which addresses exist. */
+export type ResetRequestResult = { ok: true } | { ok: false; reason: 'rate-limited' | 'network' }
+
+/** Checking an emailed code. A right code signs them in, exactly as a password would. */
+export type CodeResult = { ok: true } | { ok: false; reason: 'invalid-code' | 'rate-limited' | 'network' }
+
+export type PasswordChangeResult =
+  | { ok: true }
+  | { ok: false; reason: 'weak-password' | 'same-password' | 'signed-out' | 'network' }
+
 interface AuthFailure {
   message: string
   status?: number
+  code?: string
+  name?: string
 }
 
 export interface AuthClient {
@@ -53,6 +68,10 @@ export interface AuthClient {
     signInWithPassword(credentials: { email: string; password: string }): Promise<{ error: AuthFailure | null }>
     getSession(): Promise<{ data: { session: { access_token: string } | null }; error: AuthFailure | null }>
     signOut(): Promise<{ error: AuthFailure | null }>
+    signInWithOtp(params: { email: string; options: { shouldCreateUser: false } }): Promise<{ error: AuthFailure | null }>
+    resetPasswordForEmail(email: string): Promise<{ error: AuthFailure | null }>
+    verifyOtp(params: { email: string; token: string; type: 'email' | 'recovery' }): Promise<{ error: AuthFailure | null }>
+    updateUser(attributes: { password: string }): Promise<{ error: AuthFailure | null }>
   }
 }
 
@@ -69,8 +88,35 @@ export interface SessionAuth {
   logout(): Promise<void>
   /** Resolves to the current access token (refreshed if due); throws `AuthRequiredError` when signed out, `AuthUnavailableError` when the session cannot be read. */
   getAccessToken(): Promise<string>
+  /** Emails them a 6-digit sign-in code — the everyday way in. */
+  requestSignInCode(email: string): Promise<SignInCodeRequestResult>
+  /** Checks the emailed sign-in code; on `ok` the user is signed in. */
+  verifySignInCode(email: string, code: string): Promise<CodeResult>
+  /** Emails them a one-time code that stands in for their password (Supabase's recovery email). */
+  requestPasswordReset(email: string): Promise<ResetRequestResult>
+  /** Checks the emailed code; on `ok` the user is signed in and should choose a new password next. */
+  verifyResetCode(email: string, code: string): Promise<CodeResult>
+  /** Sets a new password on the signed-in account. */
+  changePassword(newPassword: string): Promise<PasswordChangeResult>
   /** `fetchImpl`, adding the bearer token and signing out + firing `onUnauthorized()` on any 401 — hand this to the server-calling adapters as their `fetchImpl`. */
   authFetch: typeof fetch
+}
+
+function isRefusal(error: AuthFailure): boolean {
+  return error.status !== undefined && error.status >= 400 && error.status < 500
+}
+
+/** Runs one Supabase Auth call; a thrown error (no connection) is `network`, a returned one is `classify`'s. */
+async function attempt<R extends string>(
+  call: () => Promise<{ error: AuthFailure | null }>,
+  classify: (error: AuthFailure) => R | 'network',
+): Promise<{ ok: true } | { ok: false; reason: R | 'network' }> {
+  try {
+    const { error } = await call()
+    return error ? { ok: false, reason: classify(error) } : { ok: true }
+  } catch {
+    return { ok: false, reason: 'network' }
+  }
 }
 
 export function createSessionAuth(config: SessionAuthConfig): SessionAuth {
@@ -82,6 +128,16 @@ export function createSessionAuth(config: SessionAuthConfig): SessionAuth {
     if (data.session) return data.session.access_token
     if (error) throw new AuthUnavailableError(error.message)
     return null
+  }
+
+  function verifyCode(email: string, code: string, type: 'email' | 'recovery'): Promise<CodeResult> {
+    return attempt(
+      () => client.auth.verifyOtp({ email: email.trim(), token: code.trim(), type }),
+      (error) => {
+        if (error.status === 429) return 'rate-limited'
+        return isRefusal(error) ? 'invalid-code' : 'network'
+      },
+    )
   }
 
   const authFetch: typeof fetch = async (input, init) => {
@@ -99,18 +155,47 @@ export function createSessionAuth(config: SessionAuthConfig): SessionAuth {
 
   return {
     async login(email, password) {
-      try {
-        const { error } = await client.auth.signInWithPassword({ email, password })
-        if (!error) return { ok: true }
-        const refused = error.status !== undefined && error.status >= 400 && error.status < 500
-        return { ok: false, reason: refused ? 'invalid-credentials' : 'network' }
-      } catch {
-        return { ok: false, reason: 'network' }
-      }
+      return attempt(() => client.auth.signInWithPassword({ email, password }), (error) =>
+        isRefusal(error) ? 'invalid-credentials' : 'network',
+      )
     },
 
     async logout() {
       await client.auth.signOut()
+    },
+
+    requestSignInCode(email) {
+      return attempt(
+        () => client.auth.signInWithOtp({ email: email.trim(), options: { shouldCreateUser: false } }),
+        (error) => {
+          if (error.status === 429) return 'rate-limited'
+          // Sign-ups are off, so an address with no account is refused rather than created.
+          return error.status === 422 || error.code === 'otp_disabled' ? 'unknown-email' : 'network'
+        },
+      )
+    },
+
+    verifySignInCode(email, code) {
+      return verifyCode(email, code, 'email')
+    },
+
+    requestPasswordReset(email) {
+      return attempt(() => client.auth.resetPasswordForEmail(email.trim()), (error) =>
+        error.status === 429 ? 'rate-limited' : 'network',
+      )
+    },
+
+    verifyResetCode(email, code) {
+      return verifyCode(email, code, 'recovery')
+    },
+
+    changePassword(newPassword) {
+      return attempt(() => client.auth.updateUser({ password: newPassword }), (error) => {
+        if (error.code === 'weak_password') return 'weak-password'
+        if (error.code === 'same_password') return 'same-password'
+        if (error.name === 'AuthSessionMissingError') return 'signed-out'
+        return 'network'
+      })
     },
 
     async getAccessToken() {
