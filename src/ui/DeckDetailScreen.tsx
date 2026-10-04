@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import type { Deck, Translator } from '../domain'
+import type { Deck, Translator, Voice } from '../domain'
 import type { PhraseId } from '../domain'
+import type { PhraseAudio } from '../adapters/audio/audio-locator'
+import { isOnPhone, phraseAudioText, voiceName, type NamedVoice } from './phrase-audio-text'
 import { NameSheet } from './NameSheet'
 import { PhraseSheet } from './PhraseSheet'
 
@@ -33,6 +35,11 @@ export function DeckDetailScreen({
   onDrillDeck,
   onRegenerateDeckAudio,
   onRegeneratePhraseAudio,
+  phraseAudio,
+  audioFailedIds,
+  voices = [],
+  pinnedVoice,
+  onChangeVoice,
 }: {
   deck: Deck
   /** All Decks, so a Phrase Candidate can be routed to one other than this one (T057). */
@@ -65,6 +72,21 @@ export function DeckDetailScreen({
   /** The same for one Phrase — both its Clips, same 24 h cap. One tap, no
    * confirmation: two Clips is not a decision worth a sheet. */
   onRegeneratePhraseAudio?: (id: PhraseId) => void
+  /**
+   * Where each Phrase's audio is (#6): per side, the voice its Clip is in and
+   * whether it is on this phone. `undefined` until known, and then nothing is
+   * said: a count shown before it is read is a count that is wrong.
+   */
+  phraseAudio?: ReadonlyMap<PhraseId, PhraseAudio>
+  /** Phrases whose audio the phone asked for and could not get — said on the
+   * row, so a Phrase that will never arrive does not look like one arriving. */
+  audioFailedIds?: ReadonlySet<PhraseId>
+  /** The voice catalogue, to name a Clip's voice. */
+  voices?: readonly NamedVoice[]
+  /** The pinned voice — what new audio is made in. `undefined` hides the line. */
+  pinnedVoice?: Voice | null
+  /** Opens the voice setting (Settings). */
+  onChangeVoice?: () => void
   /**
    * How long since the library was last safe somewhere else (T031). Shown
    * here only once it is urgent — the home screen states it at every level,
@@ -132,6 +154,27 @@ export function DeckDetailScreen({
         </button>
       )}
 
+      {deck.phrases.length > 0 && phraseAudio && (
+        <p data-testid="deck-audio-status" className="deck-audio-status">
+          {audioStatus(
+            deck.phrases.filter((phrase) => {
+              const audio = phraseAudio.get(phrase.id)
+              return audio !== undefined && isOnPhone(audio)
+            }).length,
+            deck.phrases.length,
+          )}
+        </p>
+      )}
+
+      {pinnedVoice !== undefined && onChangeVoice && (
+        <p data-testid="deck-voice" className="deck-audio-status">
+          {pinnedVoice ? `New audio is made in ${voiceName(pinnedVoice, voices)}. ` : 'No voice chosen yet. '}
+          <button type="button" data-testid="change-voice" className="btn-icon" onClick={onChangeVoice}>
+            {pinnedVoice ? 'Change voice' : 'Choose a voice'}
+          </button>
+        </p>
+      )}
+
       {deck.phrases.length > 0 && onRegenerateDeckAudio && (
         confirmingRegenerate ? (
           <button
@@ -166,6 +209,11 @@ export function DeckDetailScreen({
               <div className="phrase-text">
                 <div className="phrase-english">{phrase.english}</div>
                 <div className="phrase-french">{phrase.french}</div>
+                {phraseAudio?.has(phrase.id) && (
+                  <div data-testid={`phrase-audio-${phrase.id}`} className="phrase-audio">
+                    {phraseAudioText(phraseAudio.get(phrase.id)!, voices, audioFailedIds?.has(phrase.id) ?? false)}
+                  </div>
+                )}
               </div>
               <div className="phrase-reorder">
                 <button
@@ -195,7 +243,7 @@ export function DeckDetailScreen({
                     className="btn-icon"
                     onClick={() => onRegeneratePhraseAudio(phrase.id)}
                   >
-                    Redo audio
+                    {pinnedVoice ? `Redo in ${voiceName(pinnedVoice, voices)}` : 'Redo audio'}
                   </button>
                 )}
                 <button
@@ -288,4 +336,9 @@ export function DeckDetailScreen({
       )}
     </main>
   )
+}
+
+function audioStatus(ready: number, total: number): string {
+  if (ready === total) return 'All audio ready'
+  return `Audio ready for ${ready} of ${total} phrase${total === 1 ? '' : 's'}`
 }

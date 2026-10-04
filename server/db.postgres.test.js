@@ -67,6 +67,15 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
   const newClipStore = (options) => createClipStore(pool, { storage, maxBytes: 1_000_000, logger: { warn() {}, error() {} }, ...options })
   const objectNames = async () => (await storage.list('', { limit: 1000 })).data.map((o) => o.name).sort()
 
+  // Detect existing audio (#4): `ANY($1::text[])` is dialect a fake accepts unconditionally.
+  it('answers which of a batch of hashes it holds', async () => {
+    const clips = newClipStore()
+    await clips.init()
+    await clips.put({ hash: 'held-a', bytes: Buffer.alloc(100, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
+
+    expect(await clips.held(['held-a', 'not-held'])).toEqual(new Set(['held-a']))
+  })
+
   it('bumps last_used_at on a hit at most once a day, without the hit waiting on it', async () => {
     const DAY = 24 * 60 * 60 * 1000
     const clock = { now: 0 }

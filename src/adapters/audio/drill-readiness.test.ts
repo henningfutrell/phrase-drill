@@ -4,7 +4,8 @@ import { computeClipHash, type ClipCache } from '../storage/clip-cache'
 import type { GenerationQueue } from './generation-queue'
 import type { Voice } from '../../domain'
 import type { Phrase } from '../../domain'
-import { knownVoices } from './voice-catalogue'
+import { knownVoices, VOICE_CATALOGUE } from './voice-catalogue'
+import type { HeldClipLookup } from './server-synth-client'
 
 const VOICE: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
@@ -196,6 +197,90 @@ describe('computeDrillReadiness', () => {
       await expect(
         computeDrillReadiness(PHRASES, { clipCache, generationQueue, voice: VOICE }),
       ).resolves.toBeDefined()
+    })
+  })
+
+  // Detect existing audio (#4).
+  describe('existing audio', () => {
+    const GEORGE: Voice = (({ provider, modelId, voiceId }) => ({ provider, modelId, voiceId }))(VOICE_CATALOGUE[2])
+
+    async function lookupHoldingAllIn(voice: Voice): Promise<HeldClipLookup> {
+      const hashes = new Set<string>()
+      for (const phrase of PHRASES) {
+        hashes.add(await computeClipHash({ ...voice, lang: 'fr-FR', text: phrase.french }))
+        hashes.add(await computeClipHash({ ...voice, lang: 'en-US', text: phrase.english }))
+      }
+      return { held: async (asked) => new Set(asked.filter((hash) => hashes.has(hash))) }
+    }
+
+    it('pins the voice the audio already exists in rather than stopping on "no voice"', async () => {
+      const clipCache = { ...fakeClipCache([]), has: vi.fn().mockResolvedValue(false) }
+      const generationQueue = fakeQueue()
+      const pinVoice = vi.fn()
+
+      const result = await computeDrillReadiness(PHRASES, {
+        clipCache,
+        generationQueue,
+        voice: null,
+        heldLookup: await lookupHoldingAllIn(GEORGE),
+        pinVoice,
+        isOnline: () => true,
+      })
+
+      expect(pinVoice).toHaveBeenCalledWith(GEORGE)
+      expect(result.reason).toBe('none-ready')
+      expect(generationQueue.enqueue).toHaveBeenCalledWith(PHRASES[0], { french: GEORGE, english: GEORGE })
+    })
+
+    it('still says "no voice" when there is no audio anywhere to detect one from', async () => {
+      const clipCache = { ...fakeClipCache([]), has: vi.fn().mockResolvedValue(false) }
+      const pinVoice = vi.fn()
+
+      const result = await computeDrillReadiness(PHRASES, {
+        clipCache,
+        generationQueue: fakeQueue(),
+        voice: null,
+        heldLookup: { held: async () => new Set() },
+        pinVoice,
+        isOnline: () => true,
+      })
+
+      expect(result.reason).toBe('no-voice')
+      expect(pinVoice).not.toHaveBeenCalled()
+    })
+
+    it('fetches unready Phrases in the voice the server holds them in, not the pinned one', async () => {
+      const generationQueue = fakeQueue()
+
+      await computeDrillReadiness(PHRASES, {
+        clipCache: fakeClipCache(['p1']),
+        generationQueue,
+        voice: VOICE,
+        heldLookup: await lookupHoldingAllIn(GEORGE),
+        isOnline: () => true,
+      })
+
+      expect(generationQueue.enqueue).toHaveBeenCalledTimes(2)
+      expect(generationQueue.enqueue).toHaveBeenCalledWith(PHRASES[1], { french: GEORGE, english: GEORGE })
+      expect(generationQueue.enqueue).toHaveBeenCalledWith(PHRASES[2], { french: GEORGE, english: GEORGE })
+    })
+
+    it('re-reads readiness without queueing or asking the server, for a screen that is watching it fill', async () => {
+      const generationQueue = fakeQueue()
+      const heldLookup: HeldClipLookup = { held: vi.fn() }
+
+      const result = await computeDrillReadiness(PHRASES, {
+        clipCache: fakeClipCache(['p1', 'p2']),
+        generationQueue,
+        voice: VOICE,
+        heldLookup,
+        isOnline: () => true,
+        queueMissing: false,
+      })
+
+      expect(result.ready.map((p) => p.id)).toEqual(['p1', 'p2'])
+      expect(generationQueue.enqueue).not.toHaveBeenCalled()
+      expect(heldLookup.held).not.toHaveBeenCalled()
     })
   })
 })

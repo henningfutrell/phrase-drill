@@ -62,8 +62,15 @@ jobs:
       - name: Test
         run: npm test
 
+      # The build refuses to run without the two public Supabase values
+      # (`src/adapters/auth/supabase-env.ts`). This bundle is a gate and is
+      # never shipped — Render builds its own from the Dockerfile with the
+      # real ones — so the local stack's URL and a placeholder key stand in.
       - name: Build
         run: npm run build
+        env:
+          VITE_SUPABASE_URL: http://127.0.0.1:54321
+          VITE_SUPABASE_PUBLISHABLE_KEY: ci-build-only
 
       # Last, and only on main. Three things here are load-bearing:
       #
