@@ -49,6 +49,7 @@ import { syncStatusText } from './ui/sync-status-text'
 import { FALLBACK_PREVIEW_PHRASE, knownVoices, VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
 import { createClipPlayer, type AudioElementLike } from './adapters/audio/clip-player'
 import { computeDrillReadiness, fetchMissingAudio, type DrillReadinessDeps } from './adapters/audio/drill-readiness'
+import { describePhraseAudio, heldClips, type PhraseAudio } from './adapters/audio/audio-locator'
 import { createSystemClock } from './adapters/audio/system-clock'
 import { createRouteHold, type RouteHoldElementLike } from './adapters/audio/route-hold'
 import { createWakeLockPort } from './adapters/device/wake-lock'
@@ -103,6 +104,9 @@ const NOOP_SPEECH: SpeechPort = {
 
 /** How often Deck detail re-reads its audio while some is still arriving (#4). */
 const DECK_AUDIO_RECHECK_MS = 3000
+
+/** Generation outcomes after which a Phrase's audio is not coming without their doing something (#6). */
+const GAVE_UP: ReadonlySet<string> = new Set(['failed', 'unauthorized', 'quota'])
 
 /**
  * A stable identity for a pinned Voice — same provider/model/voice id, same
@@ -270,8 +274,10 @@ function App({
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
   /** A voice detected from existing audio this session (#4) — see `readinessDeps`. */
   const detectedVoiceRef = useRef<Voice | null>(null)
-  /** The Phrases of the Deck on screen whose audio is on this phone (#4). */
-  const [deckAudio, setDeckAudio] = useState<{ deckId: DeckId; readyIds: ReadonlySet<string> } | undefined>(undefined)
+  /** Where the audio of the Deck on screen is, per Phrase (#6), and which Phrases' audio could not be got. */
+  const [deckAudio, setDeckAudio] = useState<
+    { deckId: DeckId; audio: ReadonlyMap<string, PhraseAudio>; failedIds: ReadonlySet<string> } | undefined
+  >(undefined)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   const [diagnosticsReport, setDiagnosticsReport] = useState<string | undefined>(undefined)
@@ -878,11 +884,13 @@ function App({
 
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
 
-  // Deck detail shows whether its audio is here (#4), and asks for what is
-  // missing the moment the user opens it rather than at their Drill tap. Re-reads
-  // the local index every few seconds while something is still arriving and
-  // there is a network to arrive over. Not while a Drill is running: those
-  // reads would share the IndexedDB connection the Drill plays from.
+  // Deck detail shows where each Phrase's audio is (#4, #6), and asks for
+  // what is missing the moment the user opens it rather than at their Drill tap. The
+  // server is asked once which Clips it holds; after that only this phone's
+  // index is re-read, every few seconds, while something is still being
+  // fetched — `/api/tts/held` spends the same limiter the downloads do. Not
+  // while a Drill is running: those reads would share the IndexedDB
+  // connection the Drill plays from.
   const watchedDeck = drillTarget ? undefined : selectedDeck
   const watchedPhrasesKey = watchedDeck?.phrases.map((p) => `${p.id}|${p.french}|${p.english}`).join('\n')
   useEffect(() => {
@@ -890,12 +898,28 @@ function App({
     const { id: deckId, phrases } = watchedDeck
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    const look = async (queueMissing: boolean): Promise<void> => {
-      const readyIds = await fetchMissingAudio(phrases, readinessDeps(queueMissing))
+    let held: ReadonlySet<string> = new Set()
+    const look = async (first: boolean): Promise<void> => {
+      const deps = readinessDeps(first)
+      if (first) {
+        await fetchMissingAudio(phrases, deps)
+        if (heldLookup) held = await heldClips(phrases, knownVoices(null), heldLookup)
+      }
+      const audio = await describePhraseAudio(phrases, knownVoices(settings.voice ?? detectedVoiceRef.current), { clipCache, held })
       if (cancelled) return
-      setDeckAudio({ deckId, readyIds })
+      const notOnPhone = phrases.filter((phrase) => {
+        const where = audio.get(phrase.id)
+        return !where || !where.french.onPhone || !where.english.onPhone
+      })
+      const failedIds = new Set(
+        notOnPhone.filter((phrase) => GAVE_UP.has(generationQueue.statusFor(phrase.id)?.kind ?? '')).map((phrase) => phrase.id),
+      )
+      setDeckAudio({ deckId, audio, failedIds })
+      // Re-read only while something is still on its way. The first look
+      // always re-reads once: the queue sets `generating` after a turn.
+      const arriving = notOnPhone.some((phrase) => first || generationQueue.statusFor(phrase.id)?.kind === 'generating')
       const online = typeof navigator === 'undefined' || navigator.onLine
-      if (readyIds.size < phrases.length && online) timer = setTimeout(() => void look(false), DECK_AUDIO_RECHECK_MS)
+      if (arriving && online) timer = setTimeout(() => void look(false), DECK_AUDIO_RECHECK_MS)
     }
     void look(true)
     return () => {
@@ -1179,7 +1203,11 @@ function App({
           onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
           onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
           onDrillDeck={() => setDrillTarget({ title: selectedDeck.name, phrases: selectedDeck.phrases })}
-          audioReadyIds={deckAudio?.deckId === selectedDeck.id ? deckAudio.readyIds : undefined}
+          phraseAudio={deckAudio?.deckId === selectedDeck.id ? deckAudio.audio : undefined}
+          audioFailedIds={deckAudio?.deckId === selectedDeck.id ? deckAudio.failedIds : undefined}
+          voices={VOICE_CATALOGUE}
+          pinnedVoice={settings.voice ?? detectedVoiceRef.current}
+          onChangeVoice={handleOpenSettings}
           // Regenerate, never enqueue: enqueue skips a Clip the device holds
           // and is served the server's stored one, so it cannot replace a
           // broken Clip (docs/glossary.md "Regenerate").

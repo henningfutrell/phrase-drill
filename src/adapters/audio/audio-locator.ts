@@ -55,6 +55,57 @@ async function heldOrNothing(lookup: HeldClipLookup, hashes: readonly string[]):
   }
 }
 
+/** Every Clip of these Phrases the server holds, in any of `voices` — one
+ * batched ask, nothing downloaded. Empty when the server cannot be asked. */
+export async function heldClips(phrases: readonly Phrase[], voices: readonly Voice[], lookup: HeldClipLookup): Promise<Set<string>> {
+  if (phrases.length === 0) return new Set()
+  return heldOrNothing(
+    lookup,
+    (await candidates(phrases, voices)).map((candidate) => candidate.hash),
+  )
+}
+
+/** Where one side's audio is (#6): the voice its Clip is in, or `null` when
+ * neither this phone nor the server holds one, and whether it is on this phone. */
+export interface ClipWhereabouts {
+  readonly voice: Voice | null
+  readonly onPhone: boolean
+}
+
+export interface PhraseAudio {
+  readonly french: ClipWhereabouts
+  readonly english: ClipWhereabouts
+}
+
+/**
+ * Per Phrase, where each side's audio is (#6) — what Deck detail shows on
+ * every row. A Clip on this phone wins over one only the server holds, since
+ * it is the one a Drill plays; within each, `voices` order decides. `held` is
+ * the server's answer from `heldClips`, asked once: this is re-read every few
+ * seconds while audio arrives, and the server's `/api/tts` limiter is shared
+ * with the downloads being waited on.
+ */
+export async function describePhraseAudio(
+  phrases: readonly Phrase[],
+  voices: readonly Voice[],
+  deps: { readonly clipCache: Pick<ClipCache, 'has'>; readonly held: ReadonlySet<string> },
+): Promise<Map<string, PhraseAudio>> {
+  const bySide = new Map<string, Candidate[]>()
+  const onPhone = new Set<string>()
+  for (const candidate of await candidates(phrases, voices)) {
+    const key = `${candidate.phraseId}|${candidate.side}`
+    bySide.set(key, [...(bySide.get(key) ?? []), candidate])
+    if (await deps.clipCache.has(candidate.hash)) onPhone.add(candidate.hash)
+  }
+  const where = (phraseId: string, side: Side): ClipWhereabouts => {
+    const mine = bySide.get(`${phraseId}|${side}`) ?? []
+    const local = mine.find((candidate) => onPhone.has(candidate.hash))
+    if (local) return { voice: local.voice, onPhone: true }
+    return { voice: mine.find((candidate) => deps.held.has(candidate.hash))?.voice ?? null, onPhone: false }
+  }
+  return new Map(phrases.map((phrase) => [phrase.id, { french: where(phrase.id, 'french'), english: where(phrase.id, 'english') }]))
+}
+
 /**
  * Per Phrase, the first voice in `voices` order the server holds each side
  * in. A Phrase held nowhere has no entry; a side held nowhere is left out, so

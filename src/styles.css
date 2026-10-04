@@ -455,7 +455,7 @@ button:disabled {
 
 /* Detect existing audio (#4): quiet facts, not alerts — ink-soft, small. */
 .deck-audio-status,
-.phrase-audio-pending {
+.phrase-audio {
   font-size: var(--text-sm);
   color: var(--ink-soft);
 }
