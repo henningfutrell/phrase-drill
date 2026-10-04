@@ -137,8 +137,126 @@ describe('DrillScreen — readiness gate', () => {
     )
     await settle()
 
-    expect(textOf('drill-blocked')).toMatch(/isn't ready|not ready|still being made/i)
+    expect(textOf('drill-blocked')).toMatch(/getting it now/i)
+    expect(textOf('drill-blocked')).not.toMatch(/try again/i)
     expect(testid('drill-open-settings')).toBeNull()
+  })
+
+  // Detect existing audio (#4): "try again in a moment" made her poll by
+  // hand for a deck that may take minutes to arrive. The screen watches the
+  // audio arrive and opens the drill over what is ready.
+  describe('watching the audio arrive', () => {
+    const notReady = { ready: [], skippedCount: 2, canStart: false, reason: 'none-ready' as const, online: true }
+
+    it('opens the start card by itself once the first phrases are ready', async () => {
+      const recheckReadiness = vi
+        .fn<() => Promise<DrillReadinessResult>>()
+        .mockResolvedValueOnce(notReady)
+        .mockResolvedValue(ready([bonjour], 1))
+      render(
+        <DrillScreen
+          title="Home"
+          checkReadiness={() => Promise.resolve(notReady)}
+          recheckReadiness={recheckReadiness}
+          speech={instantSpeech()}
+          clock={fakeClock()}
+          unlock={() => Promise.resolve({ ok: true as const })}
+          onExit={() => {}}
+        />,
+      )
+      await settle()
+      expect(testid('drill-blocked')).not.toBeNull()
+
+      await act(async () => {
+        vi.advanceTimersByTime(3000)
+        await flushMicrotasks()
+      })
+      expect(testid('drill-blocked'), 'nothing ready on the first re-check').not.toBeNull()
+
+      await act(async () => {
+        vi.advanceTimersByTime(3000)
+        await flushMicrotasks()
+      })
+      expect(textOf('drill-phrase-count')).toBe('1 phrase')
+      expect(textOf('drill-skipped-count')).toMatch(/1 phrase .*still getting/i)
+    })
+
+    it('keeps counting up on the start card until every phrase is ready, then stops asking', async () => {
+      const recheckReadiness = vi
+        .fn<() => Promise<DrillReadinessResult>>()
+        .mockResolvedValueOnce(ready([bonjour, merci], 0))
+      render(
+        <DrillScreen
+          title="Home"
+          checkReadiness={() => Promise.resolve(ready([bonjour], 1))}
+          recheckReadiness={recheckReadiness}
+          speech={instantSpeech()}
+          clock={fakeClock()}
+          unlock={() => Promise.resolve({ ok: true as const })}
+          onExit={() => {}}
+        />,
+      )
+      await settle()
+      expect(textOf('drill-phrase-count')).toBe('1 phrase')
+
+      await act(async () => {
+        vi.advanceTimersByTime(3000)
+        await flushMicrotasks()
+      })
+      expect(textOf('drill-phrase-count')).toBe('2 phrases')
+      expect(testid('drill-skipped-count')).toBeNull()
+
+      await act(async () => {
+        vi.advanceTimersByTime(9000)
+        await flushMicrotasks()
+      })
+      expect(recheckReadiness).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not re-check offline, where nothing can arrive', async () => {
+      const recheckReadiness = vi.fn<() => Promise<DrillReadinessResult>>()
+      render(
+        <DrillScreen
+          title="Home"
+          checkReadiness={() => Promise.resolve({ ...notReady, online: false })}
+          recheckReadiness={recheckReadiness}
+          speech={instantSpeech()}
+          clock={fakeClock()}
+          unlock={() => Promise.resolve({ ok: true as const })}
+          onExit={() => {}}
+        />,
+      )
+      await settle()
+      await act(async () => {
+        vi.advanceTimersByTime(9000)
+        await flushMicrotasks()
+      })
+
+      expect(recheckReadiness).not.toHaveBeenCalled()
+    })
+
+    it('stops re-checking once the drill is running', async () => {
+      const recheckReadiness = vi.fn<() => Promise<DrillReadinessResult>>().mockResolvedValue(ready([bonjour], 1))
+      render(
+        <DrillScreen
+          title="Home"
+          checkReadiness={() => Promise.resolve(ready([bonjour], 1))}
+          recheckReadiness={recheckReadiness}
+          speech={controllableSpeech()}
+          clock={fakeClock()}
+          unlock={() => Promise.resolve({ ok: true as const })}
+          onExit={() => {}}
+        />,
+      )
+      await settle()
+      await click(testid('drill-start'))
+      await act(async () => {
+        vi.advanceTimersByTime(9000)
+        await flushMicrotasks()
+      })
+
+      expect(recheckReadiness).not.toHaveBeenCalled()
+    })
   })
 
   /**

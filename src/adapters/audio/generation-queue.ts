@@ -62,6 +62,17 @@ export type GenerationStatus =
   | { kind: 'quota' }
   | { kind: 'failed' }
 
+/**
+ * Detect existing audio (#4): per side, the voice the server already holds
+ * that side's Clip in, when it is not the pinned one. A side named here is
+ * fetched in that voice — served from the store, never billed — and a side
+ * not named is generated in the pinned voice as before.
+ */
+export interface HeldVoices {
+  readonly french?: Voice
+  readonly english?: Voice
+}
+
 export interface GenerationQueueDeps {
   readonly synthClient: SynthClient
   readonly clipCache: ClipCache
@@ -94,7 +105,7 @@ export interface GenerationQueue {
    * Synchronous and never throws — a Phrase's text is saved by the caller
    * before or independent of this call, never gated on it.
    */
-  enqueue(phrase: Pick<Phrase, 'id' | 'french' | 'english'>): void
+  enqueue(phrase: Pick<Phrase, 'id' | 'french' | 'english'>, held?: HeldVoices): void
   /**
    * **Regenerate** (docs/glossary.md): make both Clips of a Phrase again, in
    * the pinned voice, because she says the audio is broken. Synchronous and
@@ -362,19 +373,25 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
     }
   }
 
-  /** Both Clips of one Phrase, in the voice pinned now, in the background —
-   * `enqueue` and `regenerate` differ only in `regenerate`. */
-  function generatePhrase(phrase: Pick<Phrase, 'id' | 'french' | 'english'>, regenerate: boolean): void {
+  /** Both Clips of one Phrase in the background, each in the voice the
+   * server holds it in (`held`) or else the voice pinned now — `enqueue` and
+   * `regenerate` differ only in `regenerate`, and a Regenerate is never given
+   * `held`: it is about the audio in the pinned voice. */
+  function generatePhrase(phrase: Pick<Phrase, 'id' | 'french' | 'english'>, regenerate: boolean, held: HeldVoices = {}): void {
     idle.begin() // synchronous, so `whenIdle()` called straight after this already knows
     void (async () => {
       try {
-        const voice = await deps.getVoice()
-        if (!voice) return // no voice pinned: nothing to generate against, no default invented
+        const pinned = await deps.getVoice()
+        const frenchVoice = held.french ?? pinned
+        const englishVoice = held.english ?? pinned
+        // Neither side held and no voice pinned: nothing to generate against,
+        // no default invented.
+        if (!frenchVoice && !englishVoice) return
 
         setStatus(phrase.id, { kind: 'generating' })
         const [french, english] = await Promise.all([
-          generateOne(phrase.french, 'fr-FR', voice, regenerate),
-          generateOne(phrase.english, 'en-US', voice, regenerate),
+          frenchVoice ? generateOne(phrase.french, 'fr-FR', frenchVoice, regenerate) : WAITING_FOR_A_VOICE,
+          englishVoice ? generateOne(phrase.english, 'en-US', englishVoice, regenerate) : WAITING_FOR_A_VOICE,
         ])
         setStatus(phrase.id, combine(french, english))
       } finally {
@@ -384,8 +401,8 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
   }
 
   return {
-    enqueue(phrase) {
-      generatePhrase(phrase, false)
+    enqueue(phrase, held) {
+      generatePhrase(phrase, false, held)
     },
 
     regenerate(phrase) {
@@ -413,6 +430,10 @@ export function createGenerationQueue(deps: GenerationQueueDeps): GenerationQueu
     },
   }
 }
+
+/** A side held nowhere, with no voice pinned to make it in: fetched once she
+ * picks one. Not a failure, so the Phrase stays `generating`, never `ready`. */
+const WAITING_FOR_A_VOICE: GenerationStatus = { kind: 'generating' }
 
 /** The worse of two Clip outcomes wins the Phrase's combined status. */
 function combine(a: GenerationStatus, b: GenerationStatus): GenerationStatus {

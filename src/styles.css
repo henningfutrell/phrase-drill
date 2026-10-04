@@ -453,6 +453,13 @@ button:disabled {
   color: var(--ink-soft);
 }
 
+/* Detect existing audio (#4): quiet facts, not alerts — ink-soft, small. */
+.deck-audio-status,
+.phrase-audio-pending {
+  font-size: var(--text-sm);
+  color: var(--ink-soft);
+}
+
 /* ---- Buttons ------------------------------------------------------------
    One rose action per screen. The gilt inset is a hairline — the engraved edge
    of a calling card, not a second border. */

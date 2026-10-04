@@ -66,6 +66,29 @@ describe('DeckDetailScreen', () => {
     expect(onDrillDeck).toHaveBeenCalledTimes(1)
   })
 
+  // Detect existing audio (#4): she could not see whether a Deck's audio was
+  // there before tapping Drill, and so found out one refusal at a time.
+  it('states how many of its Phrases have audio on this phone, and marks the ones still arriving', () => {
+    renderScreen(threePhraseDeck, { audioReadyIds: new Set(['p1', 'p3']) })
+
+    expect(container.querySelector('[data-testid="deck-audio-status"]')?.textContent).toBe('Audio ready for 2 of 3 phrases')
+    expect(container.querySelector('[data-testid="phrase-audio-pending-p2"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="phrase-audio-pending-p1"]')).toBeNull()
+  })
+
+  it('says plainly when every Phrase has its audio', () => {
+    renderScreen(threePhraseDeck, { audioReadyIds: new Set(['p1', 'p2', 'p3']) })
+
+    expect(container.querySelector('[data-testid="deck-audio-status"]')?.textContent).toBe('All audio ready')
+  })
+
+  it('says nothing about audio before it knows', () => {
+    renderScreen(threePhraseDeck)
+
+    expect(container.querySelector('[data-testid="deck-audio-status"]')).toBeNull()
+    expect(container.querySelector('[data-testid="phrase-audio-pending-p1"]')).toBeNull()
+  })
+
   it('renders each Phrase, English over French, in author order', () => {
     renderScreen(threePhraseDeck)
     const rows = container.querySelectorAll('[data-testid^="phrase-row-"]')
