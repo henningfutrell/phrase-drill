@@ -13,7 +13,7 @@ const ERROR_COPY: Record<Exclude<PasswordChangeResult, { ok: true }>['reason'] |
 
 /**
  * Choose a new password: typed twice, because a typo here locks them out.
- * Used at the end of a forgotten-password reset and from Settings. Both
+ * Settings → Password. Both
  * fields are `new-password`, which is what makes iOS Safari offer to save it;
  * `email`, when known, rides along in a hidden `username` field so the saved
  * password is filed under their address. Presentational — `onChangePassword` is

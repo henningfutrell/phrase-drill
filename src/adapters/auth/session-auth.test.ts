@@ -15,9 +15,6 @@ function fakeClient() {
     signInWithPassword: vi.fn<AuthClient['auth']['signInWithPassword']>(),
     getSession: vi.fn<AuthClient['auth']['getSession']>(),
     signOut: vi.fn<AuthClient['auth']['signOut']>(),
-    signInWithOtp: vi.fn<AuthClient['auth']['signInWithOtp']>(),
-    resetPasswordForEmail: vi.fn<AuthClient['auth']['resetPasswordForEmail']>(),
-    verifyOtp: vi.fn<AuthClient['auth']['verifyOtp']>(),
     updateUser: vi.fn<AuthClient['auth']['updateUser']>(),
   }
   auth.signOut.mockResolvedValue({ error: null })
@@ -140,93 +137,6 @@ describe('createSessionAuth', () => {
       expect(result).toBe(response)
       expect(fake.auth.signOut).toHaveBeenCalledTimes(1)
       expect(onUnauthorized).toHaveBeenCalledTimes(1)
-    })
-  })
-
-  describe('requestSignInCode()', () => {
-    it('emails a sign-in code, and never creates an account for an address it does not know', async () => {
-      fake.auth.signInWithOtp.mockResolvedValue({ error: null })
-      expect(await auth().requestSignInCode(' user@example.com ')).toEqual({ ok: true })
-      expect(fake.auth.signInWithOtp).toHaveBeenCalledWith({
-        email: 'user@example.com',
-        options: { shouldCreateUser: false },
-      })
-    })
-
-    it('returns unknown-email when no account has that address', async () => {
-      fake.auth.signInWithOtp.mockResolvedValue({
-        error: { message: 'Signups not allowed for otp', status: 422, code: 'otp_disabled' },
-      })
-      expect(await auth().requestSignInCode('nobody@example.com')).toEqual({ ok: false, reason: 'unknown-email' })
-    })
-
-    it('returns rate-limited on a 429 and network on a failure or throw', async () => {
-      fake.auth.signInWithOtp.mockResolvedValue({ error: { message: 'slow down', status: 429 } })
-      expect(await auth().requestSignInCode('user@example.com')).toEqual({ ok: false, reason: 'rate-limited' })
-      fake.auth.signInWithOtp.mockResolvedValue({ error: { message: 'boom', status: 500 } })
-      expect(await auth().requestSignInCode('user@example.com')).toEqual({ ok: false, reason: 'network' })
-      fake.auth.signInWithOtp.mockRejectedValue(new TypeError('fetch failed'))
-      expect(await auth().requestSignInCode('user@example.com')).toEqual({ ok: false, reason: 'network' })
-    })
-  })
-
-  describe('verifySignInCode()', () => {
-    it('verifies the emailed code as a sign-in code', async () => {
-      fake.auth.verifyOtp.mockResolvedValue({ error: null })
-      expect(await auth().verifySignInCode('user@example.com', ' 654321 ')).toEqual({ ok: true })
-      expect(fake.auth.verifyOtp).toHaveBeenCalledWith({ email: 'user@example.com', token: '654321', type: 'email' })
-    })
-
-    it('returns invalid-code when the code is wrong or expired', async () => {
-      fake.auth.verifyOtp.mockResolvedValue({ error: { message: 'Token has expired or is invalid', status: 403, code: 'otp_expired' } })
-      expect(await auth().verifySignInCode('user@example.com', '000000')).toEqual({ ok: false, reason: 'invalid-code' })
-    })
-  })
-
-  describe('requestPasswordReset()', () => {
-    it('asks for a reset email to that address', async () => {
-      fake.auth.resetPasswordForEmail.mockResolvedValue({ error: null })
-      expect(await auth().requestPasswordReset(' user@example.com ')).toEqual({ ok: true })
-      expect(fake.auth.resetPasswordForEmail).toHaveBeenCalledWith('user@example.com')
-    })
-
-    it('returns rate-limited when too many emails were asked for', async () => {
-      fake.auth.resetPasswordForEmail.mockResolvedValue({
-        error: { message: 'email rate limit exceeded', status: 429, code: 'over_email_send_rate_limit' },
-      })
-      expect(await auth().requestPasswordReset('user@example.com')).toEqual({ ok: false, reason: 'rate-limited' })
-    })
-
-    it('returns network when the server cannot be reached or fails', async () => {
-      fake.auth.resetPasswordForEmail.mockResolvedValue({ error: { message: 'boom', status: 500 } })
-      expect(await auth().requestPasswordReset('user@example.com')).toEqual({ ok: false, reason: 'network' })
-      fake.auth.resetPasswordForEmail.mockRejectedValue(new TypeError('fetch failed'))
-      expect(await auth().requestPasswordReset('user@example.com')).toEqual({ ok: false, reason: 'network' })
-    })
-  })
-
-  describe('verifyResetCode()', () => {
-    it('verifies the emailed code as a recovery code, which signs them in', async () => {
-      fake.auth.verifyOtp.mockResolvedValue({ error: null })
-      expect(await auth().verifyResetCode('user@example.com', ' 123456 ')).toEqual({ ok: true })
-      expect(fake.auth.verifyOtp).toHaveBeenCalledWith({ email: 'user@example.com', token: '123456', type: 'recovery' })
-    })
-
-    it('returns invalid-code when the code is wrong or expired', async () => {
-      fake.auth.verifyOtp.mockResolvedValue({
-        error: { message: 'Token has expired or is invalid', status: 403, code: 'otp_expired' },
-      })
-      expect(await auth().verifyResetCode('user@example.com', '000000')).toEqual({ ok: false, reason: 'invalid-code' })
-    })
-
-    it('returns rate-limited when too many codes were tried', async () => {
-      fake.auth.verifyOtp.mockResolvedValue({ error: { message: 'slow down', status: 429 } })
-      expect(await auth().verifyResetCode('user@example.com', '000000')).toEqual({ ok: false, reason: 'rate-limited' })
-    })
-
-    it('returns network when the client throws', async () => {
-      fake.auth.verifyOtp.mockRejectedValue(new TypeError('fetch failed'))
-      expect(await auth().verifyResetCode('user@example.com', '1')).toEqual({ ok: false, reason: 'network' })
     })
   })
 

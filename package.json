@@ -16,7 +16,8 @@
     "backup": "node scripts/backup.mjs",
     "restore-drill": "node scripts/restore-drill.mjs",
     "clips-to-storage": "node scripts/clips-to-storage.mjs",
-    "auth-user-create": "node scripts/auth-user-create.mjs"
+    "auth-user-create": "node scripts/auth-user-create.mjs",
+    "auth-password-set": "node scripts/auth-password-set.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
