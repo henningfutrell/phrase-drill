@@ -84,13 +84,35 @@ service's Environment tab afterwards. A `VITE_*` change needs a rebuild
    sign up" off. There is no signup endpoint on this server. The server only
    verifies the access tokens Supabase issues (`docs/server.md`).
 
+5. **Email: SMTP and the two code templates.** She signs in with a code
+   emailed to her, and resets a forgotten password the same way
+   (`docs/server.md`, "Signing in"). Two settings on the Supabase project:
+   - **Custom SMTP** — Dashboard → Project Settings → Authentication → SMTP
+     Settings (https://supabase.com/dashboard/project/_/settings/auth). The
+     built-in sender only delivers to members of the Supabase organization's
+     team and only a few per hour, so without this her email never arrives.
+     Then raise Authentication → Rate Limits → "emails sent per hour" from its
+     default if it is lower than ~30.
+   - **Templates** — Dashboard → Authentication → Emails
+     (https://supabase.com/dashboard/project/_/auth/templates): set **Magic
+     Link** to subject `Your phrase-drill sign-in code` and the body of
+     `supabase/templates/magic-link.html`, and **Reset Password** to subject
+     `Your phrase-drill code` and the body of `supabase/templates/recovery.html`.
+     Both bodies carry `{{ .Token }}`; the defaults carry only a link, which
+     the home-screen app cannot use.
+
 ## Verify it worked
 
 - **Health:** `curl https://phrase-drill.onrender.com/api/health` returns
   `{"status":"ok"}`.
-- **Login:** load the app in Safari on the phone, log in with the account
-  just created. A wrong password should be rejected; the right one should
-  land on the drill screen.
+- **Login:** load the app in Safari on the phone, type her email, tap
+  *Email me a code*, type the 6 digits from the email — it should land on the
+  drill screen. An address with no account is refused, and none is created.
+  Then the backup: *Use my password instead*; a wrong password is rejected,
+  the right one lands on the drill screen.
+- **Forgot password:** *Use my password instead* → *Forgot password?* → the
+  emailed code → a new password typed twice → signed in. Log out and log in
+  with the new password; Settings → *Change password* works the same way.
 - **Library round-trip:** add a phrase (or import one via a scan), leave the
   page, come back, confirm it's still there — this exercises `PUT`/`GET
   /api/library` against the real managed Postgres, not just that the

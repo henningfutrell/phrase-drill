@@ -516,6 +516,7 @@ async function renderApp(
         audioElement={audioElement}
         routeHoldElement={routeHoldElement}
         heldLookup={heldLookup}
+        changePassword={async () => ({ ok: true })}
       />,
     )
   })

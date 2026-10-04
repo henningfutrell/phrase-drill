@@ -59,6 +59,7 @@ import { MixSelectScreen } from './ui/MixSelectScreen'
 import { ImportScreen, type ImportTarget } from './ui/ImportScreen'
 import { DrillScreen, type DrillReadinessResult } from './ui/DrillScreen'
 import { SettingsScreen, type PreviewOutcome } from './ui/SettingsScreen'
+import type { PasswordChangeResult } from './adapters/auth/session-auth'
 import type { ExportOutcome } from './ui/BackupStatus'
 import type { RestoreFileResult } from './ui/RestoreControl'
 import { DiagnosticsScreen } from './ui/DiagnosticsScreen'
@@ -233,6 +234,7 @@ function App({
   audioElement,
   routeHoldElement,
   heldLookup,
+  changePassword,
 }: {
   deckStore: DeckStore
   mixStore: MixStore
@@ -267,6 +269,8 @@ function App({
    * the server holds in another voice is fetched rather than made again.
    */
   heldLookup?: HeldClipLookup
+  /** Sets a new password on her account — session-auth's `changePassword`, offered in Settings. */
+  changePassword: (password: string) => Promise<PasswordChangeResult>
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [mixes, setMixes] = useState<Mix[]>([])
@@ -1115,6 +1119,7 @@ function App({
           onConfirmRestore={handleConfirmRestore}
           onCancelRestore={handleCancelRestore}
           onOpenDiagnostics={handleOpenDiagnostics}
+          onChangePassword={changePassword}
           savedAudio={savedAudio}
         />
       )
