@@ -17,7 +17,9 @@ import type {
 import { LIBRARY_FORMAT } from './domain'
 import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore } from './adapters/storage'
 import type { Voice } from './domain'
-import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
+import type { HeldClipLookup, SynthClient, SynthResult } from './adapters/audio/server-synth-client'
+import { computeClipHash } from './adapters/storage/clip-cache'
+import { VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry, NewLogEntry } from './adapters/diagnostics'
 import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/library-sync-client'
@@ -495,6 +497,7 @@ async function renderApp(
   databaseTrouble: DatabaseTroubleSource = createFakeDatabaseTrouble(),
   audioElement: AudioElementLike = fakeAudioElement(),
   routeHoldElement: RouteHoldElementLike = fakeRouteHoldElement(),
+  heldLookup?: HeldClipLookup,
 ) {
   await act(async () => {
     root.render(
@@ -512,11 +515,75 @@ async function renderApp(
         databaseTrouble={databaseTrouble}
         audioElement={audioElement}
         routeHoldElement={routeHoldElement}
+        heldLookup={heldLookup}
       />,
     )
   })
   await flushMicrotasks()
 }
+
+// Detect existing audio (#4): with every Clip already on the server, a phone
+// with no voice pinned made their choose one — and choosing any other voice
+// than the one the audio was made in regenerated all of it.
+describe('App — existing audio', () => {
+  const GEORGE: Voice = (({ provider, modelId, voiceId }) => ({ provider, modelId, voiceId }))(VOICE_CATALOGUE[2])
+  const PHRASES = [
+    { id: 'p1', french: 'Bonjour', english: 'Hello' },
+    { id: 'p2', french: 'Merci', english: 'Thanks' },
+  ]
+
+  async function serverHoldingAllIn(voice: Voice): Promise<HeldClipLookup> {
+    const hashes = new Set<string>()
+    for (const phrase of PHRASES) {
+      hashes.add(await computeClipHash({ ...voice, lang: 'fr-FR', text: phrase.french }))
+      hashes.add(await computeClipHash({ ...voice, lang: 'en-US', text: phrase.english }))
+    }
+    return { held: async (asked) => new Set(asked.filter((hash) => hashes.has(hash))) }
+  }
+
+  it('pins the voice the audio is in and fetches it, instead of asking them to choose one', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: PHRASES }])
+    const settingsStore = createFakeSettingsStore()
+    const generationQueue = createFakeGenerationQueue()
+    const enqueue = vi.spyOn(generationQueue, 'enqueue')
+    await renderApp(
+      store,
+      settingsStore,
+      createFakeSynthClient(),
+      generationQueue,
+      createFakeClipCache(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      await serverHoldingAllIn(GEORGE),
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    // The survey hashes with `crypto.subtle` — real turns, not a microtask count.
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await flushMicrotasks()
+      })
+      expect(container.querySelector('[data-testid="deck-audio-status"]')?.textContent).toBe('Audio ready for 0 of 2 phrases')
+      expect((await settingsStore.load()).voice).toEqual(GEORGE)
+    })
+    expect(enqueue).toHaveBeenCalledWith(PHRASES[0], { french: GEORGE, english: GEORGE })
+
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await flushMicrotasks()
+      })
+      expect(container.querySelector('[data-testid="drill-blocked"]')?.textContent).toMatch(/getting it now/i)
+    })
+    expect(container.querySelector('[data-testid="drill-open-settings"]')).toBeNull()
+  })
+})
 
 describe('App wired to DeckStore', () => {
   it('loads Decks from the store on mount and renders them', async () => {
@@ -918,9 +985,9 @@ describe('App wired to the Drill screen', () => {
     await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
 
     expect(container.querySelector('[data-testid="drill-title"]')?.textContent).toBe('Home')
-    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrases')
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrase')
     expect(container.querySelector('[data-testid="drill-skipped-count"]')?.textContent).toContain(
-      'no audio yet',
+      'still getting audio',
     )
   })
 
@@ -1937,7 +2004,7 @@ describe('App wired to saved Mixes (T059)', () => {
     expect(container.querySelector('[data-testid="mix-row-m1"]')?.textContent).toContain('1 deck · 1 phrase')
 
     await act(async () => click(container.querySelector('[data-testid="mix-row-m1"]')!))
-    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrases')
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrase')
   })
 
   it('pushes the library to the server after a Mix is saved, so a new phone gets it', async () => {

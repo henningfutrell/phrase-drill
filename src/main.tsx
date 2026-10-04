@@ -174,6 +174,7 @@ function showApp(): void {
       databaseTrouble={databaseTrouble}
       audioElement={audioElement}
       routeHoldElement={routeHoldElement}
+      heldLookup={rawSynthClient}
     />,
   )
 }

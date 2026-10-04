@@ -312,6 +312,27 @@ describe('createClipStore (Postgres, T063)', () => {
     expect((await store.get('broken')).durationMs).toBe(999)
   })
 
+  // Detect existing audio (#4): the device asks which of a batch of content
+  // addresses the store holds, so it can fetch audio that already exists in
+  // whatever voice it was made in rather than generating it again.
+  it('says which of a batch of hashes it holds, without reading any audio', async () => {
+    const storage = fakeClipStorage()
+    const store = createClipStore(fakeClipPool(), { storage })
+    await store.init()
+    await store.put({ hash: 'held-1', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+    await store.put({ hash: 'held-2', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+    const downloads = storage.download
+    storage.download = async () => {
+      throw new Error('held() must not download audio')
+    }
+
+    const held = await store.held(['held-1', 'missing', 'held-2'])
+
+    expect([...held].sort()).toEqual(['held-1', 'held-2'])
+    expect(await store.held([]), 'an empty ask is answered without a query').toEqual(new Set())
+    storage.download = downloads
+  })
+
   it('does not throw or overwrite when the same hash is written twice', async () => {
     const pool = fakeClipPool()
     const store = createClipStore(pool, { storage: fakeClipStorage() })

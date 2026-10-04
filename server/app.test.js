@@ -1226,6 +1226,63 @@ describe('server app (integration, fake upstreams)', () => {
     })
   })
 
+  // Detect existing audio (#4). The device used to learn that the server held
+  // a Clip only by downloading it, one rate-limited request at a time, and
+  // only in the voice pinned on the phone — so a phone with no voice, or the
+  // "wrong" one, regenerated audio the server already had.
+  describe('POST /api/tts/held', () => {
+    const stored = computeClipHash({ provider: 'elevenlabs', modelId: 'm1', voiceId: 'v1', lang: 'fr-FR', text: 'bonjour' })
+    const absent = computeClipHash({ provider: 'elevenlabs', modelId: 'm1', voiceId: 'v2', lang: 'fr-FR', text: 'bonjour' })
+    const held = (body, token = VALID_TOKEN) =>
+      fetch(`${baseUrl}/api/tts/held`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      })
+    const storeClip = () =>
+      clipStore.put({ hash: stored, bytes: Buffer.from([0x49, 0x44, 0x33, ...Array(1597).fill(0)]), mime: 'audio/mpeg', durationMs: 7, createdAt: 1 })
+
+    it('names the hashes the Clip store holds, and calls no provider', async () => {
+      await boot()
+      await storeClip()
+
+      const res = await held({ hashes: [stored, absent] })
+
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ held: [stored] })
+      expect(elevenLabsUpstream.calls).toBe(0)
+    })
+
+    it('refuses a body that is not a list of content hashes', async () => {
+      await boot()
+
+      expect((await held({ hashes: 'nope' })).status).toBe(400)
+      expect((await held({ hashes: ['not-a-hash'] })).status).toBe(400)
+      expect((await held('{')).status).toBe(400)
+    })
+
+    it('refuses more hashes than one ask may carry', async () => {
+      await boot()
+
+      const res = await held({ hashes: Array(1001).fill(absent) })
+
+      expect(res.status).toBe(400)
+    })
+
+    it('spends one /api/tts token per ask, however many hashes it carries', async () => {
+      await boot() // the test limiter holds 3
+
+      for (let i = 0; i < 3; i++) expect((await held({ hashes: Array(1000).fill(absent) })).status).toBe(200)
+      expect((await held({ hashes: [absent] })).status).toBe(429)
+    })
+
+    it('requires an access token', async () => {
+      await boot()
+
+      expect((await held({ hashes: [stored] }, 'bogus')).status).toBe(401)
+    })
+  })
+
   describe('POST /api/scan', () => {
     it('returns parsed phrases for a valid image upload', async () => {
       await boot({ anthropicFetch: fetchAnthropicOk([{ french: 'bonjour', english: 'hello' }]) })

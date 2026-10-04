@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type {
   Deck,
   DeckId,
@@ -41,14 +41,14 @@ import { readInstallStateFromBrowser } from './adapters/device/install-state'
 import type { ErrorLog } from './adapters/diagnostics'
 import { collectDiagnostics, copyText, formatDiagnosticsReport, getBuildInfo, getStorageEstimate } from './adapters/diagnostics'
 import { shareBackupFile } from './adapters/share/web-share'
-import type { SynthClient } from './adapters/audio/server-synth-client'
+import type { HeldClipLookup, SynthClient } from './adapters/audio/server-synth-client'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { SyncEngine, SyncSnapshot } from './adapters/sync/sync-engine'
 import { createSyncedLibrary } from './adapters/sync/synced-library'
 import { syncStatusText } from './ui/sync-status-text'
 import { FALLBACK_PREVIEW_PHRASE, knownVoices, VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
 import { createClipPlayer, type AudioElementLike } from './adapters/audio/clip-player'
-import { computeDrillReadiness } from './adapters/audio/drill-readiness'
+import { computeDrillReadiness, fetchMissingAudio, type DrillReadinessDeps } from './adapters/audio/drill-readiness'
 import { createSystemClock } from './adapters/audio/system-clock'
 import { createRouteHold, type RouteHoldElementLike } from './adapters/audio/route-hold'
 import { createWakeLockPort } from './adapters/device/wake-lock'
@@ -100,6 +100,9 @@ const NOOP_SPEECH: SpeechPort = {
   async speak() {},
   cancel() {},
 }
+
+/** How often Deck detail re-reads its audio while some is still arriving (#4). */
+const DECK_AUDIO_RECHECK_MS = 3000
 
 /**
  * A stable identity for a pinned Voice — same provider/model/voice id, same
@@ -225,6 +228,7 @@ function App({
   databaseTrouble,
   audioElement,
   routeHoldElement,
+  heldLookup,
 }: {
   deckStore: DeckStore
   mixStore: MixStore
@@ -253,11 +257,21 @@ function App({
    * happens to the React tree above it.
    */
   routeHoldElement: RouteHoldElementLike
+  /**
+   * Detect existing audio (#4): which Clips the server already holds. With
+   * it, a phone with no voice pinned pins the one the audio is in, and audio
+   * the server holds in another voice is fetched rather than made again.
+   */
+  heldLookup?: HeldClipLookup
 }) {
   const [decks, setDecks] = useState<Deck[] | undefined>(undefined)
   const [mixes, setMixes] = useState<Mix[]>([])
   const [selectedDeckId, setSelectedDeckId] = useState<DeckId | undefined>(undefined)
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
+  /** A voice detected from existing audio this session (#4) — see `readinessDeps`. */
+  const detectedVoiceRef = useRef<Voice | null>(null)
+  /** The Phrases of the Deck on screen whose audio is on this phone (#4). */
+  const [deckAudio, setDeckAudio] = useState<{ deckId: DeckId; readyIds: ReadonlySet<string> } | undefined>(undefined)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   const [diagnosticsReport, setDiagnosticsReport] = useState<string | undefined>(undefined)
@@ -795,6 +809,36 @@ function App({
     }
   }
 
+  /**
+   * The readiness survey's deps, bound (#4). `voice` falls back to one this
+   * session detected, because the re-checks that follow a detection run
+   * before `settings` has re-rendered with it — and a re-check that saw no
+   * voice would report "no voice" over audio that is arriving.
+   */
+  function readinessDeps(queueMissing: boolean): DrillReadinessDeps {
+    return {
+      clipCache,
+      generationQueue,
+      voice: settings.voice ?? detectedVoiceRef.current,
+      heldLookup,
+      pinVoice: pinDetectedVoice,
+      queueMissing,
+    }
+  }
+
+  /**
+   * Pins a voice the audio was found in — the same write as their choosing it,
+   * so it syncs to their other phone. Re-reads the store first: `settings` may
+   * not have loaded yet, and a voice the user chose must never be replaced by one
+   * guessed from the audio.
+   */
+  function pinDetectedVoice(voice: Voice): void {
+    detectedVoiceRef.current = voice
+    void settingsStore.load().then((stored) => {
+      if (!stored.voice) handleChooseVoice(voice)
+    })
+  }
+
   function handleChooseVoice(voice: { provider: string; modelId: string; voiceId: string }) {
     setSettings((current) => ({ ...current, voice }))
     // Push it, so their other phone gets the preference rather than only this
@@ -833,6 +877,35 @@ function App({
   }
 
   const selectedDeck = (decks ?? []).find((d) => d.id === selectedDeckId)
+
+  // Deck detail shows whether its audio is here (#4), and asks for what is
+  // missing the moment the user opens it rather than at their Drill tap. Re-reads
+  // the local index every few seconds while something is still arriving and
+  // there is a network to arrive over. Not while a Drill is running: those
+  // reads would share the IndexedDB connection the Drill plays from.
+  const watchedDeck = drillTarget ? undefined : selectedDeck
+  const watchedPhrasesKey = watchedDeck?.phrases.map((p) => `${p.id}|${p.french}|${p.english}`).join('\n')
+  useEffect(() => {
+    if (!watchedDeck) return
+    const { id: deckId, phrases } = watchedDeck
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const look = async (queueMissing: boolean): Promise<void> => {
+      const readyIds = await fetchMissingAudio(phrases, readinessDeps(queueMissing))
+      if (cancelled) return
+      setDeckAudio({ deckId, readyIds })
+      const online = typeof navigator === 'undefined' || navigator.onLine
+      if (readyIds.size < phrases.length && online) timer = setTimeout(() => void look(false), DECK_AUDIO_RECHECK_MS)
+    }
+    void look(true)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+    // Keyed on the Deck and its text, not on `readinessDeps`' inputs: a voice
+    // detected by the first look must not start a second one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchedDeck?.id, watchedPhrasesKey])
 
   function withSelectedDeck(fn: (deck: Deck) => Deck): Deck | undefined {
     if (!selectedDeck) return undefined
@@ -1028,7 +1101,10 @@ function App({
         <DrillScreen
           title={drillTarget.title}
           checkReadiness={(): Promise<DrillReadinessResult> =>
-            computeDrillReadiness(drillTarget.phrases, { clipCache, generationQueue, voice: settings.voice })
+            computeDrillReadiness(drillTarget.phrases, readinessDeps(true))
+          }
+          recheckReadiness={(): Promise<DrillReadinessResult> =>
+            computeDrillReadiness(drillTarget.phrases, readinessDeps(false))
           }
           speech={clipPlayer ?? NOOP_SPEECH}
           clock={systemClock}
@@ -1103,6 +1179,7 @@ function App({
           onRenameDeck={(name) => handleRenameDeck(selectedDeck.id, name)}
           onDeleteDeck={() => handleDeleteDeck(selectedDeck.id)}
           onDrillDeck={() => setDrillTarget({ title: selectedDeck.name, phrases: selectedDeck.phrases })}
+          audioReadyIds={deckAudio?.deckId === selectedDeck.id ? deckAudio.readyIds : undefined}
           // Regenerate, never enqueue: enqueue skips a Clip the device holds
           // and is served the server's stored one, so it cannot replace a
           // broken Clip (docs/glossary.md "Regenerate").

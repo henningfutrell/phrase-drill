@@ -264,3 +264,57 @@ describe('createServerSynthClient regenerate', () => {
     await expect(status.client.regenerate('Bonjour', 'fr-FR', VOICE)).rejects.toMatchObject({ kind: 'network' })
   })
 })
+
+// Detect existing audio (#4): one ask names every content address the
+// server's Clip store already holds, so the device can fetch audio in the
+// voice it was made in instead of generating it again.
+describe('createServerSynthClient — held', () => {
+  const hash = (n: number): string => n.toString(16).padStart(64, '0')
+  function heldResponse(held: string[]): Response {
+    return { ok: true, status: 200, headers: { get: () => null }, json: () => Promise.resolve({ held }) } as unknown as Response
+  }
+
+  it('posts the hashes to /api/tts/held with the access token and answers the held ones as a Set', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(heldResponse([hash(2)]))
+    const { client } = makeClient({ fetchImpl })
+
+    const held = await client.held([hash(1), hash(2)])
+
+    expect(held).toEqual(new Set([hash(2)]))
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/tts/held')
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${ACCESS_TOKEN}`)
+    expect(JSON.parse(init.body as string)).toEqual({ hashes: [hash(1), hash(2)] })
+  })
+
+  it('splits a large ask into batches the server accepts, and joins the answers', async () => {
+    const hashes = Array.from({ length: 2500 }, (_, i) => hash(i))
+    const fetchImpl = vi.fn<typeof fetch>((_url, init) => {
+      const asked = JSON.parse((init as RequestInit).body as string).hashes as string[]
+      return Promise.resolve(heldResponse(asked.slice(0, 1)))
+    })
+    const { client } = makeClient({ fetchImpl })
+
+    const held = await client.held(hashes)
+
+    expect(fetchImpl.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string).hashes.length)).toEqual([1000, 1000, 500])
+    expect(held).toEqual(new Set([hash(0), hash(1000), hash(2000)]))
+  })
+
+  it('asks nothing for no hashes', async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+    const { client } = makeClient({ fetchImpl })
+
+    expect(await client.held([])).toEqual(new Set())
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('rejects with the same SynthError kinds as synthesize', async () => {
+    const { client } = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(errorResponse(429, { 'retry-after': '3' })) })
+    await expect(client.held([hash(1)])).rejects.toEqual({ kind: 'rate-limited', retryAfterMs: 3000 } satisfies SynthError)
+
+    const offline = makeClient({ fetchImpl: vi.fn<typeof fetch>().mockRejectedValue(new TypeError('Load failed')) })
+    await expect(offline.client.held([hash(1)])).rejects.toMatchObject({ kind: 'network' })
+  })
+})

@@ -33,6 +33,7 @@ export function DeckDetailScreen({
   onDrillDeck,
   onRegenerateDeckAudio,
   onRegeneratePhraseAudio,
+  audioReadyIds,
 }: {
   deck: Deck
   /** All Decks, so a Phrase Candidate can be routed to one other than this one (T057). */
@@ -65,6 +66,12 @@ export function DeckDetailScreen({
   /** The same for one Phrase — both its Clips, same 24 h cap. One tap, no
    * confirmation: two Clips is not a decision worth a sheet. */
   onRegeneratePhraseAudio?: (id: PhraseId) => void
+  /**
+   * The Phrases whose audio is on this phone, both sides, in any voice (#4) —
+   * what a Drill would play. `undefined` until known, and then nothing is
+   * said: a count shown before it is read is a count that is wrong.
+   */
+  audioReadyIds?: ReadonlySet<PhraseId>
   /**
    * How long since the library was last safe somewhere else (T031). Shown
    * here only once it is urgent — the home screen states it at every level,
@@ -132,6 +139,12 @@ export function DeckDetailScreen({
         </button>
       )}
 
+      {deck.phrases.length > 0 && audioReadyIds && (
+        <p data-testid="deck-audio-status" className="deck-audio-status">
+          {audioStatus(deck.phrases.filter((phrase) => audioReadyIds.has(phrase.id)).length, deck.phrases.length)}
+        </p>
+      )}
+
       {deck.phrases.length > 0 && onRegenerateDeckAudio && (
         confirmingRegenerate ? (
           <button
@@ -166,6 +179,11 @@ export function DeckDetailScreen({
               <div className="phrase-text">
                 <div className="phrase-english">{phrase.english}</div>
                 <div className="phrase-french">{phrase.french}</div>
+                {audioReadyIds && !audioReadyIds.has(phrase.id) && (
+                  <div data-testid={`phrase-audio-pending-${phrase.id}`} className="phrase-audio-pending">
+                    No audio yet
+                  </div>
+                )}
               </div>
               <div className="phrase-reorder">
                 <button
@@ -288,4 +306,9 @@ export function DeckDetailScreen({
       )}
     </main>
   )
+}
+
+function audioStatus(ready: number, total: number): string {
+  if (ready === total) return 'All audio ready'
+  return `Audio ready for ${ready} of ${total} phrase${total === 1 ? '' : 's'}`
 }

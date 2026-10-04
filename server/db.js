@@ -448,6 +448,18 @@ export function createClipStore(
     },
 
     /**
+     * Which of `hashes` the store holds, as a Set — the row alone, no
+     * download and no last-used bump: being asked about is not being played.
+     * Detect existing audio (#4): it is how a device finds audio already made
+     * in a voice other than the one it has pinned, or with none pinned.
+     */
+    async held(hashes) {
+      if (hashes.length === 0) return new Set()
+      const { rows } = await pool.query('SELECT hash FROM clips WHERE hash = ANY($1::text[])', [hashes])
+      return new Set(rows.map((row) => row.hash))
+    },
+
+    /**
      * `DO NOTHING`, not `DO UPDATE`: the address is derived from the content,
      * so a row already at this hash holds the same audio by definition. Two
      * requests that miss concurrently both generate and both write, and the

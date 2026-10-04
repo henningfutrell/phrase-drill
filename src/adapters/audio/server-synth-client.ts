@@ -73,6 +73,9 @@ const MAX_RETRY_AFTER_MS = 60_000
  * before there is anything to find. */
 const DEFAULT_QUEUED_RETRY_AFTER_MS = 5000
 
+/** Hashes per `/api/tts/held` ask — the server's own limit (`server/app.js` `HELD_MAX_HASHES`). */
+const HELD_BATCH_SIZE = 1000
+
 export interface SynthClient {
   /** Synthesize `text` (in `lang`) with the given voice. Resolves to MP3 bytes and an estimated duration. */
   synthesize(text: string, lang: Language, voice: SynthVoice, signal?: AbortSignal): Promise<SynthResult>
@@ -93,6 +96,18 @@ export interface SynthClient {
    *   within a day may be refused. Terminal, as it is for `synthesize`.
    */
   regenerate(text: string, lang: Language, voice: SynthVoice, signal?: AbortSignal): Promise<SynthResult>
+}
+
+/**
+ * Detect existing audio (#4): which content hashes the server's Clip store
+ * already holds. Its own port, apart from `SynthClient`, because only the
+ * audio locator asks it — the generation queue and every fake of it never do.
+ */
+export interface HeldClipLookup {
+  /** The held ones among `hashes`. Reads no audio and never generates;
+   * batched to what the server accepts per ask. Rejects with a `SynthError`
+   * exactly as `synthesize` does. */
+  held(hashes: readonly string[]): Promise<Set<string>>
 }
 
 export interface ServerSynthClientDeps {
@@ -119,13 +134,12 @@ export interface ServerSynthClientDeps {
  * `clip-cache.ts` uses — and cannot name the clip this device is asking for
  * without every field of it.
  */
-export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClient {
+export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClient & HeldClipLookup {
   const fetchImpl = deps.fetchImpl ?? fetch
 
-  /** One POST to `path`, mapped to a `SynthResult` or a `SynthError`. Shared by
-   * both endpoints, which differ in what the server does and in nothing a
-   * caller can see on the wire — one mapping, so they cannot drift apart. */
-  async function post(path: string, text: string, lang: Language, voice: SynthVoice, signal?: AbortSignal): Promise<SynthResult> {
+  /** One authenticated POST, with every non-2xx answer mapped to a
+   * `SynthError` — one mapping for every endpoint, so they cannot drift apart. */
+  async function send(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
     const accessToken = await deps.getAccessToken()
 
     let response: Response
@@ -137,7 +151,7 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
           'content-type': 'application/json',
           authorization: `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({ text, voiceId: voice.voiceId, modelId: voice.modelId, provider: voice.provider, lang }),
+        body: JSON.stringify(body),
       })
     } catch (err) {
       return Promise.reject(networkError(describe(err)))
@@ -166,7 +180,13 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
     if (!response.ok) {
       return Promise.reject(networkError(`server responded ${response.status}`))
     }
+    return response
+  }
 
+  /** A Clip request to `path`: both Clip endpoints differ in what the server
+   * does and in nothing a caller can see on the wire. */
+  async function post(path: string, text: string, lang: Language, voice: SynthVoice, signal?: AbortSignal): Promise<SynthResult> {
+    const response = await send(path, { text, voiceId: voice.voiceId, modelId: voice.modelId, provider: voice.provider, lang }, signal)
     const durationHeader = response.headers.get('x-duration-ms')
     const bytes = await response.arrayBuffer()
     const durationMs = durationHeader !== null ? Number(durationHeader) : NaN
@@ -179,6 +199,15 @@ export function createServerSynthClient(deps: ServerSynthClientDeps): SynthClien
     },
     regenerate(text, lang, voice, signal) {
       return post('/api/tts/regenerate', text, lang, voice, signal)
+    },
+    async held(hashes) {
+      const held = new Set<string>()
+      for (let i = 0; i < hashes.length; i += HELD_BATCH_SIZE) {
+        const response = await send('/api/tts/held', { hashes: hashes.slice(i, i + HELD_BATCH_SIZE) })
+        const body = (await response.json()) as { held?: unknown }
+        if (Array.isArray(body.held)) for (const hash of body.held) if (typeof hash === 'string') held.add(hash)
+      }
+      return held
     },
   }
 }
