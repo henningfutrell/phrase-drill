@@ -287,7 +287,7 @@ export function SettingsScreen({
       <section className="settings-section" data-testid="account-section">
         <h2 className="settings-section-title">Password</h2>
         <p className="settings-help">
-          You can always sign in with a code we email you. The password is the backup way in.
+          Change the password you sign in with. Forgotten it? Ask whoever runs the app to reset it.
         </p>
         {passwordStage === 'open' ? (
           <>

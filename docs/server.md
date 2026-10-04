@@ -13,9 +13,9 @@ Supabase Postgres. See "Identity: Supabase access tokens" below.
 
 She has no physical access to her own phone and is not technical. Any UX that
 asks her to paste an API key, pick a setting, or be walked through
-configuration is unworkable. The server holds the keys; she signs in with a
-6-digit code Supabase Auth emails to her (or, as the backup, the password the
-owner set up for her). See "Signing in" below.
+configuration is unworkable. The server holds the keys; she signs in with the
+email and password the owner set up for her in Supabase Auth. See "Signing in"
+below.
 
 ## Endpoints
 
@@ -749,25 +749,22 @@ Anthropic calls retry with exponential backoff and jitter (`server/retry.js`):
 
 ### Signing in
 
-The device talks to Supabase Auth directly (`src/adapters/auth/session-auth.ts`);
-this server is not involved until there is an access token.
+Email + password only (`src/adapters/auth/session-auth.ts`, `signInWithPassword`).
+She can change her password in Settings → Password (`updateUser`). A forgotten
+password is reset by the owner on archbox — there is no reset email:
 
-| Way in | Calls | Email template |
-|--------|-------|----------------|
-| Sign-in code (default) | `signInWithOtp({ shouldCreateUser: false })` → `verifyOtp({ type: 'email' })` | Magic Link → `supabase/templates/magic-link.html` |
-| Password (backup) | `signInWithPassword` | — |
-| Forgot password | `resetPasswordForEmail` → `verifyOtp({ type: 'recovery' })` → `updateUser({ password })` | Reset Password → `supabase/templates/recovery.html` |
-| Change password (Settings) | `updateUser({ password })` | — |
+```sh
+set -a; . workspace/secrets/phrase-drill/supabase.env; set +a   # SUPABASE_URL, SUPABASE_SECRET_KEY
+node scripts/auth-password-set.mjs --email <her email>           # type the new password; not echoed
+```
 
-Both emails carry `{{ .Token }}`, a code she types in, never a link: the
-home-screen app cannot receive a link from Mail (it opens in Safari, with
-separate storage). Sign-ups stay off, and `shouldCreateUser: false` means an
-unknown address is refused (`422`), never created. Locally, Mailpit holds the
-emails at http://127.0.0.1:54324; the opt-in test
-`src/adapters/auth/email-code.integration.test.ts` reads the codes from it
-(`SMOKE_MAILPIT_URL=http://127.0.0.1:54324` plus the `SMOKE_SUPABASE_*` values).
-The hosted project needs its own SMTP and the same two templates —
-`docs/deploy.md`, step 5.
+It never creates an account. Sign-ups stay off.
+
+**Refused: email sign-in codes, magic links and reset emails** (owner, 2026-10-03,
+issue #7: "Just make a password and make it simple."). They need an email sender
+— custom SMTP, a credential, templates — to run and babysit, for one user whose
+password the owner can reset in one command. Built in PR #8, removed in the PR
+that adds `auth-password-set.mjs`.
 
 Supabase Auth owns accounts, passwords and sessions; this server stores none
 of them. The device signs in against Supabase directly and sends the access

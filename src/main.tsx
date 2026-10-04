@@ -70,7 +70,7 @@ const syncBaselineStore = createIndexedDbSyncBaselineStore()
 const errorLog = createIndexedDbErrorLog({ getSecrets: () => Promise.resolve([]) })
 installErrorCapture(errorLog)
 
-// Supabase Auth through session-auth.ts: an emailed sign-in code, or email + password as the backup. `render()` is called once at boot and
+// Supabase Auth (email + password) through session-auth.ts. `render()` is called once at boot and
 // again by `showApp()`/`showLogin()` below, whichever the current auth
 // state calls for; there is no client-side router, same as the rest of the
 // app (App.tsx switches screens by state, never a URL).
@@ -95,7 +95,13 @@ function renderRoot(children: ReactNode): void {
 
 function showLogin(): void {
   renderRoot(
-    <LoginScreen auth={auth} onSignedIn={showApp} />,
+    <LoginScreen
+      onLogin={async (email, password) => {
+        const result = await auth.login(email, password)
+        if (result.ok) showApp()
+        return result
+      }}
+    />,
   )
 }
 
