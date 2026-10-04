@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { detectVoice, locateHeldVoices } from './audio-locator'
+import { describePhraseAudio, detectVoice, heldClips, locateHeldVoices } from './audio-locator'
 import { computeClipHash } from '../storage/clip-cache'
 import type { HeldClipLookup } from './server-synth-client'
 import type { Language, Phrase, Voice } from '../../domain'
@@ -71,5 +71,56 @@ describe('locateHeldVoices', () => {
 
     expect((await locateHeldVoices([], knownVoices(RACHEL), lookup)).size).toBe(0)
     expect(lookup.held).not.toHaveBeenCalled()
+  })
+})
+
+// #6: each Phrase's row says whether its audio is done, in which voice, and
+// whether it is on this phone — so the user can see what a Drill will play.
+describe('describePhraseAudio', () => {
+  it('names the voice each side is in and whether it is on this phone', async () => {
+    const onPhone = new Set(await allClipsIn(GEORGE, PHRASES.slice(0, 1)))
+    const held = new Set([...(await allClipsIn(GEORGE, PHRASES)), await hashOf(CHARLOTTE, 'fr-FR', 'Merci')])
+    const clipCache = { has: async (hash: string) => onPhone.has(hash) }
+
+    const audio = await describePhraseAudio(PHRASES.slice(0, 1).concat(PHRASES[2]), knownVoices(RACHEL), { clipCache, held })
+
+    expect(audio.get('p1')).toEqual({ french: { voice: GEORGE, onPhone: true }, english: { voice: GEORGE, onPhone: true } })
+    expect(audio.get('p3'), 'the pinned-first preference order decides between two held voices').toEqual({
+      french: { voice: CHARLOTTE, onPhone: false },
+      english: { voice: GEORGE, onPhone: false },
+    })
+  })
+
+  it('prefers the voice on this phone over one only the server holds', async () => {
+    const onPhone = new Set([await hashOf(CHARLOTTE, 'fr-FR', 'Bonjour')])
+    const held = new Set(await allClipsIn(RACHEL, PHRASES))
+    const clipCache = { has: async (hash: string) => onPhone.has(hash) }
+
+    const audio = await describePhraseAudio(PHRASES.slice(0, 1), knownVoices(RACHEL), { clipCache, held })
+
+    expect(audio.get('p1')).toEqual({ french: { voice: CHARLOTTE, onPhone: true }, english: { voice: RACHEL, onPhone: false } })
+  })
+
+  it('answers no voice for a side held nowhere', async () => {
+    const audio = await describePhraseAudio(PHRASES.slice(1, 2), knownVoices(null), { clipCache: nothingOnThePhone, held: new Set() })
+
+    expect(audio.get('p2')).toEqual({ french: { voice: null, onPhone: false }, english: { voice: null, onPhone: false } })
+  })
+})
+
+describe('heldClips', () => {
+  it('asks the server once for every side of every Phrase in every voice', async () => {
+    const george = await allClipsIn(GEORGE, PHRASES)
+    const lookup = lookupHolding(george)
+
+    expect(await heldClips(PHRASES, knownVoices(null), lookup)).toEqual(new Set(george))
+    expect(lookup.held).toHaveBeenCalledTimes(1)
+    expect(lookup.held.mock.calls[0][0]).toHaveLength(PHRASES.length * 2 * 3)
+  })
+
+  it('answers nothing held when the server cannot be asked', async () => {
+    const lookup: HeldClipLookup = { held: () => Promise.reject({ kind: 'network', detail: 'offline' }) }
+
+    expect((await heldClips(PHRASES, knownVoices(null), lookup)).size).toBe(0)
   })
 })
