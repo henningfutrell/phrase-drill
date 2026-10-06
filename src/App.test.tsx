@@ -638,6 +638,99 @@ describe('App — existing audio', () => {
     expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
   })
 
+  // The test server, on a fresh browser: the library on the server pins Rachel,
+  // every Clip is stored in George. Detection must not override their choice.
+  describe('a fresh phone, whose library on the server pins a voice', () => {
+    const RACHEL: Voice = (({ provider, modelId, voiceId }) => ({ provider, modelId, voiceId }))(VOICE_CATALOGUE[0])
+    const serverLibrary: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'd1', name: 'Home', phrases: PHRASES, createdAt: 1, updatedAt: 1 }],
+      voice: RACHEL,
+    }
+
+    async function renderFresh(
+      store: DeckStore,
+      settingsStore: SettingsStore,
+      generationQueue: GenerationQueue,
+      client: LibrarySyncClient,
+    ): Promise<void> {
+      await renderApp(
+        store,
+        settingsStore,
+        createFakeSynthClient(),
+        generationQueue,
+        createFakeClipCache(),
+        undefined,
+        undefined,
+        client,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        await serverHoldingAllIn(GEORGE),
+      )
+    }
+
+    it('shows the voice the library pins once sync brings it, not the one the audio is in', async () => {
+      const settingsStore = createFakeSettingsStore()
+      const client = createFakeLibrarySyncClient({ pull: async () => ({ ok: true, library: serverLibrary }) })
+      await renderFresh(createFakeDeckStore([]), settingsStore, createFakeGenerationQueue(), client)
+      await settle(() => expect(container.querySelector('[data-testid="deck-row-d1"]')).not.toBeNull())
+
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      await settle(() => {
+        expect(container.querySelector('[data-testid="phrase-audio-p1"]')?.textContent).toBe(
+          'Audio done in George · on the server, not on this phone yet',
+        )
+      })
+      expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in Rachel')
+      expect((await settingsStore.load()).voice).toEqual(RACHEL)
+    })
+
+    it('does not save a detected voice before the first sync, so the library\'s choice is kept', async () => {
+      let releasePull!: () => void
+      const pulled = new Promise<void>((resolve) => (releasePull = resolve))
+      const settingsStore = createFakeSettingsStore()
+      const generationQueue = createFakeGenerationQueue()
+      const enqueue = vi.spyOn(generationQueue, 'enqueue')
+      const client = createFakeLibrarySyncClient({
+        pull: async () => {
+          await pulled
+          return { ok: true, library: serverLibrary }
+        },
+      })
+      await renderFresh(createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: PHRASES }]), settingsStore, generationQueue, client)
+
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      await settle(() => expect(enqueue).toHaveBeenCalledWith(PHRASES[0], { french: GEORGE, english: GEORGE }))
+      expect((await settingsStore.load()).voice, 'a guess is not saved while the library may still hold a choice').toBeNull()
+
+      releasePull()
+      await settle(() => {
+        expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in Rachel')
+      })
+      expect((await settingsStore.load()).voice).toEqual(RACHEL)
+      expect(client.pushed.at(-1)?.voice).toEqual(RACHEL)
+    })
+
+    it('saves the detected voice after the first sync when the library pins none', async () => {
+      const settingsStore = createFakeSettingsStore()
+      const client = createFakeLibrarySyncClient({ pull: async () => ({ ok: true, library: { ...serverLibrary, voice: undefined } }) })
+      await renderFresh(createFakeDeckStore([]), settingsStore, createFakeGenerationQueue(), client)
+      await settle(() => expect(container.querySelector('[data-testid="deck-row-d1"]')).not.toBeNull())
+
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      await settle(() => {
+        expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in George')
+      })
+      expect((await settingsStore.load()).voice).toEqual(GEORGE)
+    })
+  })
+
   it('says on the row when a Phrase\'s audio could not be made', async () => {
     const generationQueue = createFakeGenerationQueue()
     vi.spyOn(generationQueue, 'statusFor').mockImplementation((id) => (id === 'p2' ? { kind: 'failed' } : undefined))
