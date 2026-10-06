@@ -1,102 +1,85 @@
 // @vitest-environment node
+import { randomBytes } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { createClient } from '@supabase/supabase-js'
 import { createClipStore, createLibraryStore, createPool } from './db.js'
 import { createClipJobStore } from './clip-job-store.js'
 import { clipJobStoreContract, jobFields } from './clip-job-store.test-support.js'
+import { computeClipHash } from './clip-hash.js'
 import { deleteClips } from '../scripts/clip-delete.mjs'
 
 /**
- * The only tests here that touch a real Postgres.
+ * The only tests here that touch a real Postgres and a real Storage.
  *
- * Every other server test runs against `fakePool` — which proves the code
- * calls the SQL it means to, and proves nothing at all about whether Postgres
- * accepts it. That gap is not theoretical: `ANY($1::bigint[])`,
- * `octet_length`, `ADD COLUMN IF NOT EXISTS` and the `byte_size` backfill are
- * all dialect, and a fake will happily accept SQL no database would run.
+ * Every other server test runs against fakes — which proves the code calls the
+ * SQL and the Storage API it means to, and proves nothing at all about whether
+ * Postgres or Storage accepts them. That gap is not theoretical:
+ * `ANY($1::bigint[])`, `octet_length` and `DELETE … RETURNING` are dialect,
+ * and a fake will happily accept SQL no database would run.
  *
- * Opt-in, because it needs a live server: set `SMOKE_DATABASE_URL` to a
- * database this may freely DROP tables in — never the real one.
+ * Opt-in, because it needs the local Supabase stack (`npx supabase start`:
+ * Postgres + Auth + Storage). It owns nothing it does not create: a unique
+ * schema (the tables live there, via `search_path`) and a unique private
+ * bucket, both removed afterwards, so it can share the stack with anything
+ * else running.
  *
- *   docker compose up -d postgres
- *   SMOKE_DATABASE_URL=postgres://user:pass@host:5432/scratch npm test
+ *   SMOKE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres \
+ *   SMOKE_SUPABASE_URL=http://127.0.0.1:54321 \
+ *   SMOKE_SUPABASE_SECRET_KEY=<secret key from `npx supabase status -o env`> \
+ *   npx vitest run server/db.postgres.test.js
  *
- * Skipped, not failed, when unset: an unavailable database is a missing
+ * Skipped, not failed, when unset: an unavailable stack is a missing
  * environment, not a broken change.
  */
-const url = process.env.SMOKE_DATABASE_URL
+const databaseUrl = process.env.SMOKE_DATABASE_URL
+const supabaseUrl = process.env.SMOKE_SUPABASE_URL
+const secretKey = process.env.SMOKE_SUPABASE_SECRET_KEY
+const url = databaseUrl && supabaseUrl && secretKey ? databaseUrl : undefined
 
 describe.skipIf(!url)('server SQL against a real Postgres', () => {
+  const suffix = randomBytes(4).toString('hex')
+  const schema = `smoke_${suffix}`
+  const bucket = `smoke-${suffix}`
+  const supabase = supabaseUrl ? createClient(supabaseUrl, secretKey, { auth: { persistSession: false, autoRefreshToken: false } }) : null
+  let admin
   let pool
+  let storage
 
   beforeAll(async () => {
-    pool = createPool(url)
-    await pool.query('DROP TABLE IF EXISTS clip_jobs, clips, library_versions, libraries')
+    admin = createPool(url)
+    await admin.query(`CREATE SCHEMA ${schema}`)
+    pool = createPool(`${url}${url.includes('?') ? '&' : '?'}options=${encodeURIComponent(`-c search_path=${schema}`)}`)
+    const { error } = await supabase.storage.createBucket(bucket, { public: false })
+    if (error) throw error
+    storage = supabase.storage.from(bucket)
   })
 
   afterAll(async () => {
-    await pool.query('DROP TABLE IF EXISTS clip_jobs, clips, library_versions, libraries')
     await pool.end()
+    await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)
+    await admin.end()
+    // `emptyBucket` is queued, not immediate; remove the objects directly.
+    const { data } = await storage.list('', { limit: 1000 })
+    if (data?.length) await storage.remove(data.map((o) => o.name))
+    await supabase.storage.deleteBucket(bucket)
   })
 
-  it('upgrades a clips table that shipped before byte_size existed', async () => {
-    // The schema actually deployed today: no byte_size, and rows in it.
-    await pool.query(`
-      CREATE TABLE clips (
-        hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL, mime TEXT NOT NULL,
-        duration_ms BIGINT NOT NULL, created_at BIGINT NOT NULL
-      )`)
-    await pool.query('INSERT INTO clips (hash, bytes, mime, duration_ms, created_at) VALUES ($1,$2,$3,$4,$5)', [
-      'legacy',
-      Buffer.alloc(5000, 7),
-      'audio/mpeg',
-      1000,
-      1,
-    ])
+  const newClipStore = (options) => createClipStore(pool, { storage, maxBytes: 1_000_000, logger: { warn() {}, error() {} }, ...options })
+  const objectNames = async () => (await storage.list('', { limit: 1000 })).data.map((o) => o.name).sort()
 
-    const clips = createClipStore(pool, { maxBytes: 20_000, evictBatchSize: 2 })
+  // Detect existing audio (#4): `ANY($1::text[])` is dialect a fake accepts unconditionally.
+  it('answers which of a batch of hashes it holds', async () => {
+    const clips = newClipStore()
     await clips.init()
+    await clips.put({ hash: 'held-a', bytes: Buffer.alloc(100, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-    const { rows } = await pool.query('SELECT byte_size FROM clips WHERE hash = $1', ['legacy'])
-    expect(Number(rows[0].byte_size), 'the backfill must size rows written before the column existed').toBe(5000)
-
-    // Second boot changes nothing — the restart path, run on every deploy.
-    await clips.init()
-    const { rows: nulls } = await pool.query('SELECT count(*) c FROM clips WHERE byte_size IS NULL')
-    expect(nulls[0].c).toBe('0')
-    expect(await clips.totalBytes()).toBe(5000)
-  })
-
-  it('upgrades a clips table that shipped before last_used_at existed, backfilling from created_at', async () => {
-    // The shape deployed before S8b: byte_size present, no last_used_at.
-    await pool.query('DROP TABLE IF EXISTS clips')
-    await pool.query(`
-      CREATE TABLE clips (
-        hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL, mime TEXT NOT NULL,
-        duration_ms BIGINT NOT NULL, created_at BIGINT NOT NULL, byte_size BIGINT
-      )`)
-    await pool.query('INSERT INTO clips (hash, bytes, mime, duration_ms, created_at, byte_size) VALUES ($1,$2,$3,$4,$5,$6)', [
-      'legacy',
-      Buffer.alloc(5000, 7),
-      'audio/mpeg',
-      1000,
-      1,
-      5000,
-    ])
-
-    const clips = createClipStore(pool, { maxBytes: 20_000, evictBatchSize: 2 })
-    await clips.init()
-    const { rows } = await pool.query('SELECT last_used_at FROM clips WHERE hash = $1', ['legacy'])
-    expect(Number(rows[0].last_used_at), 'last used when it was made — the most a row written before the column can say').toBe(1)
-
-    await clips.init() // every boot
-    const { rows: nulls } = await pool.query('SELECT count(*) c FROM clips WHERE last_used_at IS NULL')
-    expect(nulls[0].c).toBe('0')
+    expect(await clips.held(['held-a', 'not-held'])).toEqual(new Set(['held-a']))
   })
 
   it('bumps last_used_at on a hit at most once a day, without the hit waiting on it', async () => {
     const DAY = 24 * 60 * 60 * 1000
     const clock = { now: 0 }
-    const clips = createClipStore(pool, { maxBytes: 1_000_000, now: () => clock.now, logger: { warn() {} } })
+    const clips = newClipStore({ now: () => clock.now })
     await clips.init()
     await clips.put({ hash: 'played', bytes: Buffer.alloc(100, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 100 })
     const lastUsed = async () => Number((await pool.query('SELECT last_used_at FROM clips WHERE hash = $1', ['played'])).rows[0].last_used_at)
@@ -116,7 +99,7 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     const DAY = 24 * 60 * 60 * 1000
     const clock = { now: 0 }
     await pool.query('DELETE FROM clips')
-    const clips = createClipStore(pool, { maxBytes: 20_000, evictBatchSize: 2, now: () => clock.now, logger: { warn() {} } })
+    const clips = newClipStore({ maxBytes: 20_000, evictBatchSize: 2, now: () => clock.now })
     await clips.init()
     await clips.put({ hash: 'old-played', bytes: Buffer.alloc(9000, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
     await clips.put({ hash: 'newer-unplayed', bytes: Buffer.alloc(9000, 2), mime: 'audio/mpeg', durationMs: 1, createdAt: 2 })
@@ -133,7 +116,7 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
   })
 
   it('evicts oldest-first to hold the ceiling', async () => {
-    const clips = createClipStore(pool, { maxBytes: 20_000, evictBatchSize: 2 })
+    const clips = newClipStore({ maxBytes: 20_000, evictBatchSize: 2 })
     await clips.init()
     await clips.put({ hash: 'new1', bytes: Buffer.alloc(9000, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 3 })
     await clips.put({ hash: 'new2', bytes: Buffer.alloc(9000, 2), mime: 'audio/mpeg', durationMs: 1, createdAt: 4 })
@@ -147,7 +130,7 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
   })
 
   it('deletes exactly one clip by hash, and a regenerated put for it lands', async () => {
-    const clips = createClipStore(pool, { maxBytes: 1_000_000 })
+    const clips = newClipStore({ maxBytes: 1_000_000 })
     await clips.init()
     await clips.put({ hash: 'regen', bytes: Buffer.alloc(100, 1), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
     await clips.put({ hash: 'keep', bytes: Buffer.alloc(100, 2), mime: 'audio/mpeg', durationMs: 1, createdAt: 10 })
@@ -159,6 +142,63 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
     expect(await clips.get('keep')).not.toBeNull()
     await clips.put({ hash: 'regen', bytes: Buffer.alloc(100, 3), mime: 'audio/mpeg', durationMs: 2, createdAt: 11 })
     expect((await clips.get('regen')).bytes[0], 'the new bytes, not the deleted ones').toBe(3)
+  })
+
+  /**
+   * The Storage half, which no fake can speak for: the real bucket's answers
+   * for "already exists", "not found" and batch remove.
+   */
+  describe('clips in Storage', () => {
+    const fields = { provider: 'elevenlabs', modelId: 'm', voiceId: 'v', lang: 'fr', text: 'bonjour' }
+    const clip = (hash, fill = 1, size = 100) => ({ hash, bytes: Buffer.alloc(size, fill), mime: 'audio/mpeg', durationMs: 5, createdAt: 1 })
+
+    it('round-trips the bytes through Storage, and the object key is the clip hash', async () => {
+      const clips = newClipStore()
+      await clips.init()
+      const hash = computeClipHash(fields)
+      await clips.put(clip(hash, 7))
+
+      expect(await objectNames()).toContain(hash)
+      const got = await clips.get(hash)
+      expect(Buffer.from(got.bytes).equals(Buffer.alloc(100, 7))).toBe(true)
+      expect(got.mime).toBe('audio/mpeg')
+      expect(got.durationMs).toBe(5)
+      await clips.put(clip(hash, 7)) // the second writer of a content address is a no-op
+    })
+
+    it('a row whose object was deleted out from under it misses, and the row is gone', async () => {
+      const clips = newClipStore()
+      await clips.init()
+      await clips.put(clip('orphan-row', 3))
+      expect((await storage.remove(['orphan-row'])).error).toBeNull()
+
+      expect(await clips.get('orphan-row')).toBeNull()
+      const { rows } = await pool.query("SELECT 1 FROM clips WHERE hash = 'orphan-row'")
+      expect(rows).toHaveLength(0)
+    })
+
+    it('eviction removes the evicted objects, so the bucket and the table agree', async () => {
+      await pool.query('DELETE FROM clips')
+      const clips = newClipStore({ maxBytes: 2_500, evictBatchSize: 2 })
+      await clips.init()
+      for (let i = 0; i < 6; i += 1) await clips.put({ ...clip(`ev-${i}`, i, 1000), createdAt: i })
+
+      const { rows } = await pool.query('SELECT hash FROM clips ORDER BY hash')
+      const kept = rows.map((r) => r.hash)
+      expect(kept.length).toBeLessThan(6)
+      expect(kept).toContain('ev-5')
+      expect((await objectNames()).filter((n) => n.startsWith('ev-'))).toEqual(kept)
+    })
+
+    it('delete removes the row and the object', async () => {
+      const clips = newClipStore()
+      await clips.init()
+      await clips.put(clip('gone', 4))
+
+      expect(await clips.delete('gone')).toBe(true)
+      expect(await objectNames()).not.toContain('gone')
+      expect(await clips.delete('gone')).toBe(false)
+    })
   })
 
   it('prunes archived versions by count, and by bytes, never to zero', async () => {
@@ -299,7 +339,7 @@ describe.skipIf(!url)('server SQL against a real Postgres', () => {
    * hash, and above all not their library.
    */
   it('clip-delete removes the clip and job rows for a hash and touches no other row or table', async () => {
-    const clipStore = createClipStore(pool, { maxBytes: 1_000_000 })
+    const clipStore = newClipStore({ maxBytes: 1_000_000 })
     await clipStore.init()
     const clipJobStore = createClipJobStore(pool)
     await clipJobStore.init()

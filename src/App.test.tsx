@@ -17,7 +17,9 @@ import type {
 import { LIBRARY_FORMAT } from './domain'
 import type { BoundedClipCache, ClipCacheUsage, Settings, SettingsStore } from './adapters/storage'
 import type { Voice } from './domain'
-import type { SynthClient, SynthResult } from './adapters/audio/server-synth-client'
+import type { HeldClipLookup, SynthClient, SynthResult } from './adapters/audio/server-synth-client'
+import { computeClipHash } from './adapters/storage/clip-cache'
+import { VOICE_CATALOGUE } from './adapters/audio/voice-catalogue'
 import type { GenerationQueue } from './adapters/audio/generation-queue'
 import type { ErrorLog, LogEntry, NewLogEntry } from './adapters/diagnostics'
 import type { LibrarySyncClient, PullResult, PushResult } from './adapters/sync/library-sync-client'
@@ -495,6 +497,7 @@ async function renderApp(
   databaseTrouble: DatabaseTroubleSource = createFakeDatabaseTrouble(),
   audioElement: AudioElementLike = fakeAudioElement(),
   routeHoldElement: RouteHoldElementLike = fakeRouteHoldElement(),
+  heldLookup?: HeldClipLookup,
 ) {
   await act(async () => {
     root.render(
@@ -512,11 +515,234 @@ async function renderApp(
         databaseTrouble={databaseTrouble}
         audioElement={audioElement}
         routeHoldElement={routeHoldElement}
+        heldLookup={heldLookup}
+        changePassword={async () => ({ ok: true })}
       />,
     )
   })
   await flushMicrotasks()
 }
+
+// Detect existing audio (#4): with every Clip already on the server, a phone
+// with no voice pinned made their choose one — and choosing any other voice
+// than the one the audio was made in regenerated all of it.
+describe('App — existing audio', () => {
+  const GEORGE: Voice = (({ provider, modelId, voiceId }) => ({ provider, modelId, voiceId }))(VOICE_CATALOGUE[2])
+  const PHRASES = [
+    { id: 'p1', french: 'Bonjour', english: 'Hello' },
+    { id: 'p2', french: 'Merci', english: 'Thanks' },
+  ]
+
+  async function serverHoldingAllIn(voice: Voice): Promise<HeldClipLookup> {
+    const hashes = new Set<string>()
+    for (const phrase of PHRASES) {
+      hashes.add(await computeClipHash({ ...voice, lang: 'fr-FR', text: phrase.french }))
+      hashes.add(await computeClipHash({ ...voice, lang: 'en-US', text: phrase.english }))
+    }
+    return { held: async (asked) => new Set(asked.filter((hash) => hashes.has(hash))) }
+  }
+
+  it('pins the voice the audio is in and fetches it, instead of asking them to choose one', async () => {
+    const store = createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: PHRASES }])
+    const settingsStore = createFakeSettingsStore()
+    const generationQueue = createFakeGenerationQueue()
+    const enqueue = vi.spyOn(generationQueue, 'enqueue')
+    await renderApp(
+      store,
+      settingsStore,
+      createFakeSynthClient(),
+      generationQueue,
+      createFakeClipCache(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      await serverHoldingAllIn(GEORGE),
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+    // The survey hashes with `crypto.subtle` — real turns, not a microtask count.
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await flushMicrotasks()
+      })
+      expect(container.querySelector('[data-testid="deck-audio-status"]')?.textContent).toBe('Audio ready for 0 of 2 phrases')
+      expect((await settingsStore.load()).voice).toEqual(GEORGE)
+    })
+    expect(enqueue).toHaveBeenCalledWith(PHRASES[0], { french: GEORGE, english: GEORGE })
+
+    await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await flushMicrotasks()
+      })
+      expect(container.querySelector('[data-testid="drill-blocked"]')?.textContent).toMatch(/getting it now/i)
+    })
+    expect(container.querySelector('[data-testid="drill-open-settings"]')).toBeNull()
+  })
+
+  async function openDeckWith(settingsStore: SettingsStore, generationQueue: GenerationQueue): Promise<void> {
+    await renderApp(
+      createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: PHRASES }]),
+      settingsStore,
+      createFakeSynthClient(),
+      generationQueue,
+      createFakeClipCache(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      await serverHoldingAllIn(GEORGE),
+    )
+    act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+  }
+
+  async function settle(assertion: () => void): Promise<void> {
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await flushMicrotasks()
+      })
+      assertion()
+    })
+  }
+
+  // #6, the owner's own library: Rachel pinned, every Clip on the server in
+  // George. The Deck showed nothing but a count stuck at 0.
+  it('shows on each Phrase the voice its audio is in and that it is not on this phone yet, with the pinned voice and a way to change it', async () => {
+    const RACHEL: Voice = (({ provider, modelId, voiceId }) => ({ provider, modelId, voiceId }))(VOICE_CATALOGUE[0])
+    const generationQueue = createFakeGenerationQueue()
+    const enqueue = vi.spyOn(generationQueue, 'enqueue')
+    await openDeckWith(createFakeSettingsStore({ voice: RACHEL }), generationQueue)
+
+    await settle(() => {
+      expect(container.querySelector('[data-testid="phrase-audio-p1"]')?.textContent).toBe(
+        'Audio done in George · on the server, not on this phone yet',
+      )
+    })
+    expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in Rachel')
+    expect(enqueue, 'fetched in the voice the server holds, never made again in Rachel').toHaveBeenCalledWith(PHRASES[0], {
+      french: GEORGE,
+      english: GEORGE,
+    })
+
+    act(() => click(container.querySelector('[data-testid="change-voice"]')!))
+    expect(container.querySelector('[data-testid="settings-back"]')).not.toBeNull()
+  })
+
+  // The test server, on a fresh browser: the library on the server pins Rachel,
+  // every Clip is stored in George. Detection must not override their choice.
+  describe('a fresh phone, whose library on the server pins a voice', () => {
+    const RACHEL: Voice = (({ provider, modelId, voiceId }) => ({ provider, modelId, voiceId }))(VOICE_CATALOGUE[0])
+    const serverLibrary: Library = {
+      format: LIBRARY_FORMAT,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      exportedAt: 1,
+      decks: [{ id: 'd1', name: 'Home', phrases: PHRASES, createdAt: 1, updatedAt: 1 }],
+      voice: RACHEL,
+    }
+
+    async function renderFresh(
+      store: DeckStore,
+      settingsStore: SettingsStore,
+      generationQueue: GenerationQueue,
+      client: LibrarySyncClient,
+    ): Promise<void> {
+      await renderApp(
+        store,
+        settingsStore,
+        createFakeSynthClient(),
+        generationQueue,
+        createFakeClipCache(),
+        undefined,
+        undefined,
+        client,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        await serverHoldingAllIn(GEORGE),
+      )
+    }
+
+    it('shows the voice the library pins once sync brings it, not the one the audio is in', async () => {
+      const settingsStore = createFakeSettingsStore()
+      const client = createFakeLibrarySyncClient({ pull: async () => ({ ok: true, library: serverLibrary }) })
+      await renderFresh(createFakeDeckStore([]), settingsStore, createFakeGenerationQueue(), client)
+      await settle(() => expect(container.querySelector('[data-testid="deck-row-d1"]')).not.toBeNull())
+
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      await settle(() => {
+        expect(container.querySelector('[data-testid="phrase-audio-p1"]')?.textContent).toBe(
+          'Audio done in George · on the server, not on this phone yet',
+        )
+      })
+      expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in Rachel')
+      expect((await settingsStore.load()).voice).toEqual(RACHEL)
+    })
+
+    it('does not save a detected voice before the first sync, so the library\'s choice is kept', async () => {
+      let releasePull!: () => void
+      const pulled = new Promise<void>((resolve) => (releasePull = resolve))
+      const settingsStore = createFakeSettingsStore()
+      const generationQueue = createFakeGenerationQueue()
+      const enqueue = vi.spyOn(generationQueue, 'enqueue')
+      const client = createFakeLibrarySyncClient({
+        pull: async () => {
+          await pulled
+          return { ok: true, library: serverLibrary }
+        },
+      })
+      await renderFresh(createFakeDeckStore([{ id: 'd1', name: 'Home', phrases: PHRASES }]), settingsStore, generationQueue, client)
+
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      await settle(() => expect(enqueue).toHaveBeenCalledWith(PHRASES[0], { french: GEORGE, english: GEORGE }))
+      expect((await settingsStore.load()).voice, 'a guess is not saved while the library may still hold a choice').toBeNull()
+
+      releasePull()
+      await settle(() => {
+        expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in Rachel')
+      })
+      expect((await settingsStore.load()).voice).toEqual(RACHEL)
+      expect(client.pushed.at(-1)?.voice).toEqual(RACHEL)
+    })
+
+    it('saves the detected voice after the first sync when the library pins none', async () => {
+      const settingsStore = createFakeSettingsStore()
+      const client = createFakeLibrarySyncClient({ pull: async () => ({ ok: true, library: { ...serverLibrary, voice: undefined } }) })
+      await renderFresh(createFakeDeckStore([]), settingsStore, createFakeGenerationQueue(), client)
+      await settle(() => expect(container.querySelector('[data-testid="deck-row-d1"]')).not.toBeNull())
+
+      act(() => click(container.querySelector('[data-testid="deck-row-d1"]')!))
+      await settle(() => {
+        expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in George')
+      })
+      expect((await settingsStore.load()).voice).toEqual(GEORGE)
+    })
+  })
+
+  it('says on the row when a Phrase\'s audio could not be made', async () => {
+    const generationQueue = createFakeGenerationQueue()
+    vi.spyOn(generationQueue, 'statusFor').mockImplementation((id) => (id === 'p2' ? { kind: 'failed' } : undefined))
+    await openDeckWith(createFakeSettingsStore({ voice: GEORGE }), generationQueue)
+
+    await settle(() => {
+      expect(container.querySelector('[data-testid="phrase-audio-p2"]')?.textContent).toBe(
+        'Audio done in George · on the server, not on this phone yet · could not get it onto this phone',
+      )
+    })
+  })
+})
 
 describe('App wired to DeckStore', () => {
   it('loads Decks from the store on mount and renders them', async () => {
@@ -918,9 +1144,9 @@ describe('App wired to the Drill screen', () => {
     await act(async () => click(container.querySelector('[data-testid="drill-deck"]')!))
 
     expect(container.querySelector('[data-testid="drill-title"]')?.textContent).toBe('Home')
-    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrases')
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrase')
     expect(container.querySelector('[data-testid="drill-skipped-count"]')?.textContent).toContain(
-      'no audio yet',
+      'still getting audio',
     )
   })
 
@@ -1937,7 +2163,7 @@ describe('App wired to saved Mixes (T059)', () => {
     expect(container.querySelector('[data-testid="mix-row-m1"]')?.textContent).toContain('1 deck · 1 phrase')
 
     await act(async () => click(container.querySelector('[data-testid="mix-row-m1"]')!))
-    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrases')
+    expect(container.querySelector('[data-testid="drill-phrase-count"]')?.textContent).toBe('1 phrase')
   })
 
   it('pushes the library to the server after a Mix is saved, so a new phone gets it', async () => {

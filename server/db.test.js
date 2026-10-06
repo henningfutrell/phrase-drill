@@ -1,8 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import {
   createLibraryStore,
-  createAuthStore,
   createClipStore,
   waitForDatabase,
   extractPassword,
@@ -15,7 +15,7 @@ import {
   clipStoreMaxBytesFrom,
   createPool,
 } from './db.js'
-import { fakeLibraryPool as fakePool, fakeClipPool } from './pool.test-support.js'
+import { fakeLibraryPool as fakePool, fakeClipPool, fakeClipStorage } from './pool.test-support.js'
 import { createClipJobStore } from './clip-job-store.js'
 
 describe('createLibraryStore (Postgres)', () => {
@@ -258,7 +258,7 @@ describe('createClipStore (Postgres, T063)', () => {
 
   it('creates its table idempotently, on init, before any read', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool)
+    const store = createClipStore(pool, { storage: fakeClipStorage() })
 
     await store.init()
     await store.init() // a second boot against an existing schema must not throw
@@ -266,19 +266,23 @@ describe('createClipStore (Postgres, T063)', () => {
     const creates = pool.queries.filter((q) => q.text.trim().startsWith('CREATE TABLE'))
     expect(creates.length).toBe(2)
     expect(creates[0].text).toContain('IF NOT EXISTS')
-    // bytea, not text/base64: the bytes are stored as bytes (T063).
-    expect(creates[0].text).toContain('BYTEA')
+    // The bytes live in Storage; the row holds only where they are.
+    expect(creates[0].text).not.toMatch(/\bbytes\b/i)
+    expect(creates[0].text).toContain('storage_path TEXT NOT NULL')
+    expect(creates[0].text).toContain('byte_size BIGINT NOT NULL')
+    expect(creates[0].text).toContain('last_used_at BIGINT NOT NULL')
+    expect(pool.queries.some((q) => /ALTER TABLE|octet_length/.test(q.text)), 'no migration debt on boot').toBe(false)
   })
 
   it('returns null for a hash it has never stored', async () => {
-    const store = createClipStore(fakeClipPool())
+    const store = createClipStore(fakeClipPool(), { storage: fakeClipStorage() })
     await store.init()
 
     expect(await store.get('deadbeef')).toBeNull()
   })
 
   it('round-trips the bytes, mime and duration under a content hash', async () => {
-    const store = createClipStore(fakeClipPool())
+    const store = createClipStore(fakeClipPool(), { storage: fakeClipStorage() })
     await store.init()
 
     await store.put({ hash: 'abc123', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1_700_000_000_000 })
@@ -294,7 +298,7 @@ describe('createClipStore (Postgres, T063)', () => {
   // so a delete that missed would leave the broken bytes served forever.
   it('deletes one clip by hash, leaving the rest, so the next put for it lands', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool)
+    const store = createClipStore(pool, { storage: fakeClipStorage() })
     await store.init()
     await store.put({ hash: 'broken', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
     await store.put({ hash: 'other', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
@@ -308,9 +312,30 @@ describe('createClipStore (Postgres, T063)', () => {
     expect((await store.get('broken')).durationMs).toBe(999)
   })
 
+  // Detect existing audio (#4): the device asks which of a batch of content
+  // addresses the store holds, so it can fetch audio that already exists in
+  // whatever voice it was made in rather than generating it again.
+  it('says which of a batch of hashes it holds, without reading any audio', async () => {
+    const storage = fakeClipStorage()
+    const store = createClipStore(fakeClipPool(), { storage })
+    await store.init()
+    await store.put({ hash: 'held-1', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+    await store.put({ hash: 'held-2', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+    const downloads = storage.download
+    storage.download = async () => {
+      throw new Error('held() must not download audio')
+    }
+
+    const held = await store.held(['held-1', 'missing', 'held-2'])
+
+    expect([...held].sort()).toEqual(['held-1', 'held-2'])
+    expect(await store.held([]), 'an empty ask is answered without a query').toEqual(new Set())
+    storage.download = downloads
+  })
+
   it('does not throw or overwrite when the same hash is written twice', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool)
+    const store = createClipStore(pool, { storage: fakeClipStorage() })
     await store.init()
 
     await store.put({ hash: 'abc123', bytes: BYTES, mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
@@ -320,6 +345,117 @@ describe('createClipStore (Postgres, T063)', () => {
     // definition, so a concurrent double-miss must be a no-op, never an error.
     expect(pool.queries.some((q) => q.text.includes('ON CONFLICT (hash) DO NOTHING'))).toBe(true)
     expect((await store.get('abc123')).durationMs).toBe(250)
+  })
+
+
+  describe('over Storage', () => {
+    function stores(options) {
+      const pool = fakeClipPool()
+      const storage = fakeClipStorage()
+      const logger = { errors: [], warnings: [], error: (msg, fields) => logger.errors.push({ msg, fields }), warn: (msg, fields) => logger.warnings.push({ msg, fields }) }
+      const store = createClipStore(pool, { storage, logger, ...options })
+      return { pool, storage, logger, store }
+    }
+    const put = (store, hash = 'abc123', size = 4) => store.put({ hash, bytes: Buffer.alloc(size, 9), mime: 'audio/mpeg', durationMs: 250, createdAt: 1 })
+
+    it('writes the object under the hash, with its mime, then a row that points at it', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      await put(store)
+
+      expect(storage.calls.upload).toEqual([{ path: 'abc123', options: { contentType: 'audio/mpeg', upsert: false } }])
+      expect(pool.rows.get('abc123').storagePath).toBe('abc123')
+    })
+
+    it('writes no row when the upload fails, so a row never points at a missing object', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      storage.upload = async () => ({ data: null, error: { message: 'bucket not found', status: 404 } })
+
+      await expect(put(store)).rejects.toThrow(/bucket not found/)
+      expect(pool.rows.size).toBe(0)
+    })
+
+    it('treats an object that already exists as written, and still records the row', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      storage.objects.set('abc123', { bytes: Buffer.alloc(4, 9) }) // a put that died after the upload
+
+      await put(store)
+
+      expect(pool.rows.has('abc123')).toBe(true)
+    })
+
+    it('misses, quietly, for a hash with no row', async () => {
+      const { storage, store } = stores()
+      await store.init()
+
+      expect(await store.get('nope')).toBeNull()
+      expect(storage.calls.remove).toEqual([])
+    })
+
+    it('on a row whose object is gone: logs at error level, deletes the row, and misses', async () => {
+      const { pool, storage, logger, store } = stores()
+      await store.init()
+      await put(store)
+      storage.objects.delete('abc123')
+
+      expect(await store.get('abc123')).toBeNull()
+      expect(pool.rows.has('abc123'), 'the next request regenerates rather than failing again').toBe(false)
+      expect(logger.errors).toHaveLength(1)
+      expect(JSON.stringify(logger.errors[0]), 'never the hash, which is phrase-derived').not.toContain('abc123')
+    })
+
+    it('does not delete the row for a download failure that is not "missing"', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      await put(store)
+      storage.download = async () => ({ data: null, error: { message: 'upstream timeout', status: 504 } })
+
+      await expect(store.get('abc123')).rejects.toThrow(/upstream timeout/)
+      expect(pool.rows.has('abc123')).toBe(true)
+    })
+
+    it('delete removes the row, then the object', async () => {
+      const { pool, storage, store } = stores()
+      await store.init()
+      await put(store)
+
+      expect(await store.delete('abc123')).toBe(true)
+      expect(await store.delete('abc123')).toBe(false)
+      expect(pool.rows.size).toBe(0)
+      expect(storage.objects.size).toBe(0)
+      expect(storage.calls.remove).toEqual([['abc123']])
+    })
+
+    it('a failed remove leaves an orphan object, is logged, and does not fail the request', async () => {
+      const { storage, logger, store } = stores()
+      await store.init()
+      await put(store)
+      storage.failRemove = true
+
+      expect(await store.delete('abc123')).toBe(true)
+      expect(storage.objects.size, 'the orphan').toBe(1)
+      expect(logger.errors.length + logger.warnings.length).toBeGreaterThan(0)
+    })
+
+    it('eviction removes the evicted objects, in batches of at most 200', async () => {
+      const { storage, store } = stores({ maxBytes: 1_000, evictBatchSize: 500 })
+      await store.init()
+      for (let i = 0; i < 11; i += 1) await put(store, `clip-${String(i).padStart(2, '0')}`, 100)
+
+      expect(storage.objects.has('clip-00')).toBe(false)
+      expect(storage.objects.has('clip-10')).toBe(true)
+      expect(storage.objects.size).toBe(9)
+
+      const big = stores({ maxBytes: 600_000, evictBatchSize: 500 })
+      await big.store.init()
+      for (let i = 0; i < 450; i += 1) await put(big.store, `c${String(i).padStart(3, '0')}`, 1_000)
+      await put(big.store, 'last', 300_000) // 750 KB over a 600 KB ceiling: the sweep deletes ~210 rows
+      expect(big.storage.calls.remove.length).toBeGreaterThan(1)
+      for (const batch of big.storage.calls.remove) expect(batch.length).toBeLessThanOrEqual(200)
+      expect(big.storage.objects.size).toBe(big.pool.rows.size)
+    })
   })
 
 })
@@ -340,26 +476,9 @@ describe('createClipStore — the growth bound (T071)', () => {
     createdAt,
   })
 
-  it('adds byte_size idempotently and backfills rows written before it existed', async () => {
-    const pool = fakeClipPool()
-    const store = createClipStore(pool)
-
-    await store.init()
-    await store.init()
-
-    // The deployed database already has `clips` (T063) with no `byte_size`.
-    // The change has to reach it on a redeploy with no manual step, which is
-    // `ADD COLUMN IF NOT EXISTS` plus a backfill that matches nothing the
-    // second time — docs/server.md "Schema: creation and change".
-    const alters = pool.queries.filter((q) => q.text.includes('ALTER TABLE clips') && q.text.includes('byte_size'))
-    expect(alters.length).toBe(2)
-    expect(alters[0].text).toContain('ADD COLUMN IF NOT EXISTS')
-    expect(pool.queries.some((q) => q.text.includes('SET byte_size = octet_length(bytes)'))).toBe(true)
-  })
-
   it('stores nothing extra and evicts nothing while under the ceiling', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool, { maxBytes: 1_000 })
+    const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 1_000 })
     await store.init()
 
     await store.put(clip('a', 100, 1))
@@ -372,7 +491,7 @@ describe('createClipStore — the growth bound (T071)', () => {
 
   it('evicts least-recently-used down to 90% of the ceiling once a put crosses it', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool, { maxBytes: 1_000 })
+    const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 1_000 })
     await store.init()
 
     for (let i = 0; i < 11; i += 1) await store.put(clip(`clip-${i}`, 100, i))
@@ -396,20 +515,9 @@ describe('createClipStore — the growth bound (T071)', () => {
       const clock = { now: 1_000 }
       const pool = fakeClipPool()
       const logger = { warnings: [], warn: (msg, fields) => logger.warnings.push({ msg, fields }) }
-      const store = createClipStore(pool, { maxBytes: 1_000, now: () => clock.now, logger, ...options })
+      const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 1_000, now: () => clock.now, logger, ...options })
       return { clock, pool, logger, store }
     }
-
-    it('adds last_used_at idempotently and backfills it from created_at', async () => {
-      const { pool, store } = storeAt()
-      await store.init()
-      await store.init()
-
-      const alters = pool.queries.filter((q) => q.text.includes('ALTER TABLE clips') && q.text.includes('last_used_at'))
-      expect(alters.length).toBe(2)
-      expect(alters[0].text).toContain('ADD COLUMN IF NOT EXISTS last_used_at BIGINT')
-      expect(pool.queries.some((q) => q.text.includes('SET last_used_at = created_at WHERE last_used_at IS NULL'))).toBe(true)
-    })
 
     it('stamps a new clip as used when it is stored', async () => {
       const { pool, store } = storeAt()
@@ -489,7 +597,7 @@ describe('createClipStore — the growth bound (T071)', () => {
 
   it('keeps evicting across more rows than one sweep reads', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool, { maxBytes: 1_000, evictBatchSize: 3 })
+    const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 1_000, evictBatchSize: 3 })
     await store.init()
 
     for (let i = 0; i < 10; i += 1) await store.put(clip(`clip-${i}`, 100, i))
@@ -505,7 +613,7 @@ describe('createClipStore — the growth bound (T071)', () => {
 
   it('never issues a statement naming any table but clips', async () => {
     const pool = fakeClipPool()
-    const store = createClipStore(pool, { maxBytes: 200 })
+    const store = createClipStore(pool, { storage: fakeClipStorage(), maxBytes: 200 })
     await store.init()
     for (let i = 0; i < 10; i += 1) await store.put(clip(`clip-${i}`, 100, i))
     await store.get('clip-9')
@@ -662,150 +770,6 @@ describe('clipStoreMaxBytesFrom (T082)', () => {
   })
 })
 
-/**
- * A minimal stand-in for a `pg` `Pool` covering `users`/`sessions` — real
- * enough to exercise `createAuthStore`'s SQL (two idempotent `CREATE TABLE
- * IF NOT EXISTS`, a unique-username insert that raises Postgres's real
- * `23505` violation code on a duplicate, and keyed session CRUD) without a
- * live Postgres.
- */
-function fakeAuthPool() {
-  let tablesCreated = false
-  const users = new Map() // username -> row
-  const sessions = new Map() // token_hash -> row
-  const queries = []
-
-  return {
-    queries,
-    async query(text, params = []) {
-      queries.push({ text, params })
-      const sql = text.trim()
-
-      if (sql.startsWith('CREATE TABLE')) {
-        tablesCreated = true
-        return { rows: [] }
-      }
-
-      if (sql.startsWith('SELECT') && sql.includes('FROM users')) {
-        if (!tablesCreated) throw new Error('relation "users" does not exist')
-        const [username] = params
-        const row = users.get(username)
-        // Column aliases (`AS "passwordHash"` etc.) are applied by Postgres
-        // itself, so a real query already comes back camelCase — this fake
-        // shapes its rows the same way `createAuthStore`'s SQL asks for.
-        return { rows: row ? [{ id: row.id, username: row.username, passwordHash: row.password_hash, createdAt: row.created_at }] : [] }
-      }
-
-      if (sql.startsWith('INSERT INTO users')) {
-        if (!tablesCreated) throw new Error('relation "users" does not exist')
-        const [id, username, passwordHash, createdAt] = params
-        if (users.has(username)) {
-          const err = new Error('duplicate key value violates unique constraint "users_username_key"')
-          err.code = '23505'
-          throw err
-        }
-        users.set(username, { id, username, password_hash: passwordHash, created_at: createdAt })
-        return { rows: [] }
-      }
-
-      if (sql.startsWith('SELECT') && sql.includes('FROM sessions')) {
-        if (!tablesCreated) throw new Error('relation "sessions" does not exist')
-        const [tokenHash] = params
-        const row = sessions.get(tokenHash)
-        return { rows: row ? [{ userId: row.user_id, expiresAt: row.expires_at }] : [] }
-      }
-
-      if (sql.startsWith('INSERT INTO sessions')) {
-        if (!tablesCreated) throw new Error('relation "sessions" does not exist')
-        const [tokenHash, userId, createdAt, expiresAt] = params
-        sessions.set(tokenHash, { token_hash: tokenHash, user_id: userId, created_at: createdAt, expires_at: expiresAt })
-        return { rows: [] }
-      }
-
-      if (sql.startsWith('DELETE FROM sessions')) {
-        if (!tablesCreated) throw new Error('relation "sessions" does not exist')
-        const [tokenHash] = params
-        sessions.delete(tokenHash)
-        return { rows: [] }
-      }
-
-      throw new Error(`fakeAuthPool: unrecognized query: ${sql}`)
-    },
-    async end() {},
-  }
-}
-
-describe('createAuthStore (Postgres) — users', () => {
-  it('creates both tables idempotently, on init', async () => {
-    const pool = fakeAuthPool()
-    const store = createAuthStore(pool)
-
-    await store.init()
-    await store.init()
-
-    const createCalls = pool.queries.filter((q) => q.text.trim().startsWith('CREATE TABLE'))
-    expect(createCalls.length).toBe(4) // users + sessions, twice
-    for (const call of createCalls) expect(call.text).toContain('IF NOT EXISTS')
-  })
-
-  it('creates a user, retrievable by username, with the password hash and nothing else guessable', async () => {
-    const store = createAuthStore(fakeAuthPool())
-    await store.init()
-
-    await store.users.create({ id: 'user-1', username: 'the-user', passwordHash: 'scrypt:...', createdAt: 1000 })
-    const row = await store.users.getByUsername('the-user')
-
-    expect(row).toEqual({ id: 'user-1', username: 'the-user', passwordHash: 'scrypt:...', createdAt: 1000 })
-  })
-
-  it('returns null for an unknown username', async () => {
-    const store = createAuthStore(fakeAuthPool())
-    await store.init()
-
-    expect(await store.users.getByUsername('nobody')).toBeNull()
-  })
-
-  it('refuses to create a second user with an existing username, rather than silently overwriting', async () => {
-    const store = createAuthStore(fakeAuthPool())
-    await store.init()
-
-    await store.users.create({ id: 'user-1', username: 'the-user', passwordHash: 'hash-1', createdAt: 1000 })
-    await expect(store.users.create({ id: 'user-2', username: 'the-user', passwordHash: 'hash-2', createdAt: 2000 })).rejects.toThrow()
-
-    const row = await store.users.getByUsername('the-user')
-    expect(row.id).toBe('user-1') // untouched by the rejected attempt
-  })
-})
-
-describe('createAuthStore (Postgres) — sessions', () => {
-  it('round-trips a created session through get, keyed by token hash', async () => {
-    const store = createAuthStore(fakeAuthPool())
-    await store.init()
-
-    await store.sessions.create('hash-abc', 'user-1', 1000, 999_000)
-    const row = await store.sessions.get('hash-abc')
-
-    expect(row).toEqual({ userId: 'user-1', expiresAt: 999_000 })
-  })
-
-  it('returns null for an unknown token hash', async () => {
-    const store = createAuthStore(fakeAuthPool())
-    await store.init()
-
-    expect(await store.sessions.get('nonexistent')).toBeNull()
-  })
-
-  it('deletes a session so it no longer resolves', async () => {
-    const store = createAuthStore(fakeAuthPool())
-    await store.init()
-
-    await store.sessions.create('hash-abc', 'user-1', 1000, 999_000)
-    await store.sessions.delete('hash-abc')
-
-    expect(await store.sessions.get('hash-abc')).toBeNull()
-  })
-})
-
 describe('waitForDatabase', () => {
   it('resolves immediately once the pool answers a query', async () => {
     const pool = { query: vi.fn().mockResolvedValue({ rows: [] }) }
@@ -858,23 +822,36 @@ describe('extractPassword', () => {
   })
 })
 
-describe('sslConfigFor (T053: Render deploy)', () => {
+describe('sslConfigFor', () => {
+  const supabaseCa = readFileSync(new URL('./certs/supabase-prod-ca.crt', import.meta.url), 'utf8')
+
   it('requires no SSL for the local docker-compose hostname', () => {
     expect(sslConfigFor('postgres://phrase_drill:phrase_drill@postgres:5432/phrase_drill')).toBeUndefined()
   })
 
-  it('requires no SSL for localhost', () => {
+  it('requires no SSL for localhost and loopback addresses', () => {
     expect(sslConfigFor('postgres://phrase_drill:phrase_drill@localhost:5432/phrase_drill')).toBeUndefined()
+    expect(sslConfigFor('postgresql://postgres:postgres@127.0.0.1:54322/postgres')).toBeUndefined()
   })
 
-  it('requires no SSL for a Render internal hostname (private network, no domain suffix)', () => {
-    expect(sslConfigFor('postgres://user:pw@dpg-abc123-a:5432/phrase_drill')).toBeUndefined()
+  it('verifies a Supabase session-pooler host against the pinned Supabase CA', () => {
+    expect(sslConfigFor('postgres://postgres.abcdefgh:pw@aws-0-eu-west-3.pooler.supabase.com:5432/postgres')).toEqual({ ca: supabaseCa })
   })
 
-  it('relaxes certificate verification, scoped to the connection, for a Render external hostname', () => {
-    expect(sslConfigFor('postgres://user:pw@dpg-abc123-a.oregon-postgres.render.com:5432/phrase_drill')).toEqual({
-      rejectUnauthorized: false,
-    })
+  it('verifies a direct Supabase database host against the same CA', () => {
+    expect(sslConfigFor('postgres://postgres:pw@db.abcdefgh.supabase.co:5432/postgres')).toEqual({ ca: supabaseCa })
+  })
+
+  it('pins a real certificate, not an empty or placeholder file', () => {
+    expect(supabaseCa).toContain('-----BEGIN CERTIFICATE-----')
+  })
+
+  it('no longer relaxes verification for a Render external hostname', () => {
+    expect(() => sslConfigFor('postgres://user:pw@dpg-abc123-a.oregon-postgres.render.com:5432/phrase_drill')).toThrow(/no TLS trust rule/)
+  })
+
+  it('refuses an unknown remote host rather than connecting without verification', () => {
+    expect(() => sslConfigFor('postgres://user:pw@db.example.com:5432/app')).toThrow(/db\.example\.com/)
   })
 
   it('returns undefined for an unparsable connection string, rather than throwing', () => {
@@ -895,7 +872,7 @@ describe('sslConfigFor (T053: Render deploy)', () => {
  * library; staying up through a database blip is the whole point.
  */
 describe('createPool — a dead idle connection must not kill the process (T088)', () => {
-  const URL_WITH_PASSWORD = 'postgres://phrase_drill:s3cr3t-pw@db.example:5432/phrase_drill'
+  const URL_WITH_PASSWORD = 'postgres://phrase_drill:s3cr3t-pw@localhost:5432/phrase_drill'
 
   it('handles the pool error event instead of letting Node rethrow it', async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -929,7 +906,7 @@ describe('createPool — a dead idle connection must not kill the process (T088)
 
   it('redacts the database password even when the caller passes no logger', async () => {
     // docs/server.md "Provable: no key can leak". A pool built by a script
-    // (scripts/useradd.mjs, scripts/restore-drill.mjs) has no configured
+    // (scripts/restore-drill.mjs) has no configured
     // logger, and a driver error message can carry the connection string.
     const written = []
     const pool = createPool(URL_WITH_PASSWORD, { write: (line) => written.push(line) })

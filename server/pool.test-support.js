@@ -169,11 +169,10 @@ export function fakeLibraryPool() {
 }
 
 /**
- * `clips` (T063), including the `byte_size` column and the eviction sweep
- * T071 added, and `last_used_at` (S8b) with the once-a-day bump. The real
- * driver maps `bytea` to a `Buffer` in both directions, which is what this
- * stores and returns. `rows` is exposed so a test can read `lastUsedAt`, and
- * `failBump`/`holdBump` make the bump fail or never answer.
+ * `clips` (T063): metadata only — the bytes live in Storage (`fakeClipStorage`).
+ * Models `byte_size`, the eviction sweep (T071) and `last_used_at` (S8b) with
+ * its once-a-day bump. `rows` is exposed so a test can read `lastUsedAt` and
+ * `storagePath`, and `failBump`/`holdBump` make the bump fail or never answer.
  */
 export function fakeClipPool() {
   const created = new Set()
@@ -197,20 +196,6 @@ export function fakeClipPool() {
       }
       if (!created.has('clips')) throw new Error('relation "clips" does not exist')
 
-      // `ADD COLUMN IF NOT EXISTS` against a table this fake creates with the
-      // column already present: a no-op, exactly as in Postgres.
-      if (sql.startsWith('ALTER TABLE')) return { rows: [] }
-
-      if (sql.startsWith('UPDATE clips SET byte_size')) {
-        for (const row of rows.values()) if (row.byteSize === null || row.byteSize === undefined) row.byteSize = row.bytes.byteLength
-        return { rows: [] }
-      }
-
-      if (sql.startsWith('UPDATE clips SET last_used_at = created_at')) {
-        for (const row of rows.values()) if (row.lastUsedAt === null || row.lastUsedAt === undefined) row.lastUsedAt = row.createdAt
-        return { rows: [] }
-      }
-
       // `UPDATE clips SET last_used_at = $2 WHERE hash = $1 AND last_used_at < $3`
       if (sql.startsWith('UPDATE clips SET last_used_at')) {
         if (pool.failBump) throw new Error('bump failed')
@@ -232,26 +217,38 @@ export function fakeClipPool() {
         return { rows: ordered.slice(0, params[0]).map((r) => ({ hash: r.hash, byteSize: String(r.byteSize) })) }
       }
 
-      if (sql.startsWith('SELECT')) {
+      if (sql.startsWith('SELECT hash FROM clips WHERE hash = ANY')) {
+        return { rows: params[0].filter((hash) => rows.has(hash)).map((hash) => ({ hash })) }
+      }
+
+      if (sql.startsWith('SELECT storage_path')) {
         const row = rows.get(params[0])
-        return { rows: row ? [{ bytes: row.bytes, mime: row.mime, durationMs: row.durationMs }] : [] }
+        return { rows: row ? [{ storagePath: row.storagePath, mime: row.mime, durationMs: row.durationMs }] : [] }
       }
 
       if (sql.startsWith('INSERT')) {
         if (!sql.includes('last_used_at')) throw new Error(`fakeClipPool: an INSERT must set last_used_at: ${sql}`)
-        const [hash, bytes, mime, durationMs, createdAt, byteSize, lastUsedAt] = params
+        if (sql.includes('bytes')) throw new Error(`fakeClipPool: the table has no bytes column: ${sql}`)
+        const [hash, storagePath, mime, durationMs, createdAt, byteSize, lastUsedAt] = params
         // Mirrors `ON CONFLICT (hash) DO NOTHING`: the first write for a
         // content address wins and later ones are silently no-ops.
-        if (!rows.has(hash)) rows.set(hash, { hash, bytes, mime, durationMs, createdAt, byteSize, lastUsedAt })
+        if (!rows.has(hash)) rows.set(hash, { hash, storagePath, mime, durationMs, createdAt, byteSize, lastUsedAt })
         return { rows: [] }
       }
 
       if (sql.startsWith('DELETE')) {
+        if (!sql.includes('RETURNING storage_path')) throw new Error(`fakeClipPool: a DELETE must RETURN storage_path: ${sql}`)
         // Eviction deletes `ANY($1::text[])`; `delete(hash)` deletes `= $1`.
         const hashes = Array.isArray(params[0]) ? params[0] : [params[0]]
-        let rowCount = 0
-        for (const hash of hashes) if (rows.delete(hash)) rowCount += 1
-        return { rows: [], rowCount }
+        const deleted = []
+        for (const hash of hashes) {
+          const row = rows.get(hash)
+          if (row) {
+            deleted.push({ storagePath: row.storagePath })
+            rows.delete(hash)
+          }
+        }
+        return { rows: deleted, rowCount: deleted.length }
       }
 
       throw new Error(`fakeClipPool: unrecognized query: ${sql}`)
@@ -259,4 +256,38 @@ export function fakeClipPool() {
     async end() {},
   }
   return pool
+}
+
+/**
+ * In-memory stand-in for `supabase.storage.from('clips')`: `upload`,
+ * `download` and `remove`, each resolving `{ data, error }` the way
+ * supabase-js does — it does not throw. `objects` is exposed so a test can
+ * delete an object out from under a row, and `failRemove` makes `remove` fail.
+ */
+export function fakeClipStorage() {
+  const objects = new Map()
+  const calls = { upload: [], remove: [] }
+  return {
+    objects,
+    calls,
+    /** Set to make `remove` resolve an error. */
+    failRemove: false,
+    async upload(path, body, options) {
+      calls.upload.push({ path, options })
+      if (objects.has(path)) return { data: null, error: { message: 'The resource already exists', statusCode: '409', status: 400 } }
+      objects.set(path, { bytes: Buffer.from(body), contentType: options?.contentType })
+      return { data: { path }, error: null }
+    },
+    async download(path) {
+      const object = objects.get(path)
+      if (!object) return { data: null, error: { message: 'Object not found', statusCode: '404', status: 400 } }
+      return { data: new Blob([object.bytes], { type: object.contentType }), error: null }
+    },
+    async remove(paths) {
+      calls.remove.push(paths)
+      if (this.failRemove) return { data: null, error: { message: 'storage unavailable', status: 500 } }
+      for (const path of paths) objects.delete(path)
+      return { data: paths.map((name) => ({ name })), error: null }
+    },
+  }
 }

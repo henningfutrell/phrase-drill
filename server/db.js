@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import pg from 'pg'
 import { createLogger } from './logger.js'
 
@@ -9,10 +10,8 @@ const { Pool } = pg
  * device-side (`format`/`schemaVersion`/`exportedAt`/`decks`), keyed by the
  * session's user id (`sub`, T050) — previously the Keycloak subject, and
  * before that the device-generated 64-hex library key; both deleted along
- * with every caller of them. `createAuthStore` below is the other half
- * (`users`/`sessions`, T050) — same one Postgres instance, one database
- * (`phrase_drill`), no second logical database for a vendor identity
- * provider's own schema any more.
+ * with every caller of them. Identity lives in Supabase Auth, not in
+ * this database.
  *
  * `createLibraryStore` takes an already-constructed pool (or, in tests, a
  * fake with the same `query`/`end` shape) rather than a connection string,
@@ -306,9 +305,31 @@ export const LIBRARY_VERSION_MAX_BYTES = 32 * 1024 * 1024
  */
 export function createClipStore(
   pool,
-  { maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES, evictBatchSize = CLIP_EVICT_BATCH_SIZE, logger = console, now = Date.now } = {},
+  { storage, maxBytes = DEFAULT_CLIP_STORE_MAX_BYTES, evictBatchSize = CLIP_EVICT_BATCH_SIZE, logger = console, now = Date.now } = {},
 ) {
+  if (!storage) throw new Error('createClipStore needs a `storage` (supabase.storage.from(bucket)): the bytes live there, not in the table')
   const evictTo = Math.floor(maxBytes * CLIP_EVICT_TO_FRACTION)
+
+  /**
+   * Takes objects out of Storage after their rows are gone. A failure leaves
+   * an orphan object — storage spent, no wrong answer possible, since nothing
+   * points at it — so it is logged and never fails the request. Batches of at
+   * most `STORAGE_REMOVE_BATCH_SIZE` keep each call small.
+   */
+  async function removeObjects(paths) {
+    for (let i = 0; i < paths.length; i += STORAGE_REMOVE_BATCH_SIZE) {
+      const batch = paths.slice(i, i + STORAGE_REMOVE_BATCH_SIZE)
+      try {
+        const { error } = await storage.remove(batch)
+        if (error) throw error
+      } catch (err) {
+        logger.error('could not remove clip objects from storage — they are orphaned', {
+          count: batch.length,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+  }
 
   async function totalBytes() {
     const { rows } = await pool.query('SELECT COALESCE(SUM(byte_size), 0)::bigint AS total FROM clips')
@@ -356,7 +377,8 @@ export function createClipStore(
         doomed.push(row.hash)
         remaining -= Number(row.byteSize)
       }
-      await pool.query('DELETE FROM clips WHERE hash = ANY($1::text[])', [doomed])
+      const { rows: deleted } = await pool.query('DELETE FROM clips WHERE hash = ANY($1::text[]) RETURNING storage_path AS "storagePath"', [doomed])
+      await removeObjects(deleted.map((row) => row.storagePath))
     }
   }
 
@@ -383,48 +405,58 @@ export function createClipStore(
      * Idempotent: safe on every boot, including against a database that
      * already has the table — the same `CREATE TABLE IF NOT EXISTS` rule the
      * two stores around it follow (docs/server.md "Schema: creation and
-     * change"). Adding this table needs no migration runner and no manual
-     * step: a running deployment gets it on its next restart, and it touches
-     * no existing row.
+     * change").
      *
-     * `byte_size` (T071) is the one column added after the table shipped, so
-     * it follows the documented shape for that: `ADD COLUMN IF NOT EXISTS`
-     * plus a backfill whose `WHERE` matches nothing once it has run. Summing
-     * a narrow integer column is a cheap scan of the heap tuples; summing
-     * `octet_length(bytes)` would detoast every clip on every cache miss,
-     * and `pg_total_relation_size` does not shrink after a DELETE until
-     * VACUUM, which would make the eviction loop empty the table.
-     *
-     * `last_used_at` (S8b) is the second, same shape. Its backfill is
-     * `created_at`: for a row written before the column existed, when it
-     * was made is the most anything can say about when it was last used.
-     * A row an older instance writes during a deploy overlap has it NULL
-     * until the next boot's backfill; Postgres sorts NULL last, so for that
-     * window such a row is evicted last, which is right for a fresh Clip.
+     * The row is metadata only. The audio is the object at `storage_path`
+     * (the content hash) in the `clips` bucket, which is what keeps the 500 MB
+     * database quota for their library. `byte_size` stays on the row so the
+     * eviction ceiling sums a narrow integer column instead of listing the
+     * bucket.
      */
     async init() {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS clips (
           hash TEXT PRIMARY KEY,
-          bytes BYTEA NOT NULL,
+          storage_path TEXT NOT NULL,
           mime TEXT NOT NULL,
           duration_ms BIGINT NOT NULL,
           created_at BIGINT NOT NULL,
-          byte_size BIGINT,
-          last_used_at BIGINT
+          byte_size BIGINT NOT NULL,
+          last_used_at BIGINT NOT NULL
         )
       `)
-      await pool.query('ALTER TABLE clips ADD COLUMN IF NOT EXISTS byte_size BIGINT')
-      await pool.query('UPDATE clips SET byte_size = octet_length(bytes) WHERE byte_size IS NULL')
-      await pool.query('ALTER TABLE clips ADD COLUMN IF NOT EXISTS last_used_at BIGINT')
-      await pool.query('UPDATE clips SET last_used_at = created_at WHERE last_used_at IS NULL')
     },
 
+    /**
+     * A row whose object is gone is a miss, not a failure: the row is deleted
+     * so the request regenerates the Clip. That regeneration is a billed
+     * provider call, so it is logged at error level — it means the bucket and
+     * the table disagree. Any other download failure throws; the row is kept.
+     */
     async get(hash) {
-      const { rows } = await pool.query('SELECT bytes, mime, duration_ms AS "durationMs" FROM clips WHERE hash = $1', [hash])
+      const { rows } = await pool.query('SELECT storage_path AS "storagePath", mime, duration_ms AS "durationMs" FROM clips WHERE hash = $1', [hash])
       if (rows.length === 0) return null
+      const { data, error } = await storage.download(rows[0].storagePath)
+      if (error) {
+        if (!isObjectNotFound(error)) throw error
+        logger.error('a clip row points at a missing storage object — dropping the row so it regenerates', { message: error.message })
+        await pool.query('DELETE FROM clips WHERE hash = $1 RETURNING storage_path AS "storagePath"', [hash])
+        return null
+      }
       bumpLastUsed(hash)
-      return { bytes: rows[0].bytes, mime: rows[0].mime, durationMs: Number(rows[0].durationMs) }
+      return { bytes: Buffer.from(await data.arrayBuffer()), mime: rows[0].mime, durationMs: Number(rows[0].durationMs) }
+    },
+
+    /**
+     * Which of `hashes` the store holds, as a Set — the row alone, no
+     * download and no last-used bump: being asked about is not being played.
+     * Detect existing audio (#4): it is how a device finds audio already made
+     * in a voice other than the one it has pinned, or with none pinned.
+     */
+    async held(hashes) {
+      if (hashes.length === 0) return new Set()
+      const { rows } = await pool.query('SELECT hash FROM clips WHERE hash = ANY($1::text[])', [hashes])
+      return new Set(rows.map((row) => row.hash))
     },
 
     /**
@@ -434,10 +466,15 @@ export function createClipStore(
      * second write must be a no-op rather than an error or a rewrite.
      */
     async put({ hash, bytes, mime, durationMs, createdAt }) {
+      // Object first, then row: a row never points at an object that does not
+      // exist. The object key is the hash; "already exists" is a put that
+      // died after the upload, or a concurrent double-miss — the same bytes.
+      const { error } = await storage.upload(hash, bytes, { contentType: mime, upsert: false })
+      if (error && !isObjectExists(error)) throw error
       await pool.query(
-        `INSERT INTO clips (hash, bytes, mime, duration_ms, created_at, byte_size, last_used_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO clips (hash, storage_path, mime, duration_ms, created_at, byte_size, last_used_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (hash) DO NOTHING`,
-        [hash, bytes, mime, durationMs, createdAt, bytes.byteLength, createdAt],
+        [hash, hash, mime, durationMs, createdAt, bytes.byteLength, createdAt],
       )
       await evictIfOverBudget()
     },
@@ -450,8 +487,9 @@ export function createClipStore(
      * `scripts/clip-delete.mjs` reports it to the operator.
      */
     async delete(hash) {
-      const { rowCount } = await pool.query('DELETE FROM clips WHERE hash = $1', [hash])
-      return rowCount > 0
+      const { rows } = await pool.query('DELETE FROM clips WHERE hash = $1 RETURNING storage_path AS "storagePath"', [hash])
+      await removeObjects(rows.map((row) => row.storagePath))
+      return rows.length > 0
     },
 
     /** Live size of the store, for the eviction loop and for anyone asking how close the ceiling is. */
@@ -508,110 +546,36 @@ const MIN_CLIP_STORE_MAX_BYTES = 128 * 1024
 const CLIP_EVICT_TO_FRACTION = 0.9
 /** How stale `last_used_at` may get before a hit writes it again: one day (S8b). */
 const LAST_USED_GRAIN_MS = 24 * 60 * 60 * 1000
+/** Objects per `storage.remove` call. */
+const STORAGE_REMOVE_BATCH_SIZE = 200
+/** Storage answers a missing object with `statusCode: '404'` (its `status` is 400). */
+const isObjectNotFound = (error) => error.statusCode === '404' || error.status === 404
+/** ...and a second upload of one key with `statusCode: '409'`. */
+const isObjectExists = (error) => error.statusCode === '409' || error.status === 409
 /** Rows read per eviction sweep: bounded so a badly over-budget table is drained in passes rather than one unbounded result set. */
 const CLIP_EVICT_BATCH_SIZE = 200
 
 /**
- * Identity storage for T050 (replacing Keycloak + the JWT it issued): two
- * tables, `users` (one row per account, created only by `scripts/useradd.mjs`
- * — there is no signup endpoint) and `sessions` (one row per issued token,
- * looked up by the token's SHA-256 hash — never the token itself, so a
- * database leak yields nothing usable). `server/session-auth.js` is the only
- * caller; it owns hashing and expiry logic, this module is SQL only, same
- * split as `createLibraryStore` above.
+ * Decides the `ssl` option `pg` needs, from `DATABASE_URL` alone — no extra
+ * env var. Every remote host must have a named trust rule; there is no
+ * "connect unverified" fallback.
  *
- * Returns `{ init, users: { getByUsername, create }, sessions: { create,
- * get, delete }, close }` — nested to match `createSessionAuth`'s seam
- * (`userStore.getByUsername`, `sessionStore.create`/`get`/`delete`) name for
- * name (T052). `server/index.js` wires `authStore.users` and
- * `authStore.sessions` in directly; `server/auth-store-contract.test.js`
- * pins that the names actually line up, which nothing did before.
- */
-export function createAuthStore(pool) {
-  return {
-    /** Idempotent: safe on every boot, including against a database that already has both tables. */
-    async init() {
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY,
-          username TEXT UNIQUE NOT NULL,
-          password_hash TEXT NOT NULL,
-          created_at BIGINT NOT NULL
-        )
-      `)
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS sessions (
-          token_hash TEXT PRIMARY KEY,
-          user_id TEXT NOT NULL,
-          created_at BIGINT NOT NULL,
-          expires_at BIGINT NOT NULL
-        )
-      `)
-    },
-
-    users: {
-      async getByUsername(username) {
-        const { rows } = await pool.query(
-          'SELECT id, username, password_hash AS "passwordHash", created_at AS "createdAt" FROM users WHERE username = $1',
-          [username],
-        )
-        if (rows.length === 0) return null
-        return { id: rows[0].id, username: rows[0].username, passwordHash: rows[0].passwordHash, createdAt: Number(rows[0].createdAt) }
-      },
-
-      /** Throws (Postgres's own unique-violation, code `23505`) on a duplicate username — an existing account is an error, never a silent overwrite. */
-      async create({ id, username, passwordHash, createdAt }) {
-        await pool.query('INSERT INTO users (id, username, password_hash, created_at) VALUES ($1, $2, $3, $4)', [id, username, passwordHash, createdAt])
-      },
-    },
-
-    sessions: {
-      async create(tokenHash, userId, createdAt, expiresAt) {
-        await pool.query('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)', [
-          tokenHash,
-          userId,
-          createdAt,
-          expiresAt,
-        ])
-      },
-
-      async get(tokenHash) {
-        const { rows } = await pool.query('SELECT user_id AS "userId", expires_at AS "expiresAt" FROM sessions WHERE token_hash = $1', [tokenHash])
-        if (rows.length === 0) return null
-        return { userId: rows[0].userId, expiresAt: Number(rows[0].expiresAt) }
-      },
-
-      async delete(tokenHash) {
-        await pool.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash])
-      },
-    },
-  }
-}
-
-/**
- * Decides the `ssl` option `pg` needs, from `DATABASE_URL` alone — no new
- * env var (T053, deploying to Render). Render's managed Postgres exposes
- * two hostnames for the same database: an *internal* one (`dpg-xxxx-a`, no
- * domain suffix — reachable only on Render's private network) and an
- * *external* one (`dpg-xxxx-a.<region>-postgres.render.com` — reachable
- * from anywhere, TLS required). `render.yaml` wires `DATABASE_URL` from the
- * database's `connectionString` property, which resolves to the *internal*
- * URL when the web service and the database share a region — exactly what
- * this Blueprint sets up — so the common case needs no SSL at all, same as
- * the local `docker-compose.yml` Postgres.
+ * - Supabase (`*.pooler.supabase.com`, `*.supabase.co`): verify the server
+ *   certificate against the pinned Supabase root CA
+ *   (`certs/supabase-prod-ca.crt`, see `certs/README.md`). `pg` verifies the
+ *   hostname too, so this is verify-full.
+ * - A host with no dot (`localhost`, a docker-compose service name such as
+ *   `postgres`) or a loopback address: no SSL, a private link.
+ * - Anything else: throws. A new remote host is a trust decision, and it is
+ *   made here, in code, not by silently skipping verification.
+ * - An unparsable or missing URL: `undefined`; `pg` reports its own error.
  *
- * The external hostname is the one case that needs an `ssl` option:
- * Render's certificate chain is not present in Node's default CA trust
- * store, so a plain `ssl: true` fails with `SELF_SIGNED_CERT_IN_CHAIN`
- * (github.com/brianc/node-postgres#2375; community.render.com/t/…/37079).
- * `rejectUnauthorized: false` is scoped to *this hostname pattern only* —
- * never a blanket default for every connection — because it's the one
- * documented, verified case where Render's own chain, not an attacker's, is
- * what's being accepted. Anyone connecting from off-platform (a one-off
- * `psql`/migration from a laptop against the External Database URL) hits
- * this same hostname and gets the same treatment, which is correct there
- * too: it's still Render's self-signed chain, not a new trust decision.
+ * **Keep `sslmode=` out of the app's `DATABASE_URL`.** `pg` lets the URL's
+ * `sslmode` replace this `ssl` option, which would drop the pinned CA.
+ * (`pg_dump` and `psql` in `scripts/` want `sslmode=require`; they ignore this.)
  */
+const SUPABASE_CA_PATH = new URL('./certs/supabase-prod-ca.crt', import.meta.url)
+
 export function sslConfigFor(connectionString) {
   if (typeof connectionString !== 'string' || connectionString.length === 0) return undefined
   let hostname
@@ -620,8 +584,11 @@ export function sslConfigFor(connectionString) {
   } catch {
     return undefined
   }
-  if (hostname.endsWith('.render.com')) return { rejectUnauthorized: false }
-  return undefined
+  if (hostname.endsWith('.pooler.supabase.com') || hostname.endsWith('.supabase.co')) {
+    return { ca: readFileSync(SUPABASE_CA_PATH, 'utf8') }
+  }
+  if (!hostname.includes('.') || hostname === '127.0.0.1' || hostname === '[::1]') return undefined
+  throw new Error(`database host "${hostname}" has no TLS trust rule — add one to sslConfigFor in server/db.js`)
 }
 
 /**
@@ -641,7 +608,7 @@ export function sslConfigFor(connectionString) {
  * hostname, a firewall, the wrong network — hangs for over a minute per
  * attempt with no output. Combined with `waitForDatabase`'s retry loop that
  * turns a misconfiguration into an apparently frozen process, which is
- * exactly how `scripts/useradd.mjs` was reported. Fail fast; the retry loop
+ * exactly how an operator script was reported. Fail fast; the retry loop
  * above is what provides the patience.
  *
  * **The `error` listener is not optional either (T088).** `pg` attaches an
@@ -661,7 +628,7 @@ export function sslConfigFor(connectionString) {
  * The message and the driver's SQLSTATE go through the redacting logger, never
  * `console.error`, because a driver error can quote the connection string —
  * docs/server.md "Provable: no key can leak". A caller with no logger of its
- * own (`scripts/useradd.mjs`, `scripts/restore-drill.mjs`) gets one that
+ * own (`scripts/restore-drill.mjs`) gets one that
  * redacts this connection string's password, so the safe path is the default
  * rather than something each script has to remember.
  */

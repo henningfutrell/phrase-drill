@@ -4,9 +4,9 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseHashes, deleteClips, describeResult } from './clip-delete.mjs'
+import { parseHashes, deleteClips, describeResult, describeTarget } from './clip-delete.mjs'
 import { createClipStore } from '../server/db.js'
-import { fakeClipPool } from '../server/pool.test-support.js'
+import { fakeClipPool, fakeClipStorage } from '../server/pool.test-support.js'
 import { createMemoryClipJobStore, jobFields } from '../server/clip-job-store.test-support.js'
 
 /**
@@ -61,7 +61,7 @@ describe('parseHashes', () => {
 
 describe('deleteClips', () => {
   async function stores() {
-    const clipStore = createClipStore(fakeClipPool())
+    const clipStore = createClipStore(fakeClipPool(), { storage: fakeClipStorage() })
     await clipStore.init()
     const clipJobStore = createMemoryClipJobStore()
     return { clipStore, clipJobStore }
@@ -104,6 +104,24 @@ describe('describeResult', () => {
   })
 })
 
+describe('describeTarget', () => {
+  it('names host, port and database', () => {
+    expect(describeTarget('postgres://u:p@db.example.com:5432/phrase_drill')).toBe('db.example.com:5432/phrase_drill')
+  })
+
+  it('never contains the password', () => {
+    expect(describeTarget('postgres://u:sup3rs3cret@h:5432/d')).not.toContain('sup3rs3cret')
+  })
+
+  it('assumes port 5432 when the URL has none', () => {
+    expect(describeTarget('postgres://u:p@h/d')).toBe('h:5432/d')
+  })
+
+  it('does not throw on an unparseable string', () => {
+    expect(describeTarget('not a url')).toBe('(unparseable DATABASE_URL)')
+  })
+})
+
 describe('the CLI', () => {
   it('exits 1 with usage when given no hash', async () => {
     const { code, stderr } = await runScript([], { DATABASE_URL: 'postgres://u:p@127.0.0.1:1/none' })
@@ -117,7 +135,7 @@ describe('the CLI', () => {
     expect(stderr).toContain('not-a-hash')
   })
 
-  // The same rule `useradd.mjs` follows (T055): a hand-run CLI with no
+  // A hand-run CLI with no
   // DATABASE_URL is in the wrong environment, and says so at once instead of
   // defaulting to localhost and retrying in silence.
   it('exits 1 naming DATABASE_URL when it is not set', async () => {

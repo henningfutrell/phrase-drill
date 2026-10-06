@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { BackupAge } from '../domain'
 import { BackupStatus, type ExportOutcome } from './BackupStatus'
 import { RestoreControl, type RestoreFileResult } from './RestoreControl'
+import { NewPasswordForm } from './NewPasswordForm'
+import type { PasswordChangeResult } from '../adapters/auth/session-auth'
 
 /** Plain presentation shape for the pinned voice — no adapter types cross into UI. */
 export interface VoiceInfo {
@@ -80,6 +82,7 @@ export function SettingsScreen({
   onConfirmRestore,
   onCancelRestore,
   onOpenDiagnostics,
+  onChangePassword,
   savedAudio,
 }: {
   onBack: () => void
@@ -99,6 +102,7 @@ export function SettingsScreen({
   onConfirmRestore: () => void
   onCancelRestore: () => void
   onOpenDiagnostics: () => void
+  onChangePassword: (password: string) => Promise<PasswordChangeResult>
   /** `undefined` while the cache has not answered yet — never shown as zero. */
   savedAudio: SavedAudioUsage | undefined
 }) {
@@ -106,6 +110,7 @@ export function SettingsScreen({
   const [previewError, setPreviewError] = useState<string | null>(null)
   const previewController = useRef<AbortController | null>(null)
   const [confirmingVoice, setConfirmingVoice] = useState<VoiceOption | null>(null)
+  const [passwordStage, setPasswordStage] = useState<'closed' | 'open' | 'changed'>('closed')
 
   useEffect(() => {
     return () => {
@@ -277,6 +282,42 @@ export function SettingsScreen({
           the drill and the others carry on. It comes back on its own the next time
           you're online.
         </p>
+      </section>
+
+      <section className="settings-section" data-testid="account-section">
+        <h2 className="settings-section-title">Password</h2>
+        <p className="settings-help">
+          Change the password you sign in with. Forgotten it? Ask whoever runs the app to reset it.
+        </p>
+        {passwordStage === 'open' ? (
+          <>
+            <NewPasswordForm onChangePassword={onChangePassword} onChanged={() => setPasswordStage('changed')} />
+            <button
+              type="button"
+              data-testid="cancel-change-password"
+              className="link-action"
+              onClick={() => setPasswordStage('closed')}
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          <>
+            {passwordStage === 'changed' ? (
+              <p className="settings-status settings-status--calm" data-testid="password-changed">
+                Password changed.
+              </p>
+            ) : null}
+            <button
+              type="button"
+              data-testid="open-change-password"
+              className="btn-icon"
+              onClick={() => setPasswordStage('open')}
+            >
+              Change password
+            </button>
+          </>
+        )}
       </section>
 
       <section className="settings-section" data-testid="diagnostics-section">

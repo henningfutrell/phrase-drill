@@ -1,5 +1,12 @@
 /// <reference types="vite/client" />
 
+interface ImportMetaEnv {
+  /** Supabase project URL — public by design; read by `adapters/auth/supabase-env.ts`. */
+  readonly VITE_SUPABASE_URL: string
+  /** Supabase publishable key — public by design. */
+  readonly VITE_SUPABASE_PUBLISHABLE_KEY: string
+}
+
 /**
  * Build identifier, injected by `vite.config.ts`'s `define` at build/dev
  * start (`git rev-parse --short HEAD`) — the visible build stamp T039 asks
