@@ -575,7 +575,7 @@ lowercase hex characters (the whole run is refused, nothing deleted), a missing
 and `clip_jobs` only, through their stores.
 
 **Finding the hash.** It is SHA-256 of `provider|modelId|voiceId|lang|text`.
-From `/app` in the Render Shell (or the repo root locally), fill in the five
+From the repo root (the free Render plan has no Shell), fill in the five
 fields — the voice is the pinned one in the device's Diagnostics, `lang` is
 `fr-FR` for the French side and `en-US` for the English side, `text` is that
 side exactly as stored:

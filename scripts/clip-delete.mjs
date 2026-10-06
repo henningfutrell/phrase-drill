@@ -5,7 +5,8 @@
 // phone is not to hand — on the device, *Redo audio* does the same through
 // `POST /api/tts/regenerate`.
 //
-// Usage (Render Shell, where the service env is present):
+// Usage (repo root, with DATABASE_URL set to the Supabase pooler URI; the
+// free Render plan has no Shell):
 //   node scripts/clip-delete.mjs <hash> [<hash> ...]
 //   npm run clip-delete -- <hash> [<hash> ...]
 //
@@ -87,7 +88,7 @@ async function main() {
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) {
     console.error('DATABASE_URL is not set — nothing to connect to.')
-    console.error('In Render, run this from the service Shell so the service env is present.')
+    console.error('Set it to the Supabase session pooler URI (docs/deploy.md).')
     process.exitCode = 1
     return
   }
