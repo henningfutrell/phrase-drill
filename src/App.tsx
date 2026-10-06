@@ -416,14 +416,18 @@ function App({
   // work, so what is on screen is now stale. Re-read both stores; `revision`
   // changes only when that actually happened, never on an ordinary sync.
   const revision = sync.libraryRevision
+  // The merge can also have adopted the pinned voice from the server, so
+  // settings are re-read with them — a fresh phone otherwise shows no voice,
+  // or one detected from the audio, over the voice their library pins.
   useEffect(() => {
     if (revision === 0) return
     let cancelled = false
-    void Promise.all([deckStore.loadAll(), mixStore.loadAll()]).then(
-      ([loadedDecks, loadedMixes]) => {
+    void Promise.all([deckStore.loadAll(), mixStore.loadAll(), settingsStore.load()]).then(
+      ([loadedDecks, loadedMixes, loadedSettings]) => {
         if (cancelled) return
         setDecks(loadedDecks)
         setMixes(loadedMixes)
+        setSettings(loadedSettings)
         setLibraryUnreadable(false)
       },
       () => {
@@ -440,7 +444,7 @@ function App({
     return () => {
       cancelled = true
     }
-  }, [revision, deckStore, mixStore])
+  }, [revision, deckStore, mixStore, settingsStore])
 
   /**
    * The database itself refusing to be usable, said out loud (T072).
@@ -838,16 +842,37 @@ function App({
 
   /**
    * Pins a voice the audio was found in — the same write as their choosing it,
-   * so it syncs to their other phone. Re-reads the store first: `settings` may
-   * not have loaded yet, and a voice the user chose must never be replaced by one
-   * guessed from the audio.
+   * so it syncs to their other phone. A voice the user chose must never be
+   * replaced by one guessed from the audio, so the guess is saved only once
+   * this phone has synced: before that, their library on the server may pin a
+   * voice this phone has not seen yet, and a voice saved here would win the
+   * merge over it. Until then the guess serves this session only. Re-reads
+   * the store first: `settings` may not have loaded yet.
    */
   function pinDetectedVoice(voice: Voice): void {
     detectedVoiceRef.current = voice
+    if (syncEngine.snapshot().lastSyncAt !== null) saveDetectedVoice()
+  }
+
+  function saveDetectedVoice(): void {
+    const voice = detectedVoiceRef.current
+    if (!voice) return
     void settingsStore.load().then((stored) => {
-      if (!stored.voice) handleChooseVoice(voice)
+      if (detectedVoiceRef.current !== voice) return
+      detectedVoiceRef.current = null
+      const chosen = stored.voice
+      if (chosen) setSettings((current) => ({ ...current, voice: chosen }))
+      else handleChooseVoice(voice)
     })
   }
+
+  // A voice detected before this phone first synced is saved once it has.
+  const lastSyncAt = sync.lastSyncAt
+  useEffect(() => {
+    if (lastSyncAt !== null) saveDetectedVoice()
+    // Only a sync landing decides this; `saveDetectedVoice` reads its state fresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastSyncAt])
 
   function handleChooseVoice(voice: { provider: string; modelId: string; voiceId: string }) {
     setSettings((current) => ({ ...current, voice }))
