@@ -13,8 +13,9 @@ not a confirmed answer. A human should skim and correct rather than treat this a
 
 ## Stack
 
-Existing codebase: React + TypeScript + Vite, static PWA, no server. Not decided by
-this session — inherited from the repo.
+React + TypeScript + Vite PWA, served by a plain-Node server (`server/`) on Render.
+Supabase holds the account (Auth), the phrase library (Postgres) and the Clip bytes
+(Storage). See `AGENTS.md`, `docs/server.md` and `docs/deploy.md`.
 
 ## Users
 
@@ -52,9 +53,12 @@ cadence, and does that job hands-free.
 
 ## Capabilities and Constraints
 
-- No server; all state in IndexedDB. The only network call is to a vision API for
-  handwriting scan, gated by a bring-your-own API key the app owner (not the user)
-  provisions once.
+- The user signs in with an email and a password. The server owns both provider
+  keys (ElevenLabs for Clip audio, Anthropic for Scan and translation); the phone
+  never holds a key. The library lives on the server and syncs to the phone
+  (`docs/sync.md`).
+- IndexedDB on the phone holds a local copy of the library and the Clip cache, so a
+  Drill plays with no network once its Clips are cached.
 - Cadence is fixed in v1: FR, pause, FR, pause, EN, pause, FR, pause. Not
   user-configurable.
 - Domain terms are fixed and binding for this design: Phrase, Deck, Cadence, Step,
@@ -85,8 +89,8 @@ a from-scratch interface design produced from written specification only.
 3. **Interruption is normal, not exceptional.** The screen-lock/backgrounding
    suspension of speech is guaranteed to happen constantly; the UI must expect it
    and recover visibly, never fail silently.
-4. **One person, one phone, no server** shapes every screen: settings holds a
-   personal API key and a backup, not an admin panel.
+4. **One person, one phone** shapes every screen: settings holds the voice, the
+   password and a backup, not an admin panel.
 
 ## Accessibility & Inclusion
 
