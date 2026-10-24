@@ -11,7 +11,7 @@
  * (the ceiling under-counts exactly what it is supposed to bind). It only
  * self-heals at the next launch's `reconcileIndex`.
  *
- * All three tests run the real `clip-cache.ts` against `fake-indexeddb`
+ * All four tests run the real `clip-cache.ts` against `fake-indexeddb`
  * (T084), so a transaction really holds both stores, an abort really rolls
  * back, and a commit is really durable.
  */
@@ -103,5 +103,39 @@ describe('writing a Clip is one transaction', () => {
 
     expect(await residentIn(CLIPS_STORE)).toEqual([])
     expect(await residentIn(CLIP_META_STORE)).toEqual([])
+  })
+
+  it('commits audio and row exactly once when the retry after eviction succeeds', async () => {
+    // T085's quota retry is the second transaction `writeClip` can open. The
+    // first attempt is refused on the META store, eviction makes room, and the
+    // retry writes the pair again. Each attempt must span both stores, so the
+    // refused one leaves nothing behind and the retry leaves exactly one Clip
+    // and one row — not a stray audio write, and not a lost index row.
+    const cache = createIndexedDbClipCache()
+    for (const hash of ['old-a', 'old-b', 'old-c']) await cache.put(clipOf(hash))
+
+    idbOperations.length = 0
+    failNextWriteTo(CLIP_META_STORE, 'QuotaExceededError', 1)
+
+    await cache.put(clipOf('fresh'))
+
+    // Eviction ran (the oldest Clip went), and the stores agree with each
+    // other through a fresh connection.
+    expect(await residentIn(CLIPS_STORE)).toEqual(['fresh', 'old-b', 'old-c'])
+    expect(await residentIn(CLIP_META_STORE)).toEqual(['fresh', 'old-b', 'old-c'])
+
+    // The in-memory index counts the retried Clip once.
+    expect(await cache.has('fresh')).toBe(true)
+    expect(await cache.usage()).toMatchObject({ clipCount: 3, bytes: 3000 })
+
+    // Two attempts, and each one carried the Clip and its row together.
+    const writes = idbOperations.filter(
+      (op) => op.op === 'put' && (op.store === CLIPS_STORE || op.store === CLIP_META_STORE),
+    )
+    const carriers = [...new Set(writes.map((op) => op.transaction))]
+    expect(carriers).toHaveLength(2)
+    for (const id of carriers) {
+      expect([...(idbTransactions.get(id)?.stores ?? [])].sort()).toEqual([CLIPS_STORE, CLIP_META_STORE].sort())
+    }
   })
 })
