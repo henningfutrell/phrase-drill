@@ -51,6 +51,11 @@ one case and nothing else: a push at the same version or newer is accepted as
 before. The refused device keeps its changes locally and syncs once it
 updates.
 
+The gate is judged inside the write's transaction, against the row it has
+locked with `SELECT … FOR UPDATE` (T095). Before that, the route read the row
+on the pool and took the lock later, so two pushes across a version skew could
+both pass the gate, and the older one then overwrote the newer envelope.
+
 ## The library is kept recoverable, not defended (T071)
 
 This server holds the only off-device copy of a library that cannot be
