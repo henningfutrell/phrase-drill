@@ -906,12 +906,13 @@ state with no separate migration step to remember to run.
 schema.** `…_app_tables.sql` creates the four tables in `init()`'s shape
 (`IF NOT EXISTS`), so a fresh Supabase database has them. 
 `…_security_hardening.sql` turns RLS on for every table, adds per-user policies
-on `libraries` and `library_versions`, revokes every grant from `anon` and
-`authenticated` (also for objects made later), and refuses to finish when a
-public table has RLS off or an API grant, or a public function is `SECURITY
-DEFINER` or has no fixed `search_path`. A new table or function therefore
-needs its own RLS and `SET search_path` in the same change, or the next apply
-fails. `npx supabase start` applies both on a new local stack; at cutover
+on `libraries` and `library_versions` (every operation, own rows only), a
+policy on the shared `clips` and `clip_jobs` cache that admits no row to an
+API role, revokes every grant from `anon` and `authenticated` (also for objects
+made later), and refuses to finish when a public table has RLS off, RLS on and
+no policy, or an API grant, or a public function is `SECURITY DEFINER` or has
+no fixed `search_path`. A new table or function therefore needs its own RLS,
+a policy and `SET search_path` in the same change, or the next apply fails. `npx supabase start` applies both on a new local stack; at cutover
 `migration/supabase/cutover.sh` applies them to the project.
 `server/supabase-migrations.postgres.test.js` proves them against a real
 Postgres (opt-in, `MIGRATIONS_DATABASE_URL`).
