@@ -669,14 +669,14 @@ export function createApp({
     // costs their data. This is the one place both devices' pushes pass
     // through, so it is the only place the rule can be enforced for a
     // client that does not know the rule exists.
-    const stored = await libraryStore.get(key)
-    if (stored && parsed.schemaVersion < storedSchemaVersion(stored.data)) {
-      return sendJson(res, 409, { error: 'stale-client' })
-    }
-
-    // Accepted, whatever it does to the size of their library — the server
-    // cannot tell a client bug from their deleting a deck, and a refusal the user
-    // cannot get past is its own failure. What makes a bad push survivable is
+    //
+    // The gate is judged inside `put`, against the row its transaction has
+    // locked (T095). Read before the lock, two pushes across a version skew
+    // could both pass it, and the older one then overwrote the newer.
+    //
+    // Otherwise accepted, whatever it does to the size of their library —
+    // the server cannot tell a client bug from their deleting a deck, and a
+    // refusal the user cannot get past is its own failure. What makes a bad push survivable is
     // that `libraryStore.put` archives the version it replaces (T071); it is
     // the store's invariant, not a step this route can forget.
     //
@@ -686,7 +686,10 @@ export function createApp({
     // between the two is where a value could change between being checked and
     // being written. Both paths keep the client's bytes now, so the promise
     // holds end to end and this server reshapes nothing it is given.
-    await libraryStore.put(key, raw, Date.now())
+    const admit = (stored) => !stored || parsed.schemaVersion >= storedSchemaVersion(stored.data)
+    if (!(await libraryStore.put(key, raw, Date.now(), { admit }))) {
+      return sendJson(res, 409, { error: 'stale-client' })
+    }
     res.writeHead(204)
     res.end()
   }

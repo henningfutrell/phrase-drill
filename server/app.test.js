@@ -231,9 +231,12 @@ describe('server app (integration, fake upstreams)', () => {
     // How long `/api/tts` waits on a generation before answering 202. Long
     // by default so a test that is not about the 202 never sees one.
     ttsWaitMs = 5_000,
+    // Wraps the real store, for a test that has to hold one request at a
+    // chosen point to force an interleaving (T095).
+    libraryStoreWith = (store) => store,
   } = {}) {
     elevenLabsUpstream = elevenLabsFetch
-    libraryStore = await newLibraryStore()
+    libraryStore = libraryStoreWith(await newLibraryStore())
     clipStore = await newClipStore()
     distDir = mkdtempSync(join(tmpdir(), 'phrase-drill-dist-'))
     mkdirSync(join(distDir, 'assets'), { recursive: true })
@@ -1507,6 +1510,72 @@ describe('server app (integration, fake upstreams)', () => {
 
       const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
       expect(await get.json()).toEqual(current)
+    })
+
+    /**
+     * T095 — the gate above was read outside the transaction. The route read
+     * the stored envelope with `libraryStore.get`, on the pool, and the row
+     * lock was only taken later inside `put`. So two pushes across a version
+     * skew could both pass the gate: the old client reads the old row, the new
+     * client writes its envelope, and then the old client's `put` overwrites it
+     * and strips the Tombstones. The gate now runs inside `put`'s transaction,
+     * on the row it has locked.
+     *
+     * The old client's `put` is held until the new client's push has landed.
+     * That is the interleaving the lock must cover: whatever the old client
+     * read before, its write must be judged against what is there now.
+     */
+    it('refuses the older of two overlapping pushes, and the Tombstones survive', async () => {
+      // Holds the old client's write, and says when it has got that far.
+      // Three requests in all: the library limiter's capacity in `boot`.
+      let hold = null
+      let oldAtPut
+      const oldReachedPut = new Promise((resolve) => (oldAtPut = resolve))
+      await boot({
+        libraryStoreWith: (store) => ({
+          ...store,
+          async put(key, data, ...rest) {
+            if (hold && JSON.parse(data).schemaVersion === 4) {
+              oldAtPut()
+              await hold.promise
+            }
+            return store.put(key, data, ...rest)
+          },
+        }),
+      })
+      const push = (envelope) =>
+        fetch(`${baseUrl}/api/library`, {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify(envelope),
+        })
+
+      const fromNewClient = {
+        format: 'phrase-drill-library',
+        schemaVersion: 5,
+        exportedAt: 2,
+        decks: [],
+        mixes: [],
+        tombstones: [{ id: 'gone', kind: 'deck', deletedAt: 9 }],
+      }
+      const fromOldClient = {
+        format: 'phrase-drill-library',
+        schemaVersion: 4,
+        exportedAt: 3,
+        decks: [{ id: 'gone', name: 'Deleted elsewhere', phrases: [], createdAt: 1, updatedAt: 1 }],
+        mixes: [],
+      }
+
+      let releaseOld
+      hold = { promise: new Promise((resolve) => (releaseOld = resolve)) }
+      const oldPush = push(fromOldClient)
+      await oldReachedPut
+      expect((await push(fromNewClient)).status).toBe(204)
+      releaseOld()
+      expect((await oldPush).status).toBe(409)
+
+      const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
+      expect(await get.json()).toEqual(fromNewClient)
     })
 
     it('accepts a push at the same schema version as the stored envelope', async () => {

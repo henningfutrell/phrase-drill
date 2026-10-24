@@ -189,24 +189,36 @@ export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, 
      * and one insert wins. Nothing is lost that the server ever held, and it
      * is reachable only on the first-ever write for an account.
      *
-     * **What this deliberately does not do is refuse.** The server cannot
-     * tell a client bug from their genuinely deleting a deck, and the device
-     * treats every status it does not recognise as `network` and retries it
-     * forever — so a refusal invented here would present as a sync that says
-     * "waiting" and never finishes, which is a worse failure than the one it
-     * guards. Accept the push; keep what it replaced.
+     * **What this deliberately does not do is refuse on its own.** The
+     * server cannot tell a client bug from their genuinely deleting a deck,
+     * and the device treats every status it does not recognise as `network`
+     * and retries it forever — so a refusal invented here would present as a
+     * sync that says "waiting" and never finishes, which is a worse failure
+     * than the one it guards. Accept the push; keep what it replaced.
+     *
+     * **The caller's one refusal is judged here, under the lock (T095).**
+     * `admit(previous)` sees the row as this transaction locked it, and a
+     * `false` writes nothing and returns `false`. The stale-client gate (T060)
+     * used to read the row on the pool before calling `put`, so two pushes
+     * across a version skew could both pass it, and the older one then
+     * overwrote the newer envelope and stripped its Tombstones. A check that
+     * runs before the lock is a check of a row that may no longer be there.
      *
      * **Every replaced version is archived; the interval throttle lives in
      * retention now.** See `pruneVersions` for why it moved and what T071's
      * reasoning it keeps. A push whose bytes are identical to what is stored
      * still archives nothing — there is nothing to keep.
      */
-    async put(key, data, updatedAt, { now = Date.now() } = {}) {
+    async put(key, data, updatedAt, { now = Date.now(), admit = () => true } = {}) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
 
         const previous = await readLibrary(client, key, { forUpdate: true })
+        if (!admit(previous)) {
+          await client.query('ROLLBACK')
+          return false
+        }
         if (previous && previous.data !== data) {
           await client.query('INSERT INTO library_versions (library_key, data, updated_at, archived_at) VALUES ($1, $2, $3, $4)', [
             key,
@@ -224,6 +236,7 @@ export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, 
         )
 
         await client.query('COMMIT')
+        return true
       } catch (err) {
         // A rollback that itself fails must not replace the real error: the
         // caller needs to know the push did not land, and 500 is what makes

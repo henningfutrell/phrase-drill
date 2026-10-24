@@ -146,6 +146,36 @@ describe('the library row is written under a lock (T082, audit finding 6)', () =
   })
 })
 
+describe("the caller's refusal is judged under the row lock (T095)", () => {
+  it('passes admit the row this transaction locked, and a refusal writes nothing and archives nothing', async () => {
+    const { pool, store } = await newStoreWithPool()
+    const stored = envelope([phrase('p0', 'bonjour')])
+    await store.put('the-user', stored, 1)
+    pool.queries.length = 0
+
+    let seen
+    const written = await store.put('the-user', envelope([phrase('p1', 'un')]), 2, {
+      admit: (previous) => {
+        seen = previous
+        return false
+      },
+    })
+
+    expect(written).toBe(false)
+    expect(seen).toEqual({ data: stored, updatedAt: 1 })
+    expect(await store.get('the-user')).toEqual({ data: stored, updatedAt: 1 })
+    expect(await store.versions('the-user')).toEqual([])
+    const text = pool.queries.map((q) => q.text)
+    expect(text.findIndex((t) => /FOR UPDATE/i.test(t))).toBeLessThan(text.findIndex((t) => /^\s*ROLLBACK/i.test(t)))
+    expect(pool.leased).toBe(0)
+  })
+
+  it('answers true when it writes', async () => {
+    const store = await newStore()
+    expect(await store.put('the-user', envelope([]), 1, { admit: (previous) => previous === null })).toBe(true)
+  })
+})
+
 describe('every replaced version is archived; retention does the thinning (T082, audit finding 4)', () => {
   const hour = LIBRARY_VERSION_SNAPSHOT_INTERVAL_MS
 
