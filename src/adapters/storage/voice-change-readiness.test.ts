@@ -38,7 +38,7 @@ describe('re-pinning the voice through SettingsStore leaves cached readiness alo
     await clipCache.put({ hash: enHash, bytes: new ArrayBuffer(1), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
     const voicesBefore = knownVoices((await settingsStore.load()).voice)
-    expect(await clipCache.readyPhraseIds([phrase], [...voicesBefore, oldVoice])).toEqual(new Set(['p1']))
+    expect(new Set((await clipCache.readyClips([phrase], [...voicesBefore, oldVoice])).keys())).toEqual(new Set(['p1']))
 
     await settingsStore.setVoice(newVoice)
     const voicesAfter = knownVoices((await settingsStore.load()).voice)
@@ -46,7 +46,7 @@ describe('re-pinning the voice through SettingsStore leaves cached readiness alo
     // `oldVoice` is not in the catalogue, so it is appended here the way the
     // drill would find it: what matters is that the sweep asks about more
     // than the pinned voice at all.
-    expect(await clipCache.readyPhraseIds([phrase], [...voicesAfter, oldVoice])).toEqual(new Set(['p1']))
+    expect(new Set((await clipCache.readyClips([phrase], [...voicesAfter, oldVoice])).keys())).toEqual(new Set(['p1']))
   })
 
   it('still excludes a phrase whose audio exists in no offered voice', async () => {
@@ -54,11 +54,11 @@ describe('re-pinning the voice through SettingsStore leaves cached readiness alo
     const clipCache = createIndexedDbClipCache()
     await settingsStore.setVoice({ provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-new' })
 
-    const ready = await clipCache.readyPhraseIds(
+    const ready = await clipCache.readyClips(
       [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
       knownVoices((await settingsStore.load()).voice),
     )
 
-    expect(ready).toEqual(new Set())
+    expect(new Set(ready.keys())).toEqual(new Set())
   })
 })

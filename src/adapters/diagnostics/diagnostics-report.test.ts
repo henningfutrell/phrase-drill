@@ -58,8 +58,8 @@ function fakeClipCache(readyIds: ReadonlySet<string>): ClipCache {
       return false
     },
     async delete() {},
-    async readyPhraseIds(phrases) {
-      return new Set(phrases.map((p) => p.id).filter((id) => readyIds.has(id)))
+    async readyClips(phrases) {
+      return new Map(phrases.filter((p) => readyIds.has(p.id)).map((p) => [p.id, { french: `fr-${p.id}`, english: `en-${p.id}` }]))
     },
   }
 }

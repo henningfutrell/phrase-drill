@@ -82,7 +82,7 @@ export async function collectDiagnostics(deps: CollectDiagnosticsDeps): Promise<
   // this number has to be the one the drill acts on, or a report reads
   // "0 of 200 ready" about a library that drills perfectly.
   const clipsReady = settings.voice
-    ? (await clipCache.readyPhraseIds(phrases, knownVoices(settings.voice))).size
+    ? (await clipCache.readyClips(phrases, knownVoices(settings.voice))).size
     : 0
 
   return {

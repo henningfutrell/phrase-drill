@@ -63,7 +63,7 @@ crosses the line. Two things make that safe rather than merely intended:
 `clipMeta` is a separate store rather than fields on the Clip because the
 whole point is that reading it is cheap: `getAll(CLIPS_STORE)` deserializes
 every `ArrayBuffer` off disk (`docs/scale.md` §3), which at a full cache is
-hundreds of MB to answer a question about numbers. `readyPhraseIds` and
+hundreds of MB to answer a question about numbers. `readyClips` and
 `has` now read the index too, which removes that whole-cache load from every
 drill start.
 

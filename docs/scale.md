@@ -225,9 +225,23 @@ still says which one would come back first if either fix regressed.
    *entire* clip cache (not just the Phrases in play) into memory and hashed
    the *entire* Phrase library passed to it. It now reads the `clipMeta`
    index — hashes and sizes, no audio — so the structured-clone cost is gone
-   entirely. **The hashing cost is untouched and remains**: 94–134 ms at
-   10,000 Phrases in Node, on every drill start, for every Deck however
-   small. This is the one live item left in this section (T037).
+   entirely. ~~**The hashing cost is untouched and remains**~~ **Halved in
+   T037.** The sweep hashes only the Phrases of the Drill it is asked about,
+   and it already did; the waste was that the working-set protection (T016)
+   hashed every ready Phrase a second time. `readyClips` (renamed from
+   `readyPhraseIds`, the name the measurements above use) now answers with the
+   hashes it found, and the protection uses them. Measured against the real
+   cache in Node, 10,000 Phrases all cached, warm index, median of 7 drill
+   starts:
+
+   | Drill size | SHA-256 digests before → after | `computeDrillReadiness` before → after |
+   |---:|---:|---:|
+   | 200 | 800 → 400 | 4.3 ms → 2.3 ms |
+   | 10,000 | 40,000 → 20,000 | 201.9 ms → 105.7 ms |
+
+   Two digests per Phrase remain (one per side, pinned voice first) — the
+   content address cannot be known without them. Pinned by
+   `src/adapters/audio/drill-start-cost.test.ts`.
 4. **Export/import — not a breaking point.** Stays small (1.2 MB at
    10,000 Phrases) and fast at every size tested, because Clips are
    structurally excluded.
