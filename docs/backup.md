@@ -14,6 +14,13 @@ late, and something just went wrong.
 backups; replaced by a daily backup.mjs timer on backup-host plus the device copy;
 restore-drill monthly.**
 
+**2026-10-24, owner (henningfutrell/workflow-personal-app-management#7):
+re-scoped — no workstation install. The daily backup runs
+machine-independently as a hopper box step, the copy is off-site
+(age-encrypted, in the private repository `henningfutrell/phrase-drill-backups`),
+and a restore drill runs with every backup.** The backup-host timer was never
+installed and is gone (`ops/backup-host/` deleted).
+
 This reverses an earlier signed decision that paid managed Postgres backups
 (Render `basic-256mb`) were the primary backup. Supabase Free has no project
 backups at all; daily backups start at Pro. Do not assume the platform holds
@@ -23,9 +30,9 @@ a copy of their library. It does not.
 
 | | What it is | Who runs it | Where the copy lives |
 |---|---|---|---|
-| **`scripts/backup.mjs` on a daily timer** | **The primary backup.** `pg_dump` of the Supabase database through the session pooler, gzipped, 180-day retention. | systemd `--user` timer on backup-host (`ops/backup-host/`) | `BACKUP_DEST` on backup-host |
+| **The daily off-site backup** | **The primary backup.** `scripts/backup.mjs` (`pg_dump` of the Supabase database through the session pooler, gzipped), then age-encrypted, 180-day retention. | A hopper box step, daily ("The daily off-site backup" below) | Release assets of the private repository `henningfutrell/phrase-drill-backups` |
 | **The device copy** | Their phone holds their library in IndexedDB and syncs it; after a total server loss the next push restores it. | Their phone, continuously | Their iPhone |
-| **`scripts/restore-drill.mjs`, monthly** | Proves a real backup restores. A backup nobody restored is a guess. | You, by hand, monthly | A scratch database on backup-host |
+| **The daily restore drill** | Proves the newest real backup restores: it is downloaded, decrypted and restored into a throwaway Postgres, and every `public` table must have the source's row count. A backup nobody restored is a guess. | The same box step, after each backup | Nowhere: the scratch cluster is deleted |
 
 Topology: the server runs on Render (`starter`); the database, Auth and
 Storage are Supabase (Free). Session pooler, port 5432. **Enforce SSL** is on,
@@ -171,38 +178,36 @@ npm run backup
 Exit 0 and a final `"backup: done"` log line mean it worked. Anything else
 means it did not; read the `error` field, it names the failing step.
 
-## The daily timer on backup-host
+## The daily off-site backup
 
-Units: `ops/backup-host/phrase-drill-backup.service` and `.timer` (systemd
-`--user`, daily, `Persistent=true` so a missed run happens at next boot).
-Nothing here installs itself. On backup-host:
+The code and its setup live in the workflow repository
+henningfutrell/workflow-personal-app-management, at
+`workflows/web-app-development/phrase-drill/offsite-backup/` (its `README.md`).
+Once a day, one hopper box step, in a box of the `phrase-drill` template:
 
-1. Create `~/.config/phrase-drill/backup.env`, mode 600:
-   ```sh
-   DATABASE_URL=postgres://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
-   BACKUP_DEST=/home/<you>/phrase-drill-backups
-   PHRASE_DRILL_DIR=/home/<you>/<path to the phrase-drill checkout>
-   ```
-   (`chmod 600 ~/.config/phrase-drill/backup.env`.)
-2. Copy the units and enable the timer:
-   ```sh
-   mkdir -p ~/.config/systemd/user
-   cp ops/backup-host/phrase-drill-backup.service ops/backup-host/phrase-drill-backup.timer ~/.config/systemd/user/
-   systemctl --user daemon-reload
-   systemctl --user enable --now phrase-drill-backup.timer
-   ```
-3. Run it once now and read the log: `systemctl --user start phrase-drill-backup.service; journalctl --user -u phrase-drill-backup.service -e`.
-   Check the file landed in `BACKUP_DEST`.
-4. `systemctl --user list-timers phrase-drill-backup.timer` shows the next run.
-   For the timer to fire while you are logged out, run
-   `loginctl enable-linger $USER` once.
-5. Edit the `ExecStart` node path in the service if node is not `/usr/bin/node`.
+1. clones this repository and runs `scripts/backup.mjs` into a temporary
+   directory, with `DATABASE_URL` = the vault's `SUPABASE_DB_URL` plus
+   `sslmode=require`;
+2. encrypts the dump with age and stores it as
+   `phrase-drill-<timestamp>.sql.gz.age`, an asset of the release
+   `backup-YYYY-MM-DD` (one release per UTC day) in the private repository
+   `henningfutrell/phrase-drill-backups`; it deletes the releases and tags older
+   than 180 days;
+3. downloads the newest asset, decrypts it, restores it into a new Postgres
+   cluster in the box, and compares the row count of every `public` table with
+   the source. Any difference exits 1.
 
-The monthly restore drill, against a local Postgres (never Supabase):
-`DATABASE_URL=postgres://...@localhost:5432/postgres npm run restore-drill -- <latest backup>`.
+Nothing is kept in the box. The age identity that decrypts the backups is in
+the hopper vault (`PHRASE_DRILL_BACKUP_AGE_IDENTITY`) and in the owner's
+password manager: a vault secret cannot be read back.
 
-Then put the `.sql.gz` somewhere that survives losing that machine too —
-whatever you already do with files you care about.
+### Get a backup back by hand
+
+1. Download the asset from https://github.com/henningfutrell/phrase-drill-backups/releases
+   (the newest release, or the day before the mistake).
+2. Decrypt it with the age identity in a file, mode 600:
+   `age -d -i identity.txt -o phrase-drill-<timestamp>.sql.gz phrase-drill-<timestamp>.sql.gz.age`.
+3. Go on with "Restore, step by step" below with the `.sql.gz` file.
 
 ## Restore, step by step
 
@@ -241,8 +246,9 @@ restore the backup into this disposable scratch database first.
 
 ### 0. Get the backup file, and rehearse the restore
 
-1. **Get the backup file onto the machine running the drill.** `npm run backup`
-   already writes a local `.sql.gz`.
+1. **Get the backup file onto the machine running the drill.** Download and
+   decrypt one ("Get a backup back by hand" above), or run `npm run backup`,
+   which writes a local `.sql.gz`.
 2. **Run the drill** against a Postgres where you may `CREATE DATABASE` (a
    local one on backup-host; the Supabase pooler cannot, and a drill must not
    touch production). Its database name is ignored:
@@ -361,9 +367,10 @@ reading the *old* blob out of the backup and reconciling it with the
 
 ## Scheduling
 
-Daily, by the backup-host timer ("The daily timer on backup-host"). A backup that
-stops running is silent, so once a month, when you run the restore drill,
-also look at the newest file in `BACKUP_DEST`: it must be under two days old.
+Daily, by the hopper box step ("The daily off-site backup"). A run that fails
+shows in the hopper. A backup that stops running is silent, so once a month
+look at https://github.com/henningfutrell/phrase-drill-backups/releases: the
+newest release must be under two days old.
 
 ## Verified proof this works (T054, re-confirmed T065)
 
