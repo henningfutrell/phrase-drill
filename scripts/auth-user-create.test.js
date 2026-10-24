@@ -52,17 +52,19 @@ describe('idRewriteSql', () => {
 })
 
 describe('createUser', () => {
+  /** The policy port, faked: `server/password-policy.test.js` proves the real one. */
+  const accept = async () => ({ ok: true })
   const adminWith = (impl) => ({ auth: { admin: { createUser: impl } } })
   it('passes id, email, password and email_confirm', async () => {
     let seen
     const admin = adminWith(async (a) => ((seen = a), { data: { user: { id: 'u1' } }, error: null }))
-    await expect(createUser({ supabase: admin, id: 'u1', email: 'e@x.y', password: 'pw' })).resolves.toEqual({ ok: true, id: 'u1' })
+    await expect(createUser({ supabase: admin, id: 'u1', email: 'e@x.y', password: 'pw', checkPassword: accept })).resolves.toEqual({ ok: true, id: 'u1' })
     expect(seen).toEqual({ id: 'u1', email: 'e@x.y', password: 'pw', email_confirm: true })
   })
   it('omits id when none is given', async () => {
     let seen
     const admin = adminWith(async (a) => ((seen = a), { data: { user: { id: 'gen' } }, error: null }))
-    await createUser({ supabase: admin, email: 'e@x.y', password: 'pw' })
+    await createUser({ supabase: admin, email: 'e@x.y', password: 'pw', checkPassword: accept })
     expect('id' in seen).toBe(false)
   })
   it('on a refused id, creates without it and hands back the rewrite SQL instead of running it', async () => {
@@ -71,13 +73,27 @@ describe('createUser', () => {
       calls.push(a)
       return a.id ? { data: { user: null }, error: { message: 'id not allowed' } } : { data: { user: { id: 'gen' } }, error: null }
     })
-    const result = await createUser({ supabase: admin, id: 'old', email: 'e@x.y', password: 'pw' })
+    const result = await createUser({ supabase: admin, id: 'old', email: 'e@x.y', password: 'pw', checkPassword: accept })
     expect(result).toEqual({ ok: false, id: 'gen', fallbackSql: idRewriteSql('old', 'gen'), reason: 'id not allowed' })
     expect(calls).toHaveLength(2)
   })
   it('does not retry when the email is the problem', async () => {
     const admin = adminWith(async () => ({ data: { user: null }, error: { code: 'email_exists', message: 'exists' } }))
-    await expect(createUser({ supabase: admin, id: 'old', email: 'e@x.y', password: 'pw' })).rejects.toThrow(/exists/)
+    await expect(createUser({ supabase: admin, id: 'old', email: 'e@x.y', password: 'pw', checkPassword: accept })).rejects.toThrow(/exists/)
+  })
+})
+
+describe('createUser refuses a password the policy refuses', () => {
+  it.each([
+    ['breached', /known data breach/],
+    ['unverified', /couldn't verify password safety/],
+    ['no-digit', /at least one digit/],
+  ])('%s: creates no account', async (reason, message) => {
+    let called = 0
+    const admin = { auth: { admin: { createUser: async () => (called++, { data: { user: { id: 'u1' } }, error: null }) } } }
+    const checkPassword = async () => ({ ok: false, reason })
+    await expect(createUser({ supabase: admin, id: 'u1', email: 'e@x.y', password: 'pw', checkPassword })).rejects.toThrow(message)
+    expect(called).toBe(0)
   })
 })
 

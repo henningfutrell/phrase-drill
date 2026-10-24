@@ -8,10 +8,14 @@
 //   (the password is read from stdin, never from argv)
 //
 // Never creates an account: an address with none exits non-zero.
+// The new password passes server/password-policy.js first (12+ characters,
+// a letter, a digit, not in HaveIBeenPwned); a refusal exits non-zero and
+// changes nothing. Needs egress to api.pwnedpasswords.com.
 
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createSupabase } from '../server/supabase.js'
+import { createPasswordPolicy, describeRefusal } from '../server/password-policy.js'
 import { readSecretFrom } from './auth-user-create.mjs'
 
 const PAGE_SIZE = 1000
@@ -30,9 +34,10 @@ export function parseArgs(argv) {
   return out
 }
 
-/** Sets `password` on the account whose email is `email`; resolves to its user id. */
-export async function setPassword({ supabase, email, password, perPage = PAGE_SIZE }) {
-  if (password.length === 0) throw new Error('empty password refused')
+/** Sets `password` on the account whose email is `email`, once `checkPassword` accepts it; resolves to its user id. */
+export async function setPassword({ supabase, email, password, checkPassword, perPage = PAGE_SIZE }) {
+  const verdict = await checkPassword(password)
+  if (!verdict.ok) throw new Error(describeRefusal(verdict.reason))
   const wanted = email.trim().toLowerCase()
   for (let page = 1; ; page++) {
     const { data, error } = await supabase.auth.admin.listUsers({ page, perPage })
@@ -58,7 +63,7 @@ async function main() {
     prompt: `new password for ${args.email} (not echoed): `,
   })
   const supabase = createSupabase({ url: env.SUPABASE_URL, secretKey: env.SUPABASE_SECRET_KEY })
-  const id = await setPassword({ supabase, email: args.email, password })
+  const id = await setPassword({ supabase, email: args.email, password, checkPassword: createPasswordPolicy() })
   console.error(`password set for ${args.email} (${id})`)
 }
 
