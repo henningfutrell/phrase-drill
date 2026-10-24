@@ -13,6 +13,8 @@ import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
 import { createAnthropicProvider } from './providers/anthropic-client.js'
 import { createShutdown } from './shutdown.js'
 import { createSupabase } from './supabase.js'
+import { createAccountPasswordSetter } from './account-password.js'
+import { createPasswordPolicy } from './password-policy.js'
 
 /**
  * Wires every real dependency from the environment (T041 "secrets come from
@@ -59,7 +61,8 @@ export async function buildServer(env = process.env) {
   // (`''`), and the first of those ends with `libraryStore.put` as the write
   // that fails. `clipStoreMaxBytesFrom` falls back to the default, loudly.
   const clipStoreMaxBytes = clipStoreMaxBytesFrom(env.CLIP_STORE_MAX_BYTES, logger)
-  // One Supabase client: Storage for the Clip store, Auth for token verification.
+  // One Supabase client: Storage for the Clip store, Auth for token verification
+  // and for setting a password POST /api/password has checked.
   const supabase = createSupabase(supabaseConfig)
   const clipStore = createClipStore(pool, { storage: supabase.storage.from('clips'), maxBytes: clipStoreMaxBytes, logger })
   await clipStore.init()
@@ -109,6 +112,10 @@ export async function buildServer(env = process.env) {
     distDir,
     logger,
     verifyAccessToken,
+    // Workflow issue #35: a new password passes the rules and the
+    // HaveIBeenPwned range check before the admin API sets it.
+    checkPassword: createPasswordPolicy(),
+    setUserPassword: createAccountPasswordSetter(supabase),
   })
 
   const server = createServer(handleRequest)
