@@ -231,6 +231,10 @@ describe('server app (integration, fake upstreams)', () => {
     // How long `/api/tts` waits on a generation before answering 202. Long
     // by default so a test that is not about the 202 never sees one.
     ttsWaitMs = 5_000,
+    // `POST /api/password`'s two ports: the policy (`password-policy.js`,
+    // proved on its own) and the Supabase admin call that sets it.
+    checkPassword = async () => ({ ok: true }),
+    setUserPassword = async () => ({ ok: true }),
   } = {}) {
     elevenLabsUpstream = elevenLabsFetch
     libraryStore = await newLibraryStore()
@@ -266,6 +270,8 @@ describe('server app (integration, fake upstreams)', () => {
       distDir,
       logger,
       verifyAccessToken: fakeVerifyAccessToken(),
+      checkPassword,
+      setUserPassword,
     })
 
     server = createServer(handleRequest)
@@ -1765,6 +1771,102 @@ describe('server app (integration, fake upstreams)', () => {
       // The poisoned bytes are kept, not dropped — they are the only record
       // of what went wrong.
       expect((await libraryStore.versions(SUB))[0].data).toBe('{"schemaVersion":null}')
+    })
+  })
+
+  describe('POST /api/password', () => {
+    const NEW_PASSWORD = 'a new password 2026'
+
+    function postPassword(body, token = VALID_TOKEN) {
+      return fetch(`${baseUrl}/api/password`, {
+        method: 'POST',
+        headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/json' },
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      })
+    }
+
+    function recordingSetter(answer = { ok: true }) {
+      const impl = async (userId, password) => {
+        impl.calls.push({ userId, password })
+        return answer
+      }
+      impl.calls = []
+      return impl
+    }
+
+    it('answers 401 with no token, and checks and sets nothing', async () => {
+      const setUserPassword = recordingSetter()
+      let checked = 0
+      await boot({ setUserPassword, checkPassword: async () => (checked++, { ok: true }) })
+      const res = await postPassword({ password: NEW_PASSWORD }, null)
+      expect(res.status).toBe(401)
+      expect(checked).toBe(0)
+      expect(setUserPassword.calls).toHaveLength(0)
+    })
+
+    it("sets an accepted password on the token's own account", async () => {
+      const setUserPassword = recordingSetter()
+      await boot({ setUserPassword })
+      const res = await postPassword({ password: NEW_PASSWORD })
+      expect(res.status).toBe(204)
+      expect(setUserPassword.calls).toEqual([{ userId: SUB, password: NEW_PASSWORD }])
+    })
+
+    it.each(['too-short', 'no-letter', 'no-digit', 'breached'])(
+      'refuses a %s password with 422 and does not set it',
+      async (reason) => {
+        const setUserPassword = recordingSetter()
+        await boot({ setUserPassword, checkPassword: async () => ({ ok: false, reason }) })
+        const res = await postPassword({ password: NEW_PASSWORD })
+        expect(res.status).toBe(422)
+        expect(await res.json()).toEqual({ error: reason })
+        expect(setUserPassword.calls).toHaveLength(0)
+      },
+    )
+
+    it('answers 503 unverified when HIBP could not be asked, and does not set it', async () => {
+      const setUserPassword = recordingSetter()
+      await boot({ setUserPassword, checkPassword: async () => ({ ok: false, reason: 'unverified' }) })
+      const res = await postPassword({ password: NEW_PASSWORD })
+      expect(res.status).toBe(503)
+      expect(await res.json()).toEqual({ error: 'unverified' })
+      expect(setUserPassword.calls).toHaveLength(0)
+    })
+
+    it('answers 422 same-password when Supabase says it is the current one', async () => {
+      await boot({ setUserPassword: recordingSetter({ ok: false, reason: 'same-password' }) })
+      const res = await postPassword({ password: NEW_PASSWORD })
+      expect(res.status).toBe(422)
+      expect(await res.json()).toEqual({ error: 'same-password' })
+    })
+
+    it('answers 422 weak-password when Supabase refuses it on its own rules', async () => {
+      await boot({ setUserPassword: recordingSetter({ ok: false, reason: 'weak-password' }) })
+      const res = await postPassword({ password: NEW_PASSWORD })
+      expect(res.status).toBe(422)
+      expect(await res.json()).toEqual({ error: 'weak-password' })
+    })
+
+    it('answers 502 when Supabase fails to set it', async () => {
+      await boot({ setUserPassword: recordingSetter({ ok: false, reason: 'upstream' }) })
+      const res = await postPassword({ password: NEW_PASSWORD })
+      expect(res.status).toBe(502)
+      expect(await res.json()).toEqual({ error: 'upstream' })
+    })
+
+    it('answers 400 to a body with no password string', async () => {
+      const setUserPassword = recordingSetter()
+      await boot({ setUserPassword })
+      expect((await postPassword({})).status).toBe(400)
+      expect((await postPassword({ password: 42 })).status).toBe(400)
+      expect((await postPassword('not json')).status).toBe(400)
+      expect(setUserPassword.calls).toHaveLength(0)
+    })
+
+    it('never writes the password to a log line', async () => {
+      await boot({ checkPassword: async () => ({ ok: false, reason: 'breached' }) })
+      await postPassword({ password: NEW_PASSWORD })
+      expect(logger.lines.join('\n')).not.toContain(NEW_PASSWORD)
     })
   })
 

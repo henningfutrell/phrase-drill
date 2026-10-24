@@ -11,6 +11,9 @@ const LIBRARY_MAX_BODY_BYTES = 8 * 1024 * 1024 // ~6.5x the modelled 10,000-phra
 const TRANSLATE_MAX_BODY_BYTES = 4_000 // one phrase plus a deck name, not a document
 const TRANSLATE_MAX_TEXT_CHARS = 500
 const LIBRARY_FORMAT = 'phrase-drill-library'
+const PASSWORD_MAX_BODY_BYTES = 4_000 // one password, not a document
+/** A refusal she can act on by choosing another password; anything else is not hers to fix. */
+const PASSWORD_REFUSALS = new Set(['too-short', 'no-letter', 'no-digit', 'breached', 'same-password', 'weak-password'])
 
 /**
  * How long `/api/tts` waits on a queued generation before answering 202 (S5).
@@ -162,6 +165,8 @@ export function createApp({
   distDir,
   logger,
   verifyAccessToken,
+  checkPassword,
+  setUserPassword,
 }) {
   const serveStatic = createStaticHandler(distDir)
 
@@ -691,6 +696,45 @@ export function createApp({
     res.end()
   }
 
+  /**
+   * Sets a new password on the caller's own account (workflow issue #35).
+   *
+   * The device used to call Supabase Auth's `updateUser` itself, which
+   * nothing on the Free plan can check against HaveIBeenPwned. So the device
+   * sends the password here, `checkPassword` (`password-policy.js`) applies
+   * the rules and the HIBP range check, and only then `setUserPassword` sets
+   * it through the Supabase admin API. The account is the token's `sub`;
+   * the body names no account.
+   *
+   * 204 set · 422 `{error: <reason>}` a password she must change · 503
+   * `unverified` HIBP could not be asked (fail closed: nothing set) · 502
+   * Supabase failed to set it. The body is never logged: the request log
+   * line carries method, path, status and time only.
+   */
+  async function handlePassword(req, res, key) {
+    let parsed
+    try {
+      parsed = JSON.parse((await readBody(req, { maxBytes: PASSWORD_MAX_BODY_BYTES })).toString('utf8'))
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) return sendJson(res, 413, { error: 'payload-too-large' })
+      return sendJson(res, 400, { error: 'invalid-json' })
+    }
+    const password = parsed?.password
+    if (typeof password !== 'string') return sendJson(res, 400, { error: 'invalid-request' })
+
+    const verdict = await checkPassword(password)
+    if (!verdict.ok) return sendJson(res, verdict.reason === 'unverified' ? 503 : 422, { error: verdict.reason })
+
+    const result = await setUserPassword(key, password)
+    if (!result.ok) {
+      return sendJson(res, PASSWORD_REFUSALS.has(result.reason) ? 422 : 502, {
+        error: PASSWORD_REFUSALS.has(result.reason) ? result.reason : 'upstream',
+      })
+    }
+    res.writeHead(204)
+    res.end()
+  }
+
   return async function handleRequest(req, res) {
     const started = Date.now()
     try {
@@ -761,6 +805,7 @@ export function createApp({
         if (url.pathname === '/api/translate' && req.method === 'POST') return await handleTranslate(req, res, key)
         if (url.pathname === '/api/library' && req.method === 'GET') return await handleLibraryGet(req, res, key)
         if (url.pathname === '/api/library' && req.method === 'PUT') return await handleLibraryPut(req, res, key)
+        if (url.pathname === '/api/password' && req.method === 'POST') return await handlePassword(req, res, key)
 
         sendJson(res, 404, { error: 'not-found' })
         return
