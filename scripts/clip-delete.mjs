@@ -31,7 +31,16 @@ import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createPool, createClipStore, waitForDatabase } from '../server/db.js'
 import { createClipJobStore } from '../server/clip-job-store.js'
-import { describeTarget } from './useradd.mjs'
+
+/** `host:port/database` — never the password, which is the only part of a connection string worth hiding. */
+export function describeTarget(connectionString) {
+  try {
+    const url = new URL(connectionString)
+    return `${url.hostname}:${url.port || '5432'}${url.pathname}`
+  } catch {
+    return '(unparseable DATABASE_URL)'
+  }
+}
 
 const USAGE = 'usage: node scripts/clip-delete.mjs <hash> [<hash> ...]   (64 lowercase hex characters each)'
 const CLIP_HASH = /^[0-9a-f]{64}$/
@@ -73,7 +82,7 @@ async function main() {
     return
   }
 
-  // No localhost fallback, for the reason useradd.mjs gives (T055): a
+  // No localhost fallback, for the reason a hosted shell gives (T055): a
   // hand-run CLI with no DATABASE_URL is in the wrong environment.
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) {
@@ -86,7 +95,7 @@ async function main() {
   console.error(`connecting to ${describeTarget(databaseUrl)} ...`)
   const pool = createPool(databaseUrl, { connectionTimeoutMillis: 3000 })
   try {
-    // 3 tries, as useradd: a CLI in front of a human must fail while they watch.
+    // 3 tries: a CLI in front of a human must fail while they watch.
     await waitForDatabase(pool, { retries: 3, delayMs: 1000 })
   } catch (err) {
     console.error(`could not reach the database at ${describeTarget(databaseUrl)} after 3 tries.`)

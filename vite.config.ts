@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process'
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import { configDefaults } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { readBuildSha } from './build-sha.ts'
+import { readSupabaseEnv } from './src/adapters/auth/supabase-env.ts'
 
 /**
  * The build stamp Diagnostics (T039) shows so a remote bug report can be
@@ -33,83 +34,87 @@ const buildTime = new Date().toISOString()
 // the sub-path on Pages and the root in the container.
 const base = './'
 
-export default defineConfig({
-  base,
-  define: {
-    __BUILD_SHA__: JSON.stringify(buildSha),
-    __BUILD_TIME__: JSON.stringify(buildTime),
-  },
-  plugins: [
-    react(),
-    VitePWA({
-      // autoUpdate + skipWaiting/clientsClaim: the owner is non-technical
-      // and has no hard-refresh reflex, so a new deploy must take over the
-      // open tab on its own rather than waiting for them to close every tab
-      // (the default "prompt" strategy would leave their stuck on stale
-      // code with no way out). See docs/pwa.md.
-      registerType: 'autoUpdate',
-      includeAssets: ['icons/apple-touch-icon-180.png'],
-      workbox: {
-        clientsClaim: true,
-        skipWaiting: true,
-        // woff2 is in this list deliberately (T058). The app's two faces are
-        // self-hosted, and an offline drill that falls back to Palatino is a
-        // different app. This is also why only the `latin` subsets are
-        // vendored: precache takes everything matched here up front, so
-        // unicode-range never gets the chance to skip a subset the user cannot
-        // render a character from. See src/styles/fonts.css.
-        globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest,woff2}'],
-      },
-      manifest: {
-        id: base,
-        name: 'phrase-drill',
-        short_name: 'phrase-drill',
-        description:
-          'Drill saved French phrases on your phone, including offline.',
-        start_url: base,
-        scope: base,
-        display: 'standalone',
-        orientation: 'portrait',
-        // Design palette (docs/design.md): both fields use `--bg`, not
-        // `--accent`. `background_color` is the splash-screen ground, so it
-        // is literally the app's background token. `theme_color` tints the
-        // OS/browser chrome (status bar, task switcher) — the design reserves
-        // `--accent` for exactly three UI states (live beat, primary action,
-        // current selection) and is explicit that it "never decorates";
-        // tinting chrome with it would be a fourth, undesigned use, so chrome
-        // gets `--bg` too and stays dark and neutral like the rest of the app.
-        theme_color: '#191016',
-        background_color: '#191016',
-        icons: [
-          {
-            src: 'icons/icon-192.png',
-            sizes: '192x192',
-            type: 'image/png',
-            purpose: 'any',
-          },
-          {
-            src: 'icons/icon-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'any',
-          },
-          {
-            src: 'icons/icon-512-maskable.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
-        ],
-      },
-    }),
-  ],
-  test: {
-    environment: 'jsdom',
-    // Stryker's sandbox (T043) is a full copy of the repo with the source
-    // deliberately mutated. Without this, `npm test` collects both copies —
-    // the suite silently doubles and half of it is asserting against code
-    // that was broken on purpose. A failed or interrupted mutation run
-    // leaves the directory behind, so the exclusion cannot be conditional.
-    exclude: [...configDefaults.exclude, '.stryker-tmp/**'],
-  },
+export default defineConfig(({ command, mode }) => {
+  // A production bundle without the Supabase values has no login; refuse to build it.
+  if (command === 'build') readSupabaseEnv(loadEnv(mode, process.cwd(), 'VITE_'))
+  return {
+    base,
+    define: {
+      __BUILD_SHA__: JSON.stringify(buildSha),
+      __BUILD_TIME__: JSON.stringify(buildTime),
+    },
+    plugins: [
+      react(),
+      VitePWA({
+        // autoUpdate + skipWaiting/clientsClaim: the owner is non-technical
+        // and has no hard-refresh reflex, so a new deploy must take over the
+        // open tab on its own rather than waiting for them to close every tab
+        // (the default "prompt" strategy would leave their stuck on stale
+        // code with no way out). See docs/pwa.md.
+        registerType: 'autoUpdate',
+        includeAssets: ['icons/apple-touch-icon-180.png'],
+        workbox: {
+          clientsClaim: true,
+          skipWaiting: true,
+          // woff2 is in this list deliberately (T058). The app's two faces are
+          // self-hosted, and an offline drill that falls back to Palatino is a
+          // different app. This is also why only the `latin` subsets are
+          // vendored: precache takes everything matched here up front, so
+          // unicode-range never gets the chance to skip a subset the user cannot
+          // render a character from. See src/styles/fonts.css.
+          globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest,woff2}'],
+        },
+        manifest: {
+          id: base,
+          name: 'phrase-drill',
+          short_name: 'phrase-drill',
+          description:
+            'Drill saved French phrases on your phone, including offline.',
+          start_url: base,
+          scope: base,
+          display: 'standalone',
+          orientation: 'portrait',
+          // Design palette (docs/design.md): both fields use `--bg`, not
+          // `--accent`. `background_color` is the splash-screen ground, so it
+          // is literally the app's background token. `theme_color` tints the
+          // OS/browser chrome (status bar, task switcher) — the design reserves
+          // `--accent` for exactly three UI states (live beat, primary action,
+          // current selection) and is explicit that it "never decorates";
+          // tinting chrome with it would be a fourth, undesigned use, so chrome
+          // gets `--bg` too and stays dark and neutral like the rest of the app.
+          theme_color: '#191016',
+          background_color: '#191016',
+          icons: [
+            {
+              src: 'icons/icon-192.png',
+              sizes: '192x192',
+              type: 'image/png',
+              purpose: 'any',
+            },
+            {
+              src: 'icons/icon-512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any',
+            },
+            {
+              src: 'icons/icon-512-maskable.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'maskable',
+            },
+          ],
+        },
+      }),
+    ],
+    test: {
+      environment: 'jsdom',
+      // Stryker's sandbox (T043) is a full copy of the repo with the source
+      // deliberately mutated. Without this, `npm test` collects both copies —
+      // the suite silently doubles and half of it is asserting against code
+      // that was broken on purpose. A failed or interrupted mutation run
+      // leaves the directory behind, so the exclusion cannot be conditional.
+      exclude: [...configDefaults.exclude, '.stryker-tmp/**'],
+    },
+  }
 })

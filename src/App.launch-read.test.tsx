@@ -263,6 +263,7 @@ function render(deckStore: DeckStore, settingsStore: SettingsStore, syncEngine: 
         databaseTrouble={noopTrouble}
         audioElement={fakeAudioElement()}
         routeHoldElement={fakeRouteHoldElement()}
+        changePassword={async () => ({ ok: true })}
       />,
     )
   })

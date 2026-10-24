@@ -16,7 +16,9 @@ import { createServerTranslator } from './adapters/translation/server-translator
 import { createLibrarySyncClient } from './adapters/sync/library-sync-client'
 import { createSyncEngine } from './adapters/sync/sync-engine'
 import { createSyncedLibrary } from './adapters/sync/synced-library'
-import { createSessionAuth, AuthRequiredError } from './adapters/auth/session-auth'
+import { createSessionAuth, purgeLegacySession, AuthRequiredError, AuthUnavailableError } from './adapters/auth/session-auth'
+import { createSupabaseAuthClient } from './adapters/auth/supabase-client'
+import { readSupabaseEnv } from './adapters/auth/supabase-env'
 import { LoginScreen } from './ui/LoginScreen'
 import { createIndexedDbErrorLog, installErrorCapture, withAdapterErrorLogging } from './adapters/diagnostics'
 import { createRootRenderer } from './root-renderer'
@@ -62,20 +64,22 @@ const syncBaselineStore = createIndexedDbSyncBaselineStore()
 // Diagnostics (T039): the ring buffer that backs Diagnostics and the two
 // global error hooks that feed it. Installed here, at the composition root,
 // not scattered through components (AGENTS.md ports-and-adapters, T039).
-// T050: the device holds no provider key to redact any more, and its one
-// credential — an opaque session token, held in `localStorage` by
-// session-auth.ts — is a bearer credential, not a server secret; logging
+// The device holds no provider key to redact, and its one credential — the
+// Supabase session, held by supabase-js — is a bearer credential, not a server secret; logging
 // one is not the same failure class as logging a provider key.
 const errorLog = createIndexedDbErrorLog({ getSecrets: () => Promise.resolve([]) })
 installErrorCapture(errorLog)
 
-// T050: replaces the Keycloak/PKCE flow entirely — a plain login form
-// posted to this app's own /api/login, in exchange for an opaque session
-// token this device stores itself. `render()` is called once at boot and
+// Supabase Auth (email + password) through session-auth.ts. `render()` is called once at boot and
 // again by `showApp()`/`showLogin()` below, whichever the current auth
 // state calls for; there is no client-side router, same as the rest of the
 // app (App.tsx switches screens by state, never a URL).
-const auth = createSessionAuth({ onUnauthorized: () => showLogin() })
+// Throws at boot if the build was made without the two public Supabase values.
+purgeLegacySession(window.localStorage)
+const auth = createSessionAuth({
+  client: createSupabaseAuthClient(readSupabaseEnv(import.meta.env)),
+  onUnauthorized: () => showLogin(),
+})
 
 // A single root for the app's life (see root-renderer.ts): a 401 from any
 // /api/* call routes through `showLogin()` to here, and a second
@@ -92,8 +96,8 @@ function renderRoot(children: ReactNode): void {
 function showLogin(): void {
   renderRoot(
     <LoginScreen
-      onLogin={async (username, password) => {
-        const result = await auth.login(username, password)
+      onLogin={async (email, password) => {
+        const result = await auth.login(email, password)
         if (result.ok) showApp()
         return result
       }}
@@ -170,6 +174,8 @@ function showApp(): void {
       databaseTrouble={databaseTrouble}
       audioElement={audioElement}
       routeHoldElement={routeHoldElement}
+      heldLookup={rawSynthClient}
+      changePassword={auth.changePassword}
     />,
   )
 }
@@ -181,6 +187,12 @@ async function boot(): Promise<void> {
   } catch (err) {
     if (err instanceof AuthRequiredError) {
       showLogin()
+      return
+    }
+    // Offline with a lapsed access token: the drill runs from the cache, and
+    // a server call that then 401s sends them to the login screen.
+    if (err instanceof AuthUnavailableError) {
+      showApp()
       return
     }
     throw err

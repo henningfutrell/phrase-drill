@@ -57,6 +57,7 @@ function renderScreen(overrides: Partial<Parameters<typeof SettingsScreen>[0]> =
     onConfirmRestore: vi.fn().mockResolvedValue(undefined),
     onCancelRestore: vi.fn(),
     onOpenDiagnostics: vi.fn(),
+    onChangePassword: vi.fn().mockResolvedValue({ ok: true }),
     savedAudio: undefined as { bytes: number; clipCount: number; maxBytes: number } | undefined,
     ...overrides,
   }
@@ -75,6 +76,42 @@ function chooseRestoreFile(file: File): void {
   Object.defineProperty(input, 'files', { value: fakeFileList(file), configurable: true })
   input.dispatchEvent(new Event('change', { bubbles: true }))
 }
+
+function typeInto(testId: string, value: string): void {
+  const input = container.querySelector(`[data-testid="${testId}"]`) as HTMLInputElement
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+  setter.call(input, value)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+describe('SettingsScreen — change password', () => {
+  it('changes their password from Settings and says so', async () => {
+    const props = renderScreen()
+    expect(container.querySelector('[data-testid="new-password"]')).toBeNull()
+    act(() => click(container.querySelector('[data-testid="open-change-password"]')!))
+
+    typeInto('new-password', 'a-long-new-one')
+    typeInto('new-password-again', 'a-long-new-one')
+    await act(async () => {
+      container.querySelector('[data-testid="account-section"] form')!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      )
+      await flush()
+    })
+
+    expect(props.onChangePassword).toHaveBeenCalledWith('a-long-new-one')
+    expect(container.querySelector('[data-testid="new-password"]')).toBeNull()
+    expect(container.querySelector('[data-testid="password-changed"]')!.textContent).toContain('changed')
+  })
+
+  it('can be put away without changing anything', () => {
+    const props = renderScreen()
+    act(() => click(container.querySelector('[data-testid="open-change-password"]')!))
+    act(() => click(container.querySelector('[data-testid="cancel-change-password"]')!))
+    expect(container.querySelector('[data-testid="new-password"]')).toBeNull()
+    expect(props.onChangePassword).not.toHaveBeenCalled()
+  })
+})
 
 describe('SettingsScreen', () => {
   it('offers Diagnostics reachably — not buried behind a gesture — and routes to it on tap', () => {

@@ -309,6 +309,14 @@ first-class state, not an error:
   that turns into a second-tap `Confirm delete` in place — no swipe gesture, no
   undo toast. Deleting is still two deliberate taps, just not the sketched
   pattern.
+- **Audio, per row (#6).** Under the French, one quiet `--ink-soft` line says
+  whether the Phrase's audio is done, the voice it is in, and whether it is on
+  this phone — `Audio done in George · saved on this phone`, `… · on the server,
+  not on this phone yet`, `No audio yet`, `No audio — it could not be made`.
+  Sides in different voices are named apart. Above the list: `Audio ready for
+  N of M phrases` (both sides on this phone — what a Drill plays) and `New audio
+  is made in Rachel.` with `Change voice`, which opens Settings. Each row's
+  redo reads `Redo in <pinned voice>`, because that is what it makes.
 - `+ Add phrase` row pinned at the list's end, opens a **sheet** with two fields,
   English / French (T061 put English first there too), `Save`.
 - Tap a row to edit the same two fields in the same sheet shape (add and edit

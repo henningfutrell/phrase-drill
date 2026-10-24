@@ -106,6 +106,46 @@ describe('createGenerationQueue', () => {
     expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'ready' })
   })
 
+  // Detect existing audio (#4): a side the server already holds in another
+  // voice is fetched in THAT voice — asking in the pinned one is a new, billed
+  // generation of audio the user already has.
+  it('fetches a side in the voice it is held in, and the other side in the pinned voice', async () => {
+    const held: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'held-voice' }
+    const clipCache = createFakeClipCache()
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(8), durationMs: 500 })
+    const queue = createGenerationQueue({
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
+      clipCache,
+      getVoice: async () => VOICE,
+    })
+
+    queue.enqueue(PHRASE, { french: held })
+    await queue.whenIdle()
+
+    expect(synthesize).toHaveBeenCalledWith('Bonjour', 'fr-FR', held)
+    expect(synthesize).toHaveBeenCalledWith('Hello', 'en-US', VOICE)
+    expect(await clipCache.has(await computeClipHash({ ...held, lang: 'fr-FR', text: 'Bonjour' }))).toBe(true)
+    expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'ready' })
+  })
+
+  it('fetches held audio even with no voice pinned, and nothing for a side held nowhere', async () => {
+    const held: Voice = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'held-voice' }
+    const synthesize = vi.fn<SynthClient['synthesize']>().mockResolvedValue({ bytes: new ArrayBuffer(8), durationMs: 500 })
+    const queue = createGenerationQueue({
+      synthClient: { synthesize, regenerate: unexpectedRegenerate() },
+      clipCache: createFakeClipCache(),
+      getVoice: async () => null,
+    })
+
+    queue.enqueue(PHRASE, { french: held, english: held })
+    queue.enqueue({ id: 'p2', french: 'Merci', english: 'Thanks' }, { french: held })
+    await queue.whenIdle()
+
+    expect(synthesize.mock.calls.map(([text]) => text).sort()).toEqual(['Bonjour', 'Hello', 'Merci'])
+    expect(queue.statusFor('p1')).toEqual<GenerationStatus>({ kind: 'ready' })
+    expect(queue.statusFor('p2'), 'half a Phrase is not ready, and is not generated against no voice').toEqual<GenerationStatus>({ kind: 'generating' })
+  })
+
   it('is idle before anything is enqueued', async () => {
     const queue = createGenerationQueue({
       synthClient: { synthesize: vi.fn().mockReturnValue(new Promise(() => {})), regenerate: unexpectedRegenerate() },

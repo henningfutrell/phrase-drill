@@ -2,7 +2,12 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DeckDetailScreen } from './DeckDetailScreen'
-import type { Deck, Translator } from '../domain'
+import type { Deck, Translator, Voice } from '../domain'
+import type { PhraseAudio } from '../adapters/audio/audio-locator'
+import { VOICE_CATALOGUE } from '../adapters/audio/voice-catalogue'
+
+const [RACHEL, , GEORGE] = VOICE_CATALOGUE.map(({ provider, modelId, voiceId }): Voice => ({ provider, modelId, voiceId }))
+const both = (voice: Voice | null, onPhone: boolean): PhraseAudio => ({ french: { voice, onPhone }, english: { voice, onPhone } })
 
 function typeInto(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
@@ -64,6 +69,91 @@ describe('DeckDetailScreen', () => {
     expect(button).not.toBeNull()
     act(() => click(button!))
     expect(onDrillDeck).toHaveBeenCalledTimes(1)
+  })
+
+  // Detect existing audio (#4): the user could not see whether a Deck's audio was
+  // there before tapping Drill, and so found out one refusal at a time.
+  it('states how many of its Phrases have audio on this phone', () => {
+    renderScreen(threePhraseDeck, {
+      phraseAudio: new Map([
+        ['p1', both(GEORGE, true)],
+        ['p2', both(GEORGE, false)],
+        ['p3', both(GEORGE, true)],
+      ]),
+    })
+
+    expect(container.querySelector('[data-testid="deck-audio-status"]')?.textContent).toBe('Audio ready for 2 of 3 phrases')
+  })
+
+  it('says plainly when every Phrase has its audio', () => {
+    renderScreen(threePhraseDeck, { phraseAudio: new Map(['p1', 'p2', 'p3'].map((id) => [id, both(GEORGE, true)])) })
+
+    expect(container.querySelector('[data-testid="deck-audio-status"]')?.textContent).toBe('All audio ready')
+  })
+
+  // #6: "It should show on the clip if it's been done, the voice it's done
+  // in, and how to set it. It should also show if cached locally."
+  it('shows on each Phrase whether its audio is done, the voice it is in, and whether it is on this phone', () => {
+    renderScreen(threePhraseDeck, {
+      voices: VOICE_CATALOGUE,
+      phraseAudio: new Map([
+        ['p1', both(GEORGE, true)],
+        ['p2', both(GEORGE, false)],
+        ['p3', both(null, false)],
+      ]),
+    })
+
+    const row = (id: string) => container.querySelector(`[data-testid="phrase-audio-${id}"]`)?.textContent
+    expect(row('p1')).toBe('Audio done in George · saved on this phone')
+    expect(row('p2')).toBe('Audio done in George · on the server, not on this phone yet')
+    expect(row('p3')).toBe('No audio yet')
+  })
+
+  it('names each side when its two Clips are in different voices, or one is missing', () => {
+    renderScreen(threePhraseDeck, {
+      voices: VOICE_CATALOGUE,
+      phraseAudio: new Map<string, PhraseAudio>([
+        ['p1', { french: { voice: GEORGE, onPhone: true }, english: { voice: RACHEL, onPhone: false } }],
+        ['p2', { french: { voice: GEORGE, onPhone: true }, english: { voice: null, onPhone: false } }],
+      ]),
+    })
+
+    const row = (id: string) => container.querySelector(`[data-testid="phrase-audio-${id}"]`)?.textContent
+    expect(row('p1')).toBe('French done in George, English in Rachel · partly on this phone')
+    expect(row('p2')).toBe('French done in George, English not yet · saved on this phone')
+  })
+
+  it('says when a Phrase\'s audio could not be made, instead of waiting forever', () => {
+    renderScreen(threePhraseDeck, {
+      phraseAudio: new Map([['p1', both(null, false)]]),
+      audioFailedIds: new Set(['p1']),
+    })
+
+    expect(container.querySelector('[data-testid="phrase-audio-p1"]')?.textContent).toBe('No audio — it could not be made')
+  })
+
+  it('says which voice new audio is made in, and opens the voice setting from here', () => {
+    const onChangeVoice = vi.fn()
+    renderScreen(threePhraseDeck, { voices: VOICE_CATALOGUE, pinnedVoice: RACHEL, onChangeVoice, onRegeneratePhraseAudio: vi.fn() })
+
+    expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('New audio is made in Rachel')
+    expect(container.querySelector('[data-testid="regenerate-phrase-audio-p1"]')?.textContent).toBe('Redo in Rachel')
+    act(() => click(container.querySelector('[data-testid="change-voice"]')!))
+    expect(onChangeVoice).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks for a voice when none is chosen', () => {
+    renderScreen(threePhraseDeck, { voices: VOICE_CATALOGUE, pinnedVoice: null, onChangeVoice: vi.fn() })
+
+    expect(container.querySelector('[data-testid="deck-voice"]')?.textContent).toContain('No voice chosen yet')
+    expect(container.querySelector('[data-testid="change-voice"]')?.textContent).toBe('Choose a voice')
+  })
+
+  it('says nothing about audio before it knows', () => {
+    renderScreen(threePhraseDeck)
+
+    expect(container.querySelector('[data-testid="deck-audio-status"]')).toBeNull()
+    expect(container.querySelector('[data-testid="phrase-audio-p1"]')).toBeNull()
   })
 
   it('renders each Phrase, English over French, in author order', () => {

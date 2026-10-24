@@ -12,12 +12,15 @@
     "test:mutation": "stryker run",
     "format": "prettier --write .",
     "deploy": "scripts/deploy.sh",
-    "useradd": "node scripts/useradd.mjs",
     "clip-delete": "node scripts/clip-delete.mjs",
     "backup": "node scripts/backup.mjs",
-    "restore-drill": "node scripts/restore-drill.mjs"
+    "restore-drill": "node scripts/restore-drill.mjs",
+    "clips-to-storage": "node scripts/clips-to-storage.mjs",
+    "auth-user-create": "node scripts/auth-user-create.mjs",
+    "auth-password-set": "node scripts/auth-password-set.mjs"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
     "idb": "^8.0.3",
     "pg": "^8.22.0",
     "react": "^19.2.8",
@@ -38,6 +41,7 @@
     "globals": "^17.9.0",
     "jsdom": "^30.0.1",
     "prettier": "^3.9.6",
+    "supabase": "^2.119.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.65.0",
     "vite": "^8.2.0",

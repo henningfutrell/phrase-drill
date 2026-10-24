@@ -1,0 +1,16 @@
+# systemd --user unit: one phrase-drill database backup. Install steps:
+# docs/backup.md ("The daily timer on backup-host").
+#
+# %h/.config/phrase-drill/backup.env holds (mode 600):
+#   DATABASE_URL=postgres://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+#   BACKUP_DEST=/path/to/backups
+#   PHRASE_DRILL_DIR=/path/to/phrase-drill-checkout
+[Unit]
+Description=phrase-drill database backup (pg_dump of the Supabase database)
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/phrase-drill/backup.env
+# systemd expands ${VAR} in ExecStart (not in WorkingDirectory) from the
+# EnvironmentFile. Adjust the node path if node is not /usr/bin/node.
+ExecStart=/usr/bin/node ${PHRASE_DRILL_DIR}/scripts/backup.mjs

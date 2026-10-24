@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 /**
- * MANUAL logical export (T054, re-scoped T065).
+ * Logical export of the Supabase database (T054, re-scoped T065).
  *
- * WHAT THIS IS: an on-demand export a human runs to pull a copy of them
- * phrase library off the platform and onto a machine they control.
  * `pg_dump` the database named by `DATABASE_URL`, gzip it, write it into
  * the directory named by `BACKUP_DEST`, and prune anything there older than
- * `BACKUP_RETENTION_DAYS`. You run it; nothing runs it for you.
+ * `BACKUP_RETENTION_DAYS`.
  *
- * WHAT THIS IS NOT: the scheduled off-site backup. That is Render's
- * managed Postgres, whose own backups are the primary mechanism — which is
- * why `render.yaml` pays for `basic-256mb` instead of the free tier that
- * has no backups at all. This script does not replace it, is not
- * scheduled, and writing it to a directory on the Render container would
- * be worthless: that filesystem evaporates on the next redeploy. Point
- * `BACKUP_DEST` at a machine you own. See `docs/backup.md`.
+ * It is the scheduled backup. Supabase Free has no managed
+ * backups (docs/backup.md, decision D1), so `ops/backup-host/phrase-drill-backup.timer`
+ * runs this daily from a machine we own. Never write to the Render container:
+ * that filesystem evaporates on the next redeploy.
+ *
+ * The dump holds their library only (`libraries`, `library_versions`, `clips`
+ * metadata). Clip audio lives in Supabase Storage and is regenerable from
+ * the library, so it is deliberately not backed up.
  *
  * Every step fails loudly: a non-zero exit and a logged `error`, never a
  * swallowed exception. An export that fails silently is worse than none.
  *
  * Env:
- *   DATABASE_URL          required. Same variable the server itself reads.
+ *   DATABASE_URL          required. The Supabase session-pooler URL, with
+ *                          `?sslmode=require` (libpq verifies nothing less).
  *   BACKUP_DEST            required. A local directory path, created if it
  *                          does not exist. Not a URI — there is no bucket
  *                          destination, and a `<scheme>://` value is
@@ -83,12 +83,21 @@ export function resolveDestinationDir(dest) {
   return dest
 }
 
+/**
+ * The tables in `public` only: Supabase owns `auth`/`storage`/..., and the pooler role cannot dump them.
+ * `--table`, not `--schema=public`: selecting the schema emits `CREATE SCHEMA public`, which fails on
+ * every database a restore can target, since `public` always exists there.
+ */
+export function pgDumpArgs(uri) {
+  return ['-d', uri, '--no-owner', '--no-privileges', '--table=public.*']
+}
+
 async function dumpAndCompress({ databaseUrl, outFile }) {
   const { database, password } = parsePgUrl(databaseUrl)
   const uri = sanitizedUriWithDatabase(databaseUrl, database)
 
   await new Promise((resolve, reject) => {
-    const child = spawn('pg_dump', ['-d', uri, '--no-owner', '--no-privileges'], {
+    const child = spawn('pg_dump', pgDumpArgs(uri), {
       env: { ...process.env, PGPASSWORD: password },
       stdio: ['ignore', 'pipe', 'pipe'],
     })

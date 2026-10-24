@@ -42,9 +42,20 @@ function blockedCopy(reason: 'no-voice' | 'none-ready', online: boolean): string
     return 'No voice has been chosen yet — pick one in Settings before drilling.'
   }
   return online
-    ? "This drill's audio isn't ready yet — it's still being made. Try again in a moment."
+    ? "This drill's audio isn't on this phone yet — getting it now. The drill opens by itself as soon as the first phrases are ready."
     : "This drill's audio isn't on this phone right now, and there's no connection to fetch it. " +
         'It comes back on its own when you’re online again — your phrases are safe.'
+}
+
+/**
+ * How often the screen re-reads readiness while audio is arriving (#4). The
+ * re-read is a local index lookup — no network — so this is about how soon
+ * the user sees the count move, not about load.
+ */
+const DEFAULT_RECHECK_MS = 3000
+
+function phrasesLabel(count: number): string {
+  return `${count} phrase${count === 1 ? '' : 's'}`
 }
 
 const BEATS = [0, 1, 2, 3] as const
@@ -138,6 +149,15 @@ export interface DrillScreenProps {
   readonly title: string
   /** Runs the readiness gate (T024) — the composition root binds the real Phrases/deps. */
   readonly checkReadiness: () => Promise<DrillReadinessResult>
+  /**
+   * Re-reads readiness without asking for anything (#4): what the first
+   * check queued keeps arriving, and this is how the screen sees it. Called
+   * every `recheckEveryMs` while online, before Start, and while something
+   * is still missing — so a long Deck opens as soon as its first phrases are
+   * here, rather than telling them to come back. Omitted, nothing re-checks.
+   */
+  readonly recheckReadiness?: () => Promise<DrillReadinessResult>
+  readonly recheckEveryMs?: number
   readonly speech: SpeechPort
   readonly clock: ClockPort
   /** Applies Shuffle at Drill start — omitted only in tests that don't care. */
@@ -217,6 +237,8 @@ type Phase =
 export function DrillScreen({
   title,
   checkReadiness,
+  recheckReadiness,
+  recheckEveryMs = DEFAULT_RECHECK_MS,
   speech,
   clock,
   random,
@@ -260,21 +282,26 @@ export function DrillScreen({
   >(undefined)
   const [, forceRender] = useState(0)
 
+  /** A readiness answer, as the phase it puts the screen in. An unlock
+   * failure already on the start card stays there — a re-check is not a tap. */
+  function applyReadiness(result: DrillReadinessResult): void {
+    if (!result.canStart) {
+      setPhase({ kind: 'blocked', reason: result.reason ?? 'none-ready', online: result.online })
+      return
+    }
+    setPhase((current) => ({
+      kind: 'start',
+      ready: result.ready,
+      skippedCount: result.skippedCount,
+      online: result.online,
+      unlockFailure: current.kind === 'start' ? current.unlockFailure : undefined,
+    }))
+  }
+
   useEffect(() => {
     let cancelled = false
     void checkReadiness().then((result) => {
-      if (cancelled) return
-      if (!result.canStart) {
-        setPhase({ kind: 'blocked', reason: result.reason ?? 'none-ready', online: result.online })
-      } else {
-        setPhase({
-          kind: 'start',
-          ready: result.ready,
-          skippedCount: result.skippedCount,
-          online: result.online,
-          unlockFailure: undefined,
-        })
-      }
+      if (!cancelled) applyReadiness(result)
     })
     return () => {
       cancelled = true
@@ -282,6 +309,31 @@ export function DrillScreen({
     // Runs once: re-checking readiness is a fresh mount (a new Drill), not a re-render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Watching the audio arrive (#4). Only while something is missing, online
+  // (offline nothing can arrive), and before Start: once the Drill runs, its
+  // Phrases are fixed. Not while a Start tap is in flight, so the list the user
+  // tapped is the list that plays.
+  const watching =
+    !!recheckReadiness &&
+    !starting &&
+    ((phase.kind === 'blocked' && phase.reason === 'none-ready' && phase.online) ||
+      (phase.kind === 'start' && phase.skippedCount > 0 && phase.online))
+  useEffect(() => {
+    if (!watching || !recheckReadiness) return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void recheckReadiness().then((result) => {
+        if (!cancelled && !startingRef.current) applyReadiness(result)
+      })
+    }, recheckEveryMs)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+    // Re-armed by each new answer: `phase` is a fresh object every time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watching, phase])
 
   // The Drill screen going away mid-run. Not reachable from any control on
   // this screen — the running phase renders Skip/Pause/Stop only — but a 401
@@ -513,12 +565,14 @@ export function DrillScreen({
           Back
         </button>
         <h1 data-testid="drill-title">{title}</h1>
-        <p data-testid="drill-phrase-count">{phase.ready.length} phrases</p>
+        <p data-testid="drill-phrase-count">{phrasesLabel(phase.ready.length)}</p>
         {phase.skippedCount > 0 && (
           <p data-testid="drill-skipped-count" className="drill-skipped">
-            {phase.skippedCount} phrase{phase.skippedCount === 1 ? '' : 's'}{' '}
+            {phrasesLabel(phase.skippedCount)}{' '}
             {phase.online
-              ? 'have no audio yet — skipped'
+              ? recheckReadiness
+                ? 'still getting audio — they join this drill as they arrive, until you start'
+                : 'have no audio yet — skipped'
               : 'have no audio on this phone — skipped until you’re online'}
           </p>
         )}

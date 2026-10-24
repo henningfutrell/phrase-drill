@@ -65,8 +65,8 @@ async function replaceAll(
  * reason has changed, so the old one is not left here to mislead. It used to
  * be that the `settings` store held the library key, and an export that
  * could not see it structurally could not carry a credential. There is no
- * credential in there any more: the device's identity is an opaque session
- * token held in `localStorage` by `session-auth.ts` (T050). What the rule
+ * credential in there any more: the device's identity is a Supabase Auth
+ * session held in `localStorage` by supabase-js, behind `session-auth.ts`. What the rule
  * protects now is the shape of the envelope — what leaves this device is
  * ENUMERATED, field by field, rather than being whatever happens to be in a
  * store. The one settings field that does travel, the pinned voice (T067),

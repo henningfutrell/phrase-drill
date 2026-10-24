@@ -4,7 +4,7 @@ import { createClipJobRunner, defaultRetryDelayMs } from './clip-job-runner.js'
 import { STALE_RUNNING_MS } from './clip-job-store.js'
 import { createMemoryClipJobStore, jobFields } from './clip-job-store.test-support.js'
 import { createClipStore } from './db.js'
-import { fakeClipPool } from './pool.test-support.js'
+import { fakeClipPool, fakeClipStorage } from './pool.test-support.js'
 import { validateClip } from './clip-validation.js'
 
 /**
@@ -76,7 +76,7 @@ afterEach(async () => {
 
 async function setup({ provider = fakeProvider(goodClip()), start = true, ...options } = {}) {
   const jobStore = createMemoryClipJobStore()
-  const clipStore = createClipStore(fakeClipPool())
+  const clipStore = createClipStore(fakeClipPool(), { storage: fakeClipStorage() })
   await clipStore.init()
   const logger = silentLogger()
   runner = createClipJobRunner({
