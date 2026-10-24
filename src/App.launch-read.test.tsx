@@ -210,8 +210,8 @@ const noopClipCache: BoundedClipCache = {
     return false
   },
   async delete() {},
-  async readyPhraseIds() {
-    return new Set()
+  async readyClips() {
+    return new Map()
   },
   async usage() {
     return { bytes: 0, clipCount: 0, maxBytes: 1 }

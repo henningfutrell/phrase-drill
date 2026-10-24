@@ -53,8 +53,8 @@ function createFakeClipCache(): ClipCache {
     async delete(hash) {
       clips.delete(hash)
     },
-    async readyPhraseIds() {
-      return new Set()
+    async readyClips() {
+      return new Map()
     },
   }
 }

@@ -21,7 +21,7 @@ function fakeClipCache(ready: readonly string[]): ClipCache {
     put: vi.fn(),
     has: vi.fn(),
     delete: vi.fn(),
-    readyPhraseIds: vi.fn().mockResolvedValue(new Set(ready)),
+    readyClips: vi.fn().mockResolvedValue(new Map(ready.map((id) => [id, { french: `fr-${id}`, english: `en-${id}` }]))),
   }
 }
 
@@ -90,7 +90,7 @@ describe('computeDrillReadiness', () => {
     expect(result.skippedCount).toBe(3)
     expect(result.canStart).toBe(false)
     expect(result.reason).toBe('no-voice')
-    expect(clipCache.readyPhraseIds).not.toHaveBeenCalled()
+    expect(clipCache.readyClips).not.toHaveBeenCalled()
     expect(generationQueue.enqueue).not.toHaveBeenCalled()
   })
 
@@ -105,7 +105,7 @@ describe('computeDrillReadiness', () => {
 
     await computeDrillReadiness(PHRASES, { clipCache, generationQueue, voice: VOICE })
 
-    expect(clipCache.readyPhraseIds).toHaveBeenCalledWith(PHRASES, knownVoices(VOICE))
+    expect(clipCache.readyClips).toHaveBeenCalledWith(PHRASES, knownVoices(VOICE))
     expect(knownVoices(VOICE)[0]).toEqual(VOICE)
   })
 
@@ -156,18 +156,16 @@ describe('computeDrillReadiness', () => {
    * be spared for the run's duration.
    */
   describe('protecting the running drill\'s working set', () => {
-    it('protects the pinned-voice clip hashes of every ready Phrase', async () => {
+    it('protects the clip hashes the sweep found for every ready Phrase, without asking again', async () => {
       const clipCache = fakeClipCache(['p1'])
-      clipCache.has = vi.fn().mockResolvedValue(true)
       clipCache.protect = vi.fn()
       const generationQueue = fakeQueue()
 
       await computeDrillReadiness(PHRASES, { clipCache, generationQueue, voice: VOICE })
 
-      const frHash = await computeClipHash({ ...VOICE, lang: 'fr-FR', text: 'Bonjour' })
-      const enHash = await computeClipHash({ ...VOICE, lang: 'en-US', text: 'Hello' })
       expect(clipCache.protect).toHaveBeenCalledTimes(1)
-      expect(clipCache.protect).toHaveBeenCalledWith(new Set([frHash, enHash]))
+      expect(clipCache.protect).toHaveBeenCalledWith(new Set(['fr-p1', 'en-p1']))
+      expect(clipCache.has).not.toHaveBeenCalled()
     })
 
     it('protects nothing when no Phrase is ready — releasing whatever a previous drill protected', async () => {

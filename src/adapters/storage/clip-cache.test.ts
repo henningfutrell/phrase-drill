@@ -83,7 +83,7 @@ describe('createIndexedDbClipCache', () => {
     expect((await cache.get(hash))?.durationMs).toBe(2)
   })
 
-  describe('readyPhraseIds', () => {
+  describe('readyClips', () => {
     it('returns only the phrases whose FR and EN clips are both cached', async () => {
       const cache = createIndexedDbClipCache()
       const phrases = [
@@ -98,9 +98,9 @@ describe('createIndexedDbClipCache', () => {
       const frHash2 = await computeClipHash({ ...VOICE, lang: 'fr-FR' as const, text: 'Salut' })
       await cache.put({ hash: frHash2, bytes: bytesOf('fr2'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const ready = await cache.readyPhraseIds(phrases, [VOICE])
+      const ready = await cache.readyClips(phrases, [VOICE])
 
-      expect(ready).toEqual(new Set(['p1']))
+      expect(ready).toEqual(new Map([['p1', { french: frHash1, english: enHash1 }]]))
     })
 
     it('excludes a phrase whose text was edited after its old clip was cached, forcing regeneration', async () => {
@@ -111,9 +111,9 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
       const edited = [{ id: 'p1', french: 'New text', english: 'Hello' }]
-      const ready = await cache.readyPhraseIds(edited, [VOICE])
+      const ready = await cache.readyClips(edited, [VOICE])
 
-      expect(ready).toEqual(new Set())
+      expect(new Set(ready.keys())).toEqual(new Set())
     })
 
     /**
@@ -131,12 +131,12 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
       const newlyPinned = { ...VOICE, voiceId: 'voice-2' }
-      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [
+      const ready = await cache.readyClips([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [
         newlyPinned,
         VOICE,
       ])
 
-      expect(ready).toEqual(new Set(['p1']))
+      expect(new Set(ready.keys())).toEqual(new Set(['p1']))
     })
 
     it('excludes a phrase whose clips are in no offered voice at all', async () => {
@@ -146,11 +146,11 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [
+      const ready = await cache.readyClips([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [
         { ...VOICE, voiceId: 'voice-2' },
       ])
 
-      expect(ready).toEqual(new Set())
+      expect(new Set(ready.keys())).toEqual(new Set())
     })
 
     it('counts a phrase ready when one side is cached in one voice and the other side in another', async () => {
@@ -161,9 +161,10 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      const ready = await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [VOICE, other])
+      const ready = await cache.readyClips([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [VOICE, other])
 
-      expect(ready).toEqual(new Set(['p1']))
+      // Each side's hash is the one in the voice that side is really cached in.
+      expect(ready).toEqual(new Map([['p1', { french: frHash, english: enHash }]]))
     })
 
     it('asks about no voice it was not given — an empty voice list makes nothing ready', async () => {
@@ -173,12 +174,12 @@ describe('createIndexedDbClipCache', () => {
       await cache.put({ hash: frHash, bytes: bytesOf('fr'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
       await cache.put({ hash: enHash, bytes: bytesOf('en'), mime: 'audio/mpeg', durationMs: 1, createdAt: 1 })
 
-      expect(await cache.readyPhraseIds([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [])).toEqual(new Set())
+      expect(new Set((await cache.readyClips([{ id: 'p1', french: 'Bonjour', english: 'Hello' }], [])).keys())).toEqual(new Set())
     })
 
     it('returns an empty set for an empty phrase list', async () => {
       const cache = createIndexedDbClipCache()
-      expect(await cache.readyPhraseIds([], [VOICE])).toEqual(new Set())
+      expect(new Set((await cache.readyClips([], [VOICE])).keys())).toEqual(new Set())
     })
   })
 
@@ -317,7 +318,7 @@ describe('createIndexedDbClipCache', () => {
         await cache.put(sizedClip(await computeClipHash({ ...VOICE, lang: 'en-US', text: phrase.english }), 500))
       }
 
-      expect(await cache.readyPhraseIds(phrases, [VOICE])).toEqual(new Set(['p2']))
+      expect(new Set((await cache.readyClips(phrases, [VOICE])).keys())).toEqual(new Set(['p2']))
     })
 
     /**

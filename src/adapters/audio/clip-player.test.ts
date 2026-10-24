@@ -139,8 +139,8 @@ function fakeClipCache(clips: Record<string, Clip> = {}): ClipCache & { puts: Cl
     async delete(hash: string) {
       store.delete(hash)
     },
-    async readyPhraseIds() {
-      return new Set()
+    async readyClips() {
+      return new Map()
     },
   } as ClipCache & { puts: Clip[] }
 }

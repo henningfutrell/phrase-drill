@@ -255,7 +255,7 @@ function createFakeGenerationQueue(): GenerationQueue & {
 
 /** In-memory ClipCache fake — the real IndexedDB cache is exercised in
  * src/adapters/storage; App's wiring of the readiness gate is what these
- * tests care about. `readyIds`/`readyPhraseIds` default to "nothing ready",
+ * tests care about. `readyIds`/`readyClips` default to "nothing ready",
  * which is the honest default for a fresh app. */
 function createFakeClipCache(
   readyIds: ReadonlySet<string> = new Set(),
@@ -270,8 +270,8 @@ function createFakeClipCache(
       return false
     },
     async delete() {},
-    async readyPhraseIds(phrases) {
-      return new Set(phrases.map((p) => p.id).filter((id) => readyIds.has(id)))
+    async readyClips(phrases) {
+      return new Map(phrases.filter((p) => readyIds.has(p.id)).map((p) => [p.id, { french: `fr-${p.id}`, english: `en-${p.id}` }]))
     },
     async usage() {
       return usage

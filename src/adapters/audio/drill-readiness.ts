@@ -1,5 +1,5 @@
 import type { Phrase, Voice } from '../../domain'
-import { findCachedClipHash, type ClipCache } from '../storage/clip-cache'
+import type { ClipCache, ReadyClips } from '../storage/clip-cache'
 import type { GenerationQueue, HeldVoices } from './generation-queue'
 import { knownVoices } from './voice-catalogue'
 import { detectVoice, locateHeldVoices } from './audio-locator'
@@ -69,7 +69,7 @@ export async function computeDrillReadiness(
   phrases: readonly Phrase[],
   deps: DrillReadinessDeps,
 ): Promise<DrillReadiness> {
-  const { voice, voices, ready, unready, online } = await survey(phrases, deps)
+  const { voice, ready, readyClips, unready, online } = await survey(phrases, deps)
 
   if (!voice) {
     // Nothing to ask the cache about, and nothing to queue: a Phrase can't
@@ -95,8 +95,10 @@ export async function computeDrillReadiness(
   // exactly the Phrases in `ready`, in the voice each one actually has a
   // Clip in — so it hands that set to the cache rather than adding a
   // parameter `App.tsx` would have to thread through screens that never
-  // otherwise touch the cache.
-  await protectWorkingSet(ready, voices, deps.clipCache)
+  // otherwise touch the cache. The hashes are the ones the survey already
+  // found (T037): hashing every ready Phrase again here doubled the cost of
+  // every drill start.
+  deps.clipCache.protect?.(workingSet(readyClips))
 
   return {
     ready,
@@ -128,7 +130,7 @@ export async function fetchMissingAudio(phrases: readonly Phrase[], deps: DrillR
 async function survey(
   phrases: readonly Phrase[],
   deps: DrillReadinessDeps,
-): Promise<{ voice: Voice | null; voices: Voice[]; ready: Phrase[]; unready: Phrase[]; online: boolean }> {
+): Promise<{ voice: Voice | null; ready: Phrase[]; readyClips: Map<string, ReadyClips>; unready: Phrase[]; online: boolean }> {
   const online = deps.isOnline ? deps.isOnline() : defaultIsOnline()
   const queueMissing = deps.queueMissing ?? true
 
@@ -139,15 +141,15 @@ async function survey(
     voice = await detectVoice(phrases, { clipCache: deps.clipCache, lookup: deps.heldLookup })
     if (voice) deps.pinVoice?.(voice)
   }
-  if (!voice) return { voice: null, voices: [], ready: [], unready: [...phrases], online }
+  if (!voice) return { voice: null, ready: [], readyClips: new Map(), unready: [...phrases], online }
 
   // Every voice a Clip could be in, pinned first (T067). Asking only about
   // the pinned voice is what used to report a fully-generated library as
   // entirely unready the moment the user changed their mind, and enqueue all of it.
   const voices = knownVoices(voice)
-  const readyIds = await deps.clipCache.readyPhraseIds(phrases, voices)
-  const ready = phrases.filter((phrase) => readyIds.has(phrase.id))
-  const unready = phrases.filter((phrase) => !readyIds.has(phrase.id))
+  const readyClips = await deps.clipCache.readyClips(phrases, voices)
+  const ready = phrases.filter((phrase) => readyClips.has(phrase.id))
+  const unready = phrases.filter((phrase) => !readyClips.has(phrase.id))
 
   if (online && queueMissing) {
     const held = deps.heldLookup ? await locateHeldVoices(unready, voices, deps.heldLookup) : new Map<string, HeldVoices>()
@@ -157,28 +159,17 @@ async function survey(
       else deps.generationQueue.enqueue(phrase)
     }
   }
-  return { voice, voices, ready, unready, online }
+  return { voice, ready, readyClips, unready, online }
 }
 
-/**
- * Resolves each ready Phrase's actual cached hash (fr and en, in whichever
- * offered voice it is really in) and hands the set to `clipCache.protect()`.
- * A no-op when the cache does not offer `protect()` — optional on the port
- * so older fakes and any cache that chooses not to protect stay valid.
- */
-async function protectWorkingSet(ready: readonly Phrase[], voices: readonly Voice[], clipCache: ClipCache): Promise<void> {
-  if (!clipCache.protect) return
-  const has = (hash: string): Promise<boolean> => clipCache.has(hash)
+/** Every Clip the ready Phrases play: their working set, both sides each. */
+function workingSet(readyClips: ReadonlyMap<string, ReadyClips>): Set<string> {
   const hashes = new Set<string>()
-  for (const phrase of ready) {
-    const [french, english] = await Promise.all([
-      findCachedClipHash(has, voices, 'fr-FR', phrase.french),
-      findCachedClipHash(has, voices, 'en-US', phrase.english),
-    ])
-    if (french) hashes.add(french)
-    if (english) hashes.add(english)
+  for (const { french, english } of readyClips.values()) {
+    hashes.add(french)
+    hashes.add(english)
   }
-  clipCache.protect(hashes)
+  return hashes
 }
 
 function defaultIsOnline(): boolean {

@@ -137,8 +137,18 @@ export interface ClipCache {
    * regeneration. `voices` is in preference order — pinned first — and the
    * first hit wins, so the ordinary case (everything in the pinned voice)
    * costs exactly what it did before.
+   *
+   * **Answers with the hashes, not only the ids (T037).** The drill start
+   * protects exactly these Clips next; giving it the hashes found here is
+   * what keeps it from hashing every ready Phrase a second time.
    */
-  readyPhraseIds(phrases: readonly PhraseRecord[], voices: readonly Voice[]): Promise<Set<string>>
+  readyClips(phrases: readonly PhraseRecord[], voices: readonly Voice[]): Promise<Map<string, ReadyClips>>
+}
+
+/** The two Clips a ready Phrase plays, by hash — each side in whichever voice it is cached in. */
+export interface ReadyClips {
+  readonly french: string
+  readonly english: string
 }
 
 /** What the cache is holding, and what it is allowed to hold (T036). */
@@ -391,7 +401,7 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
    * audio and its index row as two separate `db.put`s left the same gap T078
    * closed on the way out, on the way in instead. Interrupted between them —
    * the tab killed, the phone reclaiming the app mid-generation — the audio
-   * lands with no row describing it: `has()` and `readyPhraseIds` answer from
+   * lands with no row describing it: `has()` and `readyClips` answer from
    * the index alone, so real, playable audio reports as not ready, is
    * silently excluded from the drill or silently regenerated, and is never
    * charged against the 200 MB ceiling either. It only self-heals at the next
@@ -643,8 +653,8 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       return (await getIndex()).has(hash)
     },
 
-    async readyPhraseIds(phrases: readonly PhraseRecord[], voices: readonly Voice[]): Promise<Set<string>> {
-      if (phrases.length === 0) return new Set()
+    async readyClips(phrases: readonly PhraseRecord[], voices: readonly Voice[]): Promise<Map<string, ReadyClips>> {
+      if (phrases.length === 0) return new Map()
 
       // The index, not `getAll(CLIPS_STORE)`. The old form loaded every Clip
       // in the cache — the whole ~848 MB at a full library — to answer a
@@ -655,14 +665,14 @@ export function createIndexedDbClipCache(options: ClipCacheOptions = {}): Bounde
       const cachedHashes = await getIndex()
       const has = (hash: string): Promise<boolean> => Promise.resolve(cachedHashes.has(hash))
 
-      const ready = new Set<string>()
+      const ready = new Map<string, ReadyClips>()
       for (const phrase of phrases) {
         const [french, english] = await Promise.all([
           findCachedClipHash(has, voices, 'fr-FR', phrase.french),
           findCachedClipHash(has, voices, 'en-US', phrase.english),
         ])
         if (french && english) {
-          ready.add(phrase.id)
+          ready.set(phrase.id, { french, english })
         }
       }
       return ready

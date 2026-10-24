@@ -154,8 +154,8 @@ interface Row {
   importAllMsMeasured: number
   exportAllMsMeasured: number
   exportBytesMeasured: number
-  readyPhraseIdsColdMsMeasured: number
-  readyPhraseIdsWarmMsMeasured: number
+  readyClipsColdMsMeasured: number
+  readyClipsWarmMsMeasured: number
 }
 
 const results: Row[] = []
@@ -195,8 +195,8 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         async delete(hash: string) {
           clips.delete(hash)
         },
-        async readyPhraseIds() {
-          return new Set<string>()
+        async readyClips() {
+          return new Map()
         },
       }
       const queue = createGenerationQueue({
@@ -243,8 +243,8 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
           return false
         },
         async delete() {},
-        async readyPhraseIds() {
-          return new Set<string>()
+        async readyClips() {
+          return new Map()
         },
       }
       const hangingQueue = createGenerationQueue({
@@ -297,7 +297,7 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
       const serialized = JSON.stringify(exported)
       const exportBytesMeasured = new TextEncoder().encode(serialized).byteLength
 
-      // 5. readyPhraseIds — the drill-start sweep. Since T067 the sweep asks
+      // 5. readyClips — the drill-start sweep. Since T067 the sweep asks
       // about every voice a Clip could be in, pinned first, and stops at the
       // first hit: the WARM number below is therefore still two digests per
       // phrase (everything is in the pinned voice), and the COLD number is
@@ -306,12 +306,12 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
       const clipCache = createIndexedDbClipCache()
 
       const coldStart = performance.now()
-      const readyCold = await clipCache.readyPhraseIds(phrases, knownVoices(VOICE))
-      const readyPhraseIdsColdMsMeasured = performance.now() - coldStart
+      const readyCold = await clipCache.readyClips(phrases, knownVoices(VOICE))
+      const readyClipsColdMsMeasured = performance.now() - coldStart
       expect(readyCold.size).toBe(0) // nothing cached yet
 
       // Warm the cache: put a Clip (modelled bytes) for every phrase/lang,
-      // so readyPhraseIds' db.getAll(CLIPS_STORE) has to load 2N real
+      // so readyClips' db.getAll(CLIPS_STORE) has to load 2N real
       // ArrayBuffers of realistic (modelled) size out of the store —
       // this is what happens on every drill start once the library is
       // fully generated.
@@ -335,8 +335,8 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
       }
 
       const warmStart = performance.now()
-      const readyWarm = await clipCache.readyPhraseIds(phrases, knownVoices(VOICE))
-      const readyPhraseIdsWarmMsMeasured = performance.now() - warmStart
+      const readyWarm = await clipCache.readyClips(phrases, knownVoices(VOICE))
+      const readyClipsWarmMsMeasured = performance.now() - warmStart
       expect(readyWarm.size).toBe(n) // everything now ready
 
       // 6. Raw hashing cost in isolation: 2N SHA-256 digests, nothing else.
@@ -357,8 +357,8 @@ describe.skipIf(!RUN)('scale: thousands of Phrases (T032)', () => {
         importAllMsMeasured,
         exportAllMsMeasured,
         exportBytesMeasured,
-        readyPhraseIdsColdMsMeasured,
-        readyPhraseIdsWarmMsMeasured,
+        readyClipsColdMsMeasured,
+        readyClipsWarmMsMeasured,
       }
       results.push(row)
 
