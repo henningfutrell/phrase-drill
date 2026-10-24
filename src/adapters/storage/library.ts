@@ -141,11 +141,15 @@ function isMixRecord(value: unknown): boolean {
   )
 }
 
-function isTombstone(value: unknown): boolean {
+/**
+ * A Tombstone this build can key and apply. A Phrase's (T073) must name its
+ * Deck: without `deckId` it cannot say which Deck's Phrase it deletes.
+ */
+function isTombstone(value: unknown): value is Tombstone {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
-    (value.kind === 'deck' || value.kind === 'mix') &&
+    (value.kind === 'deck' || value.kind === 'mix' || (value.kind === 'phrase' && typeof value.deckId === 'string')) &&
     typeof value.deletedAt === 'number'
   )
 }
@@ -210,7 +214,12 @@ export function normalizeLibrary(library: Library): Library {
     exportedAt: library.exportedAt,
     decks: migrateLibraryDecks(library),
     mixes: migrateLibraryMixes(library),
-    tombstones: migrateLibraryTombstones(library),
+    // A Tombstone this build cannot key is dropped, not stored (T073): the
+    // `tombstones` store is keyed by what a row deletes, so a Phrase
+    // Tombstone with no `deckId` would abort the whole local write — every
+    // round-trip, for good. Dropped, it costs at most one Phrase coming back.
+    // `parseLibraryFile` refuses such a file outright instead.
+    tombstones: migrateLibraryTombstones(library).filter(isTombstone),
     voice: migrateLibraryVoice(library),
   }
 }
@@ -243,9 +252,10 @@ export function withVoice(library: Library, voice: Voice | null): Library {
 }
 
 /**
- * The Tombstones of a library. Born at schema v5 with one shape, so there
- * is no chain to run — only the question a pre-v5 envelope asks, answered
- * in `normalizeLibrary` above.
+ * The Tombstones of a library. Born at schema v5; schema v7 added a kind
+ * (`'phrase'`, T073) and changed no existing row, so there is no chain to run
+ * — only the question a pre-v5 envelope asks, answered in `normalizeLibrary`
+ * above.
  */
 export function migrateLibraryTombstones(library: Library): Tombstone[] {
   assertReadableSchemaVersion(library.schemaVersion)

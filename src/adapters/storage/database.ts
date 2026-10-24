@@ -1,5 +1,6 @@
 import { openDB, type IDBPDatabase } from 'idb'
-import { CURRENT_SCHEMA_VERSION, migrateDeckRecord } from './migrations'
+import { tombstoneKey } from '../../domain'
+import { CURRENT_SCHEMA_VERSION, migrateDeckRecord, type Tombstone } from './migrations'
 
 export const DB_NAME = 'phrase-drill'
 export const DECKS_STORE = 'decks'
@@ -38,12 +39,15 @@ export const ERRORS_STORE = 'errors'
 export const MIXES_STORE = 'mixes'
 /**
  * What has been deleted, and when (T060 — `Tombstone` in the domain owns
- * why a deletion has to be data). One row per deleted Deck or Mix, keyed by
- * the id it names, carrying `kind` so a Deck's Tombstone can never reach a
- * Mix.
+ * why a deletion has to be data). One row per deleted Deck, Mix or Phrase
+ * (T073), keyed out of line by `tombstoneKey` — `['deck', id]`, `['mix', id]`,
+ * `['phrase', deckId, id]` — so no deletion can overwrite another. Write rows
+ * with `putTombstone`, never with a bare `put`: the store has no `keyPath`.
+ * Until schema v7 it was keyed by `id` alone, and a Deck and a Mix
+ * Tombstone under one id collapsed into one row.
  *
  * Written by both the deck store and the mix store, which is the one place
- * those two adapters share a store. Each writes only its own `kind`, and
+ * those two adapters share a store. Each writes only its own kinds, and
  * neither ever reads or removes the other's rows, so "deleting a Mix never
  * touches a Deck" still holds.
  *
@@ -55,6 +59,14 @@ export const MIXES_STORE = 'mixes'
  * bug, and there is no size at which that trade flips for this app.
  */
 export const TOMBSTONES_STORE = 'tombstones'
+
+/** The one way a row goes into `tombstones`: under the key of what it deletes. */
+export function putTombstone(
+  store: { put(value: Tombstone, key: IDBValidKey): Promise<unknown> },
+  tombstone: Tombstone,
+): Promise<unknown> {
+  return store.put(tombstone, [...tombstoneKey(tombstone)])
+}
 
 /**
  * The database refusing to be usable — the two conditions IndexedDB reports
@@ -154,8 +166,25 @@ export function openDatabase(): Promise<IDBPDatabase> {
         // v4 -> v5, additive: an existing database gains one empty store.
         // Empty is the truth — nothing was recorded as deleted before v5 —
         // and every existing Deck, Phrase and Mix passes through untouched
-        // (the branches above).
-        db.createObjectStore(TOMBSTONES_STORE, { keyPath: 'id' })
+        // (the branches above). Created with the v7 keying (no keyPath).
+        db.createObjectStore(TOMBSTONES_STORE)
+      } else if (oldVersion < 7) {
+        // v6 -> v7 (T073): the store is rekeyed by what each row deletes, and
+        // every row it holds is THEIR deletions — a row lost here is a Deck
+        // their other phone pushes back. IndexedDB cannot change a store's
+        // key in place, so the rows are read, the store is made again, and
+        // every row is put back under its new key, all inside this
+        // versionchange transaction: an upgrade that fails part-way rolls
+        // back whole and leaves the v6 database as it was.
+        //
+        // Before v7 a row could only be a Deck's or a Mix's, so its key is
+        // `[kind, id]`. `String()` because a throw here (a row that is not a
+        // valid key) stops the database opening at all, on every launch; a
+        // malformed row is carried instead, and it deletes nothing.
+        const rows = (await transaction.objectStore(TOMBSTONES_STORE).getAll()) as Tombstone[]
+        db.deleteObjectStore(TOMBSTONES_STORE)
+        const store = db.createObjectStore(TOMBSTONES_STORE)
+        for (const row of rows) await store.put(row, [String(row.kind), String(row.id)])
       }
       if (!db.objectStoreNames.contains(CLIP_META_STORE)) {
         // v5 -> v6, additive: the size index over an already-existing clip

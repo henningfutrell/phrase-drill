@@ -289,6 +289,28 @@ describe('parseLibraryFile — an envelope this build must not accept (T070)', (
   })
 })
 
+describe('Phrase Tombstones on the envelope (T073)', () => {
+  const PHRASE_GONE: Tombstone = { id: 'p1', kind: 'phrase', deckId: 'd1', deletedAt: 5 }
+  const current = (tombstones: unknown[]): Library =>
+    ({ format: LIBRARY_FORMAT, schemaVersion: CURRENT_SCHEMA_VERSION, exportedAt: 7, decks: [], tombstones }) as Library
+
+  it('accepts a backup file carrying a Phrase Tombstone that names its Deck', () => {
+    const result = parseLibraryFile(JSON.stringify(current([PHRASE_GONE])))
+
+    expect(result.ok && result.library.tombstones).toEqual([PHRASE_GONE])
+  })
+
+  it('carries a Phrase Tombstone through normalizeLibrary', () => {
+    expect(normalizeLibrary(current([PHRASE_GONE, ...TOMBSTONES])).tombstones).toEqual([PHRASE_GONE, ...TOMBSTONES])
+  })
+
+  it('drops a pulled Tombstone it cannot key, rather than abort every local write', () => {
+    const unkeyable = { id: 'p1', kind: 'phrase', deletedAt: 5 }
+
+    expect(normalizeLibrary(current([unkeyable, ...TOMBSTONES])).tombstones).toEqual(TOMBSTONES)
+  })
+})
+
 describe('normalizeLibrary and the migration helpers — the version guard runs on every envelope (T070)', () => {
   const fromTheFuture = (parts: Partial<Library>): Library => ({
     format: LIBRARY_FORMAT,

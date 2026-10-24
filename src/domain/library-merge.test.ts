@@ -1241,3 +1241,176 @@ describe('mergeLibraries — duplicate Deck and Mix ids are kept, never collapse
     expect(merged.mixes!.map((m) => m.name)).toEqual(['Mine'])
   })
 })
+
+/**
+ * T073. T070 made "the other side's absence is never a deletion", and paid
+ * for it: a Phrase deleted on one device came back from the other on the next
+ * sync. A Phrase Tombstone is the record that lets the deletion travel — and it
+ * deletes only what the deleting side saw, so a rolled-back server still
+ * cannot take a Phrase away.
+ */
+describe('mergeLibraries — a Phrase Tombstone deletes the Phrase on the other device (T073)', () => {
+  const P1 = { id: 'p1', french: 'Bonjour', english: 'Hello' }
+  const P2 = { id: 'p2', french: 'la pomme de terre', english: 'the potato' }
+  const P3 = { id: 'p3', french: 'Bonsoir', english: 'Good evening' }
+  const gone = (deletedAt: number, deckId = 'd1', id = 'p2'): Tombstone => ({ id, kind: 'phrase', deckId, deletedAt })
+
+  /** What both devices last agreed on: both Phrases. */
+  const base = library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2] })] })
+
+  it('deletes a Phrase this device still holds when the other device deleted it', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })], tombstones: [gone(6000)] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1])
+    expect(merged.tombstones).toEqual([gone(6000)])
+  })
+
+  it('still deletes it when this device edited a different Phrase of the same Deck since', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 9000, phrases: [P1, P2, P3] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })], tombstones: [gone(6000)] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1, P3])
+  })
+
+  it('keeps the Phrase when this device edited it since — an edit outranks a delete, and the Tombstone goes', () => {
+    const myEdit = { ...P2, french: 'la patate' }
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 7000, phrases: [P1, myEdit] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })], tombstones: [gone(6000)] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1, myEdit])
+    expect(merged.tombstones).toEqual([])
+  })
+
+  it('keeps a Phrase the baseline never held — the deleting side cannot have seen it', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 7000, phrases: [P1, P2, P3] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1, P2] })], tombstones: [gone(6000, 'd1', 'p3')] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1, P2, P3])
+  })
+
+  it('keeps every restored Phrase against an empty baseline (T072: a restore outranks a deletion)', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })], tombstones: [gone(6000)] }),
+      library({}),
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1, P2])
+    expect(merged.tombstones).toEqual([])
+  })
+
+  it('touches only the Deck it names, even when another Deck holds a Phrase under the same id', () => {
+    const merged = mergeLibraries(
+      library({
+        decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2] }), deck({ id: 'd2', updatedAt: 5000, phrases: [P2] })],
+      }),
+      library({
+        decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] }), deck({ id: 'd2', updatedAt: 5000, phrases: [P2] })],
+        tombstones: [gone(6000)],
+      }),
+      library({
+        decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2] }), deck({ id: 'd2', updatedAt: 5000, phrases: [P2] })],
+      }),
+    )
+
+    expect(merged.decks.map((d) => d.phrases.map((p) => p.id))).toEqual([['p1'], ['p2']])
+  })
+
+  it('never reaches a Deck or a Mix whose id matches the Phrase id', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'p2', updatedAt: 1 })], mixes: [mix({ id: 'p2' })] }),
+      library({ tombstones: [gone(9000, 'd1', 'p2')] }),
+      library({ decks: [deck({ id: 'p2', updatedAt: 1 })], mixes: [mix({ id: 'p2' })] }),
+    )
+
+    expect(merged.decks.map((d) => d.id)).toEqual(['p2'])
+    expect(merged.mixes!.map((m) => m.id)).toEqual(['p2'])
+  })
+
+  it('keeps both of two Phrases sharing an id in one Deck — it cannot say which one was deleted', () => {
+    const twin = { ...P2, french: 'la patate' }
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2, twin] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2, twin] })], tombstones: [gone(9000)] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2, twin] })] }),
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1, P2, twin])
+  })
+
+  it('keeps both when only this side holds the id twice, even though the baseline held one of them', () => {
+    const twin = { ...P2, french: 'la patate' }
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2, twin] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2, twin] })], tombstones: [gone(9000)] }),
+      base,
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1, P2, twin])
+  })
+
+  it('keeps the Phrase when the baseline held its id twice — it cannot say the deleting side saw this one', () => {
+    const twin = { ...P2, french: 'la patate' }
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2] })], tombstones: [gone(9000)] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2, twin] })] }),
+    )
+
+    expect(merged.decks[0]!.phrases).toEqual([P1, P2])
+  })
+
+  it('keeps the Tombstone of a Phrase nothing holds any more, so a device still holding it learns of it later', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })], tombstones: [gone(6000)] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })] }),
+    )
+
+    expect(merged.tombstones).toEqual([gone(6000)])
+  })
+
+  describe('with no baseline, the clock is all there is — as for a Deck', () => {
+    it('deletes the Phrase when the Tombstone is at least as recent as the Deck that holds it', () => {
+      const merged = mergeLibraries(
+        library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1, P2] })] }),
+        library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })], tombstones: [gone(6000)] }),
+      )
+
+      expect(merged.decks[0]!.phrases).toEqual([P1])
+    })
+
+    it('keeps the Phrase when its Deck was written after the Tombstone', () => {
+      const merged = mergeLibraries(
+        library({ decks: [deck({ id: 'd1', updatedAt: 7000, phrases: [P1, P2] })] }),
+        library({ decks: [deck({ id: 'd1', updatedAt: 5000, phrases: [P1] })], tombstones: [gone(6000)] }),
+      )
+
+      expect(merged.decks[0]!.phrases).toEqual([P1, P2])
+      expect(merged.tombstones).toEqual([])
+    })
+  })
+
+  it('keeps the later of two Tombstones for one Phrase of one Deck', () => {
+    const merged = mergeLibraries(
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })], tombstones: [gone(6000)] }),
+      library({ decks: [deck({ id: 'd1', updatedAt: 6000, phrases: [P1] })], tombstones: [gone(7000)] }),
+      base,
+    )
+
+    expect(merged.tombstones).toEqual([gone(7000)])
+  })
+})

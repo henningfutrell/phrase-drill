@@ -198,9 +198,11 @@ destroyed their phrases on the phone and on the server in one round-trip.
 T070 closed it. A Phrase is now removed only when something RECORDS that it
 was deleted; the other side's mere absence is not such a record, precisely
 because a restored server is not guaranteed to be a descendant of the baseline
-(`src/domain/library-merge.ts`, `mergePhrases`). Rolling a version back, and
-the `pg_dump` restore drill, both carry the ordinary cost instead: a Phrase
-deleted on another device comes back until it is deleted here too — one tap.
+(`src/domain/library-merge.ts`, `mergePhrases`). Since T073 the other record is
+a Phrase Tombstone, which deletes only a Phrase unchanged since the last
+agreement — so rolling a version back, and the `pg_dump` restore drill, still
+cannot delete a Phrase the server merely lacks (`docs/sync.md`, "Phrase
+Tombstones").
 
 ### When the stored row itself will not parse
 

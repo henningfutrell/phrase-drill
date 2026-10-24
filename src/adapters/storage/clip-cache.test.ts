@@ -11,6 +11,7 @@ import {
   CLIP_META_BACKFILL_CHUNK,
 } from './clip-cache'
 import { CLIPS_STORE, CLIP_META_STORE, DB_NAME, openDatabase } from './database'
+import { CURRENT_SCHEMA_VERSION } from './migrations'
 
 const VOICE = { provider: 'elevenlabs', modelId: 'eleven_multilingual_v2', voiceId: 'voice-1' }
 
@@ -447,7 +448,7 @@ describe('createIndexedDbClipCache', () => {
       // of a separate index is that reading it never touches the audio bytes.
       // Since T072 that writing happens on the first index build after the
       // upgrade, never inside the upgrade itself.
-      const upgraded = await openDB(DB_NAME, 6)
+      const upgraded = await openDB(DB_NAME, CURRENT_SCHEMA_VERSION)
       expect((await upgraded.getAll(CLIP_META_STORE)).length).toBe(2)
     })
   })

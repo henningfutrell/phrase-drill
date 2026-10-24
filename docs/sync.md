@@ -204,12 +204,61 @@ Deck edited on either side, was then dropped from IndexedDB *and* from the
 server in one round-trip, with no Tombstone. The recovery procedure was the
 attack.
 
-So: **the other side's absence is never a deletion.** Nothing writes a Phrase
-Tombstone, and the one record of a Phrase deletion this build has is this
-device's own saved Deck — it held the Phrase at the last agreed state and does
-not now. The cost is that a Phrase deleted on the *other* device comes back
-here until this device deletes it too: one tap, against handwritten phrases
-that exist nowhere else.
+So: **the other side's absence is never a deletion.** A Phrase deletion has
+two records, and only these: this device's own saved Deck — it held the Phrase
+at the last agreed state and does not now — and, since T073, a **Phrase
+Tombstone** (next section). Until T073 only the first existed, so a Phrase
+deleted on the *other* device came back here until this device deleted it too.
+
+### Phrase Tombstones (T073)
+
+Deleting a Phrase writes `{ id, kind: 'phrase', deckId, deletedAt }` into the
+`tombstones` store, in the same transaction as the Deck that lost it
+(`indexed-db-deck-store.ts` `update`, which writes one for every Phrase the
+stored Deck held and the new Deck does not). `deletedAt` is the same instant as
+the Deck's `updatedAt`. The Tombstone travels in the envelope like a Deck's.
+
+The merge applies it after the per-Phrase merge, in `withoutDeletedPhrases`,
+under the rule a Deck's Tombstone already obeys (T070): **it deletes only a
+Phrase unchanged from the Sync Baseline.** The deleting side saw exactly that
+Phrase; anything else was written after the agreement. So:
+
+| Situation | Result |
+| --------- | ------ |
+| The other device deleted it; this one did not touch it | Deleted here, and on the server on the push |
+| This device edited it since the baseline | Kept, and the Tombstone is dropped — an edit outranks a delete |
+| The baseline never held it | Kept — the deleting side cannot have seen it |
+| A restore emptied the baseline (T072) | Every restored Phrase is kept |
+| No baseline at all | The clock decides, as for a Deck: deleted when `deletedAt >= ` the Deck's `updatedAt` |
+| One Deck holds the id twice, or the baseline does | Both kept — nothing says which one went |
+
+**The recovery drill stays safe.** Restoring the `pg_dump` moves the server
+backwards, and the server's absence still deletes nothing. Only a Tombstone
+deletes a Phrase, a Tombstone is only written when the user deletes one, and it
+still has to name a Phrase unchanged since the last agreement. A Phrase added
+after the dump has no Tombstone and is kept; a Phrase deleted after the dump
+has one on the phone and is deleted again.
+
+**`deckId` is part of the identity.** The duplicate-id split (below) keeps a
+split Deck's Phrase ids, so one Phrase id can sit in two Decks; deleting it
+from one must not reach the other. `tombstoneKey` (`domain/ports.ts`) is
+`['deck', id]`, `['mix', id]` or `['phrase', deckId, id]`, and the merge and the
+store both key by it.
+
+**Schema v7.** The `tombstones` store was keyed `{ keyPath: 'id' }`, which
+would let one Phrase's Tombstone overwrite another's, or a Deck's. v7 rekeys it
+out of line by `tombstoneKey`: the IndexedDB upgrade reads every existing row,
+makes the store again, and puts each row back under `[kind, id]`, inside the
+versionchange transaction, so a failed upgrade leaves v6 as it was. Deck
+records do not change. The envelope version moves to 7 too: a v6 build ignores
+a Phrase Tombstone and would push the Phrase back, so the server refuses its
+push (409 `stale-client`) until it updates. A v6 Sync Baseline is ignored once
+(T081), which costs one round-trip of precision. A pulled Tombstone this build
+cannot key (a Phrase Tombstone with no `deckId`) is dropped by
+`normalizeLibrary`, not stored; a backup file carrying one is refused.
+
+Phrase Tombstones are never garbage-collected either — a few dozen bytes per
+deleted Phrase.
 
 Two Phrases sharing an id are both kept, never folded into one. No write path
 enforces uniqueness, so a duplicate id is already a defect — answering it by
@@ -279,13 +328,9 @@ so resolves to the first of the two (one tap to add the other), and their Deck
 name is not rewritten, so the user sees two Decks under one name — which is the
 visible signal that something needs tidying.
 
-**Not covered: two Tombstones of different `kind` under one id.** The
-`tombstones` store is keyed by `id` alone, so a Deck Tombstone and a Mix
-Tombstone sharing an id still collapse there. A Tombstone's id names the record
-it deletes, so splitting it is not available; closing this needs that store's
-`keyPath` changed, which is a schema change against their data. The cost of
-leaving it is a deleted Deck or Mix coming back — one tap — and it reaches them
-only from the same hand-edited file. Nothing of theirs is lost by it.
+**Two Tombstones of different `kind` under one id** used to collapse in the
+`tombstones` store, which was keyed by `id` alone. Schema v7 (T073) keys it by
+`tombstoneKey`, so they no longer do.
 
 **With no baseline** (the first sync ever, after IndexedDB eviction, or one
 written under a schema version this build does not read — see below) a Deck
@@ -658,14 +703,9 @@ bytes are archived.
   same applies to a Mix the user edits while a merge is landing: `persistMix` writes
   a whole Mix from React state, which T075 stopped doing for Decks and did not
   for Mixes (see above for why).
-- **A Phrase deleted on the other device comes back here** until this device
-  deletes it too (T070). The fix is a Phrase-level deletion record, which is a
-  change to the persisted `Library` envelope and to every write path — not a
-  merge change.
-- **A Phrase deleted on the other device between a restore and the next sync
-  comes back**, like any other Phrase deletion the other side records (row
-  above). An empty baseline widens that to Decks and Mixes on the first
-  round-trip after a restore: a deletion made elsewhere that this phone had not
+- **A deletion made on the other device between a restore and the next sync
+  comes back** — a Phrase, a Deck or a Mix. The restore empties the baseline,
+  so on the first round-trip after it every local record outranks a Tombstone: a deletion made elsewhere that this phone had not
   yet seen is undone, and the user has to delete it again — one tap. The trade is
   deliberate; the other direction is their restore being undone.
 - **No conflict is surfaced to them.** The merge is silent because every

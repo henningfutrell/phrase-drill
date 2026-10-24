@@ -70,8 +70,8 @@ export interface MixRecord {
 export const LIBRARY_FORMAT = 'phrase-drill-library'
 
 /**
- * The record that a Deck or a Mix was deleted, and when (T060). It outlives
- * the thing it names, on purpose.
+ * The record that a Deck, a Mix or a Phrase was deleted, and when (T060,
+ * T073). It outlives the thing it names, on purpose.
  *
  * Sync merges two libraries instead of overwriting one with the other, and
  * a merge cannot tell "absent because the user deleted it" from "absent because
@@ -83,11 +83,27 @@ export const LIBRARY_FORMAT = 'phrase-drill-library'
  *
  * `kind` is not decoration: Deck ids and Mix ids live in one namespace here,
  * and a Tombstone must delete exactly the aggregate it was written for.
+ *
+ * **A Phrase Tombstone names its Deck too** (T073). A Phrase id is unique only
+ * by convention: the duplicate-id split (`duplicate-ids.ts`) gives a second
+ * Deck a new id and keeps its Phrases' ids, so one Phrase id can sit in two
+ * Decks. Deleting it from one must not reach the other. `tombstoneKey` is the
+ * one place that turns these fields into an identity.
  */
-export interface Tombstone {
-  readonly id: string
-  readonly kind: 'deck' | 'mix'
-  readonly deletedAt: number
+export type Tombstone =
+  | { readonly id: string; readonly kind: 'deck' | 'mix'; readonly deletedAt: number }
+  | { readonly id: string; readonly kind: 'phrase'; readonly deckId: string; readonly deletedAt: number }
+
+/**
+ * What one Tombstone is the deletion OF: two Tombstones with the same key
+ * delete the same record, and are the same deletion at two times. An array,
+ * because it is also the IndexedDB key of the `tombstones` store (schema v7),
+ * where an array key needs no separator that an id could contain.
+ */
+export function tombstoneKey(tombstone: Tombstone): readonly string[] {
+  return tombstone.kind === 'phrase'
+    ? [tombstone.kind, tombstone.deckId, tombstone.id]
+    : [tombstone.kind, tombstone.id]
 }
 
 /**

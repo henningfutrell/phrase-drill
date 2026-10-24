@@ -18,18 +18,22 @@ import baseConfig from './vite.config'
  * and the gate would demand a duplicate domain test to satisfy an artefact
  * of its own configuration.
  */
-export default mergeConfig(
-  baseConfig,
-  defineConfig({
-    test: {
-      // Spelled out rather than left to mergeConfig's array handling: if that
-      // ever replaces instead of concatenating, an implicit version of this
-      // list would silently lose `node_modules`.
-      exclude: [
-        ...configDefaults.exclude,
-        '.stryker-tmp/**',
-        'pwa.build.test.ts',
-      ],
-    },
-  }),
+export default defineConfig((env) =>
+  // `vite.config.ts` exports a function since the Supabase login (it reads the
+  // env per command), and `mergeConfig` refuses a function: resolve it first.
+  mergeConfig(
+    baseConfig(env),
+    defineConfig({
+      test: {
+        // Spelled out rather than left to mergeConfig's array handling: if that
+        // ever replaces instead of concatenating, an implicit version of this
+        // list would silently lose `node_modules`.
+        exclude: [
+          ...configDefaults.exclude,
+          '.stryker-tmp/**',
+          'pwa.build.test.ts',
+        ],
+      },
+    }),
+  ),
 )

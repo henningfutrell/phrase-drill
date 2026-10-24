@@ -35,8 +35,18 @@ export type PhraseRecordV1 = PhraseRecord
  * audio it is measuring. Deck records are untouched — see
  * `DECK_MIGRATIONS[5]` below — and the new store is backfilled from whatever
  * Clips are already cached, so an upgrading phone keeps its audio.
+ *
+ * v6 -> v7 (T073): a Tombstone can name a deleted Phrase — `kind: 'phrase'`,
+ * with the `deckId` of the Deck it was deleted from. The `tombstones` store
+ * is rekeyed by what each row deletes (`tombstoneKey`), because a Phrase id
+ * can repeat across Decks and a Deck id can equal a Phrase id: keyed by `id`
+ * alone, one deletion would overwrite another. `database.ts` moves every
+ * existing row into the rekeyed store. Deck records are untouched — see
+ * `DECK_MIGRATIONS[6]` below. The envelope version moves too, so a v6 build
+ * that would ignore a Phrase Tombstone and push the Phrase back is refused at
+ * the server (409 `stale-client`) until it updates.
  */
-export const CURRENT_SCHEMA_VERSION = 6
+export const CURRENT_SCHEMA_VERSION = 7
 
 /** One step of a migration chain: a pure transform from a version-n record to version-(n+1). */
 export type RecordMigration = (record: never) => unknown
@@ -117,6 +127,15 @@ const v4ToV5: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigr
 const v5ToV6: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
 
 /**
+ * v6 -> v7: Phrase Tombstones (T073) live in the `tombstones` store, beside
+ * `decks`. Deleting a Phrase still writes the Deck without it, as it always
+ * did, so no deck record gains, loses or changes a field — identity, like
+ * every step before it. The step that moves data is the `tombstones` rekey
+ * in `database.ts`.
+ */
+const v6ToV7: RecordMigration = ((record: DeckRecordV1) => record) as RecordMigration
+
+/**
  * Exported so `DECK_MIGRATIONS.length` can be checked against
  * `CURRENT_SCHEMA_VERSION` directly (persisted-shape.test.ts) — the two
  * must move together, and that test is what turns a mismatch into a build
@@ -129,6 +148,7 @@ export const DECK_MIGRATIONS: readonly RecordMigration[] = [
   v3ToV4,
   v4ToV5,
   v5ToV6,
+  v6ToV7,
 ]
 
 /**

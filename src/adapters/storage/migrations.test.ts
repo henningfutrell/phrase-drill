@@ -52,6 +52,11 @@ describe('migrateDeckRecord', () => {
     expect(() => migrateDeckRecord({}, CURRENT_SCHEMA_VERSION + 1)).toThrow(/newer/)
   })
 
+  it('carries a v6 deck record through v6 -> v7 untouched — a Phrase Tombstone lives beside the Deck, not inside it (T073)', () => {
+    expect(CURRENT_SCHEMA_VERSION).toBe(7)
+    expect(migrateDeckRecord(currentRecord, 6)).toEqual(currentRecord)
+  })
+
   it('carries a v1 deck record through to the current schema untouched — the clips store landed beside it, not inside it', () => {
     expect(migrateDeckRecord(currentRecord, 1)).toEqual(currentRecord)
   })
