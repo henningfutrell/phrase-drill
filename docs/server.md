@@ -36,6 +36,7 @@ logic runs.
 | POST   | `/api/translate` | Propose one or more Phrase Candidates translating one phrase (`{text, direction, deckName}` → `{candidates}`). | 4 KB | 30 / 60s per session |
 | GET    | `/api/library` | Fetch the stored library JSON for this user. `500 library-unreadable` if the stored row will not parse as a library envelope — a contract the device acts on, see below. | —          | 30 / 60s per session |
 | PUT    | `/api/library` | Replace the stored library JSON for this user, keeping the version it replaces. `409 stale-client` if the body's `schemaVersion` is *lower* than the stored envelope's — see below. | 8 MB | 30 / 60s per session |
+| POST   | `/api/password` | Set a new password on the token's own account (`{password}` → `204`), once it passes the rules and the HaveIBeenPwned check. `422 {error}` a password to change (`too-short`, `no-letter`, `no-digit`, `breached`, `same-password`, `weak-password`); `503 unverified` HIBP could not be asked, nothing set; `502 upstream` Supabase did not set it. See "Leaked-password check". | 4 KB | none |
 | \*     | anything else under `/api/` | `404 not-found`.                        | —          | —                  |
 | \*     | anything not under `/api/`  | Falls back to the built PWA (`dist/`, SPA fallback to `index.html`). | — | — |
 
@@ -750,7 +751,8 @@ Anthropic calls retry with exponential backoff and jitter (`server/retry.js`):
 ### Signing in
 
 Email + password only (`src/adapters/auth/session-auth.ts`, `signInWithPassword`).
-The user can change their password in Settings → Password (`updateUser`). A forgotten
+The user can change their password in Settings → Password (`POST /api/password`,
+see "Leaked-password check" below). A forgotten
 password is reset by the owner on backup-host — there is no reset email:
 
 ```sh
@@ -777,8 +779,49 @@ the expiry. `sub` is `auth.users.id` and is their library key
 from `SUPABASE_URL` and `SUPABASE_SECRET_KEY`; the server refuses to boot
 without either.
 
-**Adding a user** is done in Supabase (Auth dashboard, or the admin API with
-the secret key). Sign-ups are disabled; there is no signup endpoint here.
+**Adding a user** is `scripts/auth-user-create.mjs` (the admin API with the
+secret key), never the Auth dashboard: the dashboard skips the leaked-password
+check. Sign-ups are disabled (`enable_signup = false`); there is no signup
+endpoint here and no sign-up path in the app.
+
+### Leaked-password check
+
+Supabase's own leaked-password protection (`password_hibp_enabled`) is a Pro-plan
+feature, and the project is on the Free plan, so the Supabase security advisor
+keeps listing `auth_leaked_password_protection`. The check is ours instead
+(workflow issue #35): `server/password-policy.js`.
+
+- **Rules:** at least 12 characters, at least one letter (`A-Z`, `a-z`), at least
+  one digit. The same rules are set on the Supabase project, through the
+  Management API.
+- **HaveIBeenPwned Pwned Passwords range API**, k-anonymity: the password is SHA-1'd
+  on the server; only the first 5 hex characters go to
+  `https://api.pwnedpasswords.com/range/{prefix}`, with `Add-Padding: true`. The
+  suffixes are compared locally; a padding line (count `0`) is ignored. The
+  password and its full hash are never sent or logged.
+- **Fails closed:** HIBP unreachable, a non-2xx, or no answer in 5 s refuses the
+  password as `unverified` ("Couldn't verify password safety, try again.").
+- **Where it runs:** every place this app sets a password —
+  `POST /api/password` (Settings → Password; it then sets the password with
+  `supabase.auth.admin.updateUserById`, `server/account-password.js`),
+  `scripts/auth-user-create.mjs` (account creation, and the cutover's account
+  step, which calls it), and `scripts/auth-password-set.mjs` (the reset). The
+  server and the operator's machine need egress to `api.pwnedpasswords.com`.
+- **Tested** with a faked HIBP: `server/password-policy.test.js` (breached,
+  clean, padding, down, non-2xx, timeout, short / no letter / no digit, only the
+  prefix sent), `server/app.test.js` `POST /api/password`,
+  `server/account-password.test.js`, the two scripts' tests,
+  `src/adapters/auth/session-auth.test.ts` and `src/ui/NewPasswordForm.test.tsx`.
+
+**The bypass that remains.** A signed-in user who calls Supabase Auth
+`PUT /auth/v1/user` with their own access token can set a password with no HIBP
+check; Supabase still applies its own rules there (12 characters, letters and
+digits). The app never makes that call. The platform cannot close it on the Free
+plan: no auth hook sees a new password. The password-verification hook runs on
+sign-in only, receives `user_id` and `valid` and never the password, and the
+Management API refuses to turn it on for this organization (`402 The following
+auth hooks cannot be configured for this organization:
+HOOK_PASSWORD_VERIFICATION_ATTEMPT`, 2026-10-24).
 
 **What someone holding a stolen access token can do, until it expires:** read
 and overwrite that user's library and spend that user's share of the

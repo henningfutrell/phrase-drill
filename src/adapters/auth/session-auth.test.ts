@@ -15,7 +15,6 @@ function fakeClient() {
     signInWithPassword: vi.fn<AuthClient['auth']['signInWithPassword']>(),
     getSession: vi.fn<AuthClient['auth']['getSession']>(),
     signOut: vi.fn<AuthClient['auth']['signOut']>(),
-    updateUser: vi.fn<AuthClient['auth']['updateUser']>(),
   }
   auth.signOut.mockResolvedValue({ error: null })
   return { client: { auth } satisfies AuthClient, auth }
@@ -141,36 +140,52 @@ describe('createSessionAuth', () => {
   })
 
   describe('changePassword()', () => {
-    it('sets the new password on the signed-in account', async () => {
-      fake.auth.updateUser.mockResolvedValue({ error: null })
-      expect(await auth().changePassword('a-new-password')).toEqual({ ok: true })
-      expect(fake.auth.updateUser).toHaveBeenCalledWith({ password: 'a-new-password' })
+    function answer(status: number, body?: unknown) {
+      fetchImpl.mockResolvedValue(new Response(body === undefined ? null : JSON.stringify(body), { status }))
+    }
+
+    it('sends the new password to the server, which checks and sets it', async () => {
+      withSession('jwt-1')
+      answer(204)
+      expect(await auth().changePassword('a-new-password-1')).toEqual({ ok: true })
+      const [url, init] = fetchImpl.mock.calls[0]
+      expect(url).toBe('/api/password')
+      expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer jwt-1')
+      expect(JSON.parse(String(init?.body))).toEqual({ password: 'a-new-password-1' })
     })
 
-    it('returns weak-password when the server refuses it as too weak', async () => {
-      fake.auth.updateUser.mockResolvedValue({
-        error: { message: 'Password should be at least 6 characters.', status: 422, code: 'weak_password' },
-      })
-      expect(await auth().changePassword('abc')).toEqual({ ok: false, reason: 'weak-password' })
+    it.each(['too-short', 'no-letter', 'no-digit', 'breached', 'same-password', 'weak-password'] as const)(
+      'returns %s when the server refuses it so',
+      async (reason) => {
+        withSession('jwt-1')
+        answer(422, { error: reason })
+        expect(await auth().changePassword('a-new-password-1')).toEqual({ ok: false, reason })
+      },
+    )
+
+    it('returns unverified when the server could not check it (fail closed)', async () => {
+      withSession('jwt-1')
+      answer(503, { error: 'unverified' })
+      expect(await auth().changePassword('a-new-password-1')).toEqual({ ok: false, reason: 'unverified' })
     })
 
-    it('returns same-password when it is the password the user already has', async () => {
-      fake.auth.updateUser.mockResolvedValue({
-        error: { message: 'New password should be different from the old password.', status: 422, code: 'same_password' },
-      })
-      expect(await auth().changePassword('old-one')).toEqual({ ok: false, reason: 'same-password' })
+    it('returns signed-out on a 401', async () => {
+      fake.auth.getSession.mockResolvedValue({ data: { session: null }, error: null })
+      answer(401, { error: 'unauthorized' })
+      expect(await auth().changePassword('a-new-password-1')).toEqual({ ok: false, reason: 'signed-out' })
     })
 
-    it('returns signed-out when there is no session to change it on', async () => {
-      fake.auth.updateUser.mockResolvedValue({ error: { message: 'Auth session missing!', status: 400, name: 'AuthSessionMissingError' } })
-      expect(await auth().changePassword('x-y-z-w-v')).toEqual({ ok: false, reason: 'signed-out' })
-    })
-
-    it('returns network on a server error or a throw', async () => {
-      fake.auth.updateUser.mockResolvedValue({ error: { message: 'boom', status: 500 } })
-      expect(await auth().changePassword('a-new-password')).toEqual({ ok: false, reason: 'network' })
-      fake.auth.updateUser.mockRejectedValue(new TypeError('fetch failed'))
-      expect(await auth().changePassword('a-new-password')).toEqual({ ok: false, reason: 'network' })
+    it('returns network on any other answer, an unknown reason, or a throw', async () => {
+      withSession('jwt-1')
+      answer(502, { error: 'upstream' })
+      expect(await auth().changePassword('a-new-password-1')).toEqual({ ok: false, reason: 'network' })
+      answer(422, { error: 'something-new' })
+      expect(await auth().changePassword('a-new-password-1')).toEqual({ ok: false, reason: 'network' })
+      answer(422)
+      expect(await auth().changePassword('a-new-password-1')).toEqual({ ok: false, reason: 'network' })
+      fetchImpl.mockRejectedValue(new TypeError('fetch failed'))
+      expect(await auth().changePassword('a-new-password-1')).toEqual({ ok: false, reason: 'network' })
     })
   })
 

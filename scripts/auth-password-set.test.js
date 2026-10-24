@@ -15,6 +15,9 @@ describe('parseArgs', () => {
   })
 })
 
+/** The policy port, faked: `password-policy.test.js` proves the real one. */
+const accept = async () => ({ ok: true })
+
 describe('setPassword', () => {
   const user = (id, email) => ({ id, email })
   function fakeAdmin(pages, updateResult = { error: null }) {
@@ -38,24 +41,31 @@ describe('setPassword', () => {
 
   it('finds their account by email, on any page and in any case, and sets the password on it', async () => {
     const { admin, calls } = fakeAdmin([[user('u1', 'someone@x.y')], [user('u2', 'User@Example.com')]])
-    await expect(setPassword({ supabase: admin, email: 'user@example.com', password: 'pw', perPage: 1 })).resolves.toBe('u2')
+    await expect(setPassword({ supabase: admin, email: 'user@example.com', password: 'pw', perPage: 1, checkPassword: accept })).resolves.toBe('u2')
     expect(calls.updateUserById).toEqual([['u2', { password: 'pw' }]])
   })
 
   it('refuses an address with no account, and creates none', async () => {
     const { admin, calls } = fakeAdmin([[user('u1', 'someone@x.y')]])
-    await expect(setPassword({ supabase: admin, email: 'nobody@x.y', password: 'pw' })).rejects.toThrow(/no account for nobody@x.y/)
+    await expect(setPassword({ supabase: admin, email: 'nobody@x.y', password: 'pw', checkPassword: accept })).rejects.toThrow(/no account for nobody@x.y/)
     expect(calls.updateUserById).toEqual([])
   })
 
-  it('refuses an empty password', async () => {
-    const { admin } = fakeAdmin([[user('u1', 'user@x.y')]])
-    await expect(setPassword({ supabase: admin, email: 'user@x.y', password: '' })).rejects.toThrow(/empty password/)
+  it.each([
+    ['breached', /known data breach/],
+    ['unverified', /couldn't verify password safety/],
+    ['too-short', /shorter than 12/],
+  ])('refuses a %s password before it looks up or changes any account', async (reason, message) => {
+    const { admin, calls } = fakeAdmin([[user('u1', 'user@x.y')]])
+    const checkPassword = async () => ({ ok: false, reason })
+    await expect(setPassword({ supabase: admin, email: 'user@x.y', password: 'pw', checkPassword })).rejects.toThrow(message)
+    expect(calls.listUsers).toEqual([])
+    expect(calls.updateUserById).toEqual([])
   })
 
   it('passes on what Supabase refused', async () => {
     const { admin } = fakeAdmin([[user('u1', 'user@x.y')]], { error: { message: 'Password should be at least 6 characters.' } })
-    await expect(setPassword({ supabase: admin, email: 'user@x.y', password: 'a' })).rejects.toThrow(/at least 6/)
+    await expect(setPassword({ supabase: admin, email: 'user@x.y', password: 'a', checkPassword: accept })).rejects.toThrow(/at least 6/)
   })
 })
 
@@ -74,7 +84,7 @@ describe.skipIf(!(url && publishableKey && secretKey))('setPassword against a re
     const { data, error } = await admin.auth.admin.createUser({ email, password: 'old-password-1', email_confirm: true })
     if (error) throw error
     try {
-      await expect(setPassword({ supabase: admin, email, password: 'new-password-2' })).resolves.toBe(data.user.id)
+      await expect(setPassword({ supabase: admin, email, password: 'new-password-2', checkPassword: accept })).resolves.toBe(data.user.id)
       const device = createClient(url, publishableKey, { auth: { persistSession: false } })
       expect((await device.auth.signInWithPassword({ email, password: 'old-password-1' })).error).not.toBeNull()
       expect((await device.auth.signInWithPassword({ email, password: 'new-password-2' })).error).toBeNull()

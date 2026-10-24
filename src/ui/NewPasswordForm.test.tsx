@@ -72,7 +72,12 @@ describe('NewPasswordForm', () => {
   })
 
   it.each([
-    ['weak-password', 'longer'],
+    ['too-short', '12 characters'],
+    ['no-letter', 'letter'],
+    ['no-digit', 'number'],
+    ['breached', 'data breach'],
+    ['unverified', "Couldn't verify password safety, try again"],
+    ['weak-password', '12 characters'],
     ['same-password', 'already have'],
     ['signed-out', 'signed out'],
     ['network', 'connection'],

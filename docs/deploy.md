@@ -79,10 +79,11 @@ service's Environment tab afterwards. A `VITE_*` change needs a rebuild
    deploy succeeded — watch the deploy log for a `200` from that path, or a
    failure it reports directly if the container never comes up.
 
-4. **Create their account** in Supabase Auth (Dashboard → Authentication →
-   Users → Add user, email + password, auto-confirm), with "Allow new users to
-   sign up" off. There is no signup endpoint on this server. The server only
-   verifies the access tokens Supabase issues (`docs/server.md`).
+4. **Create their account** with `scripts/auth-user-create.mjs`, not the
+   Supabase dashboard: the script checks the password against HaveIBeenPwned
+   and the dashboard does not (`docs/server.md`, "Leaked-password check").
+   "Allow new users to sign up" stays off. There is no signup endpoint on this
+   server. The server only verifies the access tokens Supabase issues.
 
 
 ## Verify it worked
