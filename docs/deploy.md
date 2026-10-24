@@ -37,6 +37,9 @@ hostname from `render.yaml`'s `name: phrase-drill`. Measured 2026-08-24:
 backups; replaced by a daily backup.mjs timer on backup-host plus the device copy;
 restore-drill monthly.** This replaces the earlier rule never to use a free
 Postgres tier. The backup is yours to keep running: `docs/backup.md`.
+**2026-10-24:** the daily backup and its restore drill now run off-site, as a
+hopper box step, not on backup-host (`docs/backup.md`, "The daily off-site
+backup").
 
 **The Free project pauses after about 7 days without activity.**
 `.github/workflows/keep-alive.yml` calls `/api/status` daily, which runs a

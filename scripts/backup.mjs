@@ -7,8 +7,8 @@
  * `BACKUP_RETENTION_DAYS`.
  *
  * It is the scheduled backup. Supabase Free has no managed
- * backups (docs/backup.md, decision D1), so `ops/backup-host/phrase-drill-backup.timer`
- * runs this daily from a machine we own. Never write to the Render container:
+ * backups (docs/backup.md, decision D1), so the daily off-site box step
+ * (docs/backup.md, "The daily off-site backup") runs this. Never write to the Render container:
  * that filesystem evaporates on the next redeploy.
  *
  * The dump holds their library only (`libraries`, `library_versions`, `clips`
