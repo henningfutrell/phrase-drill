@@ -1,4 +1,9 @@
-import type { SyncState } from '../adapters/sync/sync-engine'
+/**
+ * Plain mirror of `SyncState` (adapters/sync/sync-engine.ts) — no adapter type
+ * crosses into UI (AGENTS.md: only App.tsx/main.tsx import from both domain/
+ * and adapters/*).
+ */
+export type SyncState = 'idle' | 'syncing' | 'waiting' | 'signed-out' | 'needs-update'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE

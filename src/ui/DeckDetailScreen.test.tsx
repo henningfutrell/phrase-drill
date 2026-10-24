@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DeckDetailScreen } from './DeckDetailScreen'
 import type { Deck, Translator, Voice } from '../domain'
-import type { PhraseAudio } from '../adapters/audio/audio-locator'
+import type { PhraseAudio } from './phrase-audio-text'
 import { VOICE_CATALOGUE } from '../adapters/audio/voice-catalogue'
 
 const [RACHEL, , GEORGE] = VOICE_CATALOGUE.map(({ provider, modelId, voiceId }): Voice => ({ provider, modelId, voiceId }))

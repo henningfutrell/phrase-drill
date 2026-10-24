@@ -1,5 +1,19 @@
 import type { Voice } from '../domain'
-import type { ClipWhereabouts, PhraseAudio } from '../adapters/audio/audio-locator'
+
+/**
+ * Plain mirrors of `ClipWhereabouts` and `PhraseAudio`
+ * (adapters/audio/audio-locator.ts) — no adapter type crosses into UI
+ * (AGENTS.md: only App.tsx/main.tsx import from both domain/ and adapters/*).
+ */
+export interface ClipWhereabouts {
+  readonly voice: Voice | null
+  readonly onPhone: boolean
+}
+
+export interface PhraseAudio {
+  readonly french: ClipWhereabouts
+  readonly english: ClipWhereabouts
+}
 
 /** The catalogue fields a name is read from — `VoiceCatalogueEntry` satisfies it. */
 export type NamedVoice = Voice & { readonly name: string }

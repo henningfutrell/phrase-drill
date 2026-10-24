@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { LoginResult } from '../adapters/auth/session-auth'
+import type { LoginResult } from './auth-results'
 import '../styles/tokens.css'
 import './LoginScreen.css'
 

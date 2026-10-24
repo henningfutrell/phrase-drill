@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import type { Deck, Translator, Voice } from '../domain'
 import type { PhraseId } from '../domain'
-import type { PhraseAudio } from '../adapters/audio/audio-locator'
-import { isOnPhone, phraseAudioText, voiceName, type NamedVoice } from './phrase-audio-text'
+import { isOnPhone, phraseAudioText, voiceName, type NamedVoice, type PhraseAudio } from './phrase-audio-text'
 import { NameSheet } from './NameSheet'
 import { PhraseSheet } from './PhraseSheet'
 

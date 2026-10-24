@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { PasswordChangeResult } from '../adapters/auth/session-auth'
+import type { PasswordChangeResult } from './auth-results'
 import '../styles/tokens.css'
 import './LoginScreen.css'
 

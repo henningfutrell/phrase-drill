@@ -3,7 +3,7 @@ import type { BackupAge } from '../domain'
 import { BackupStatus, type ExportOutcome } from './BackupStatus'
 import { RestoreControl, type RestoreFileResult } from './RestoreControl'
 import { NewPasswordForm } from './NewPasswordForm'
-import type { PasswordChangeResult } from '../adapters/auth/session-auth'
+import type { PasswordChangeResult } from './auth-results'
 
 /** Plain presentation shape for the pinned voice — no adapter types cross into UI. */
 export interface VoiceInfo {
