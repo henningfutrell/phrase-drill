@@ -142,4 +142,4 @@ if [ "$user_pending" = 1 ]; then
   exit 3
 fi
 echo
-echo "CUTOVER DATA PHASE DONE. Next: Render env (docs/deploy.md), merge supabase-migration to main, resume the service, smoke."
+echo "CUTOVER DATA PHASE DONE. Next: Render env (docs/deploy.md), release the deploy hold (README.md \"Releasing the deploy\"), resume the service, smoke."
