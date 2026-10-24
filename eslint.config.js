@@ -27,6 +27,18 @@ export default tseslint.config(
         'warn',
         { allowConstantExport: true },
       ],
+      // `lib` is ES2023 (tsconfig.app.json) and this is ES2024, so `tsc -b`
+      // refuses it (TS2550). Raise `lib` only once the phone's Safari is known
+      // to be 17.4 or later; until then the executor form is the rule here.
+      'no-restricted-properties': [
+        'error',
+        {
+          object: 'Promise',
+          property: 'withResolvers',
+          message:
+            'ES2024, and lib is ES2023 (tsconfig.app.json): write new Promise((resolve, reject) => …) instead.',
+        },
+      ],
     },
   },
 )

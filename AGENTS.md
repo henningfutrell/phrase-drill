@@ -84,6 +84,13 @@ mutant is a located statement that some behaviour is not pinned by anything.
 The threshold is a ratchet: raise it as survivors are killed, never lower it.
 `docs/testing.md` covers scope, how to read a survivor, and the known baseline.
 
+**No `Promise.withResolvers`.** It is ES2024 and `tsconfig.app.json` pins
+`lib` to ES2023, so `tsc -b` refuses it (TS2550), and `npm run lint` refuses
+it too. Write `new Promise((resolve, reject) => …)`, in tests as well. An
+agent tool that suggests `Promise.withResolvers` in place of the executor form
+is wrong for this repo: ignore it. Raise `lib` only when the phone's Safari is
+known to be 17.4 or later.
+
 ## Glossary
 
 `docs/glossary.md` is the single source of the domain's terms. Code, tests,
