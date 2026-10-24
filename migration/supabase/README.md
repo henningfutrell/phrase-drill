@@ -72,7 +72,7 @@ Step 0 (the bucket) is not part of it; the run refuses if `clips` is missing.
 
 ## Releasing the deploy
 
-`main` holds this branch before the cutover, with the `Deploy` step of
+`main` holds the Supabase code before the cutover, with the `Deploy` step of
 `.github/workflows/deploy.yml` held (`if: false && ...`). A push to `main` runs
 the gates but does not call the Render deploy hook, so Render keeps running
 the pre-Supabase code on its Render Postgres.
