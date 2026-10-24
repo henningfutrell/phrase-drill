@@ -43,9 +43,13 @@ export class AuthUnavailableError extends Error {
 
 export type LoginResult = { ok: true } | { ok: false; reason: 'invalid-credentials' | 'network' }
 
+/** Why the server refused a new password she can fix by choosing another. */
+const PASSWORD_REFUSALS = ['too-short', 'no-letter', 'no-digit', 'breached', 'same-password', 'weak-password'] as const
+type PasswordRefusal = (typeof PASSWORD_REFUSALS)[number]
+
 export type PasswordChangeResult =
   | { ok: true }
-  | { ok: false; reason: 'weak-password' | 'same-password' | 'signed-out' | 'network' }
+  | { ok: false; reason: PasswordRefusal | 'unverified' | 'signed-out' | 'network' }
 
 interface AuthFailure {
   message: string
@@ -59,7 +63,6 @@ export interface AuthClient {
     signInWithPassword(credentials: { email: string; password: string }): Promise<{ error: AuthFailure | null }>
     getSession(): Promise<{ data: { session: { access_token: string } | null }; error: AuthFailure | null }>
     signOut(): Promise<{ error: AuthFailure | null }>
-    updateUser(attributes: { password: string }): Promise<{ error: AuthFailure | null }>
   }
 }
 
@@ -76,7 +79,12 @@ export interface SessionAuth {
   logout(): Promise<void>
   /** Resolves to the current access token (refreshed if due); throws `AuthRequiredError` when signed out, `AuthUnavailableError` when the session cannot be read. */
   getAccessToken(): Promise<string>
-  /** Sets a new password on the signed-in account. */
+  /**
+   * Sets a new password on the signed-in account, through the server's
+   * `POST /api/password`: the server checks it (rules + HaveIBeenPwned) and
+   * sets it. Never Supabase's `updateUser` from here — that path skips the
+   * check (workflow issue #35).
+   */
   changePassword(newPassword: string): Promise<PasswordChangeResult>
   /** `fetchImpl`, adding the bearer token and signing out + firing `onUnauthorized()` on any 401 — hand this to the server-calling adapters as their `fetchImpl`. */
   authFetch: typeof fetch
@@ -134,13 +142,28 @@ export function createSessionAuth(config: SessionAuthConfig): SessionAuth {
       await client.auth.signOut()
     },
 
-    changePassword(newPassword) {
-      return attempt(() => client.auth.updateUser({ password: newPassword }), (error) => {
-        if (error.code === 'weak_password') return 'weak-password'
-        if (error.code === 'same_password') return 'same-password'
-        if (error.name === 'AuthSessionMissingError') return 'signed-out'
-        return 'network'
-      })
+    async changePassword(newPassword) {
+      let response: Response
+      try {
+        response = await authFetch('/api/password', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ password: newPassword }),
+        })
+      } catch {
+        return { ok: false, reason: 'network' }
+      }
+      if (response.status === 204) return { ok: true }
+      if (response.status === 401) return { ok: false, reason: 'signed-out' }
+      const error = await response
+        .json()
+        .then((body: { error?: unknown }) => body?.error)
+        .catch(() => undefined)
+      if (response.status === 503 && error === 'unverified') return { ok: false, reason: 'unverified' }
+      if (response.status === 422 && PASSWORD_REFUSALS.includes(error as PasswordRefusal)) {
+        return { ok: false, reason: error as PasswordRefusal }
+      }
+      return { ok: false, reason: 'network' }
     },
 
     async getAccessToken() {
