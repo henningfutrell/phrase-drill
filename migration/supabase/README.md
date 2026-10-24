@@ -70,6 +70,22 @@ migration/supabase/cutover.sh --workdir <dir> --user-email <their email> --user-
 
 Step 0 (the bucket) is not part of it; the run refuses if `clips` is missing.
 
+## Releasing the deploy
+
+`main` holds this branch before the cutover, with the `Deploy` step of
+`.github/workflows/deploy.yml` held (`if: false && ...`). A push to `main` runs
+the gates but does not call the Render deploy hook, so Render keeps running
+the pre-Supabase code on its Render Postgres.
+
+In the window, after `cutover.sh` and after the five Supabase env vars from
+`render.yaml` are set in the Render service:
+
+1. Merge a change that deletes `false && ` from the `Deploy` step's `if:`.
+2. That merge is the deploy. Check that the `main` run's `Deploy` step ran.
+
+Do not release the hold before the env vars are set: the app then has no
+database and no login.
+
 ## Rollback
 
 Nothing on Render is changed or deleted by this kit; Render stays the source until

@@ -83,8 +83,14 @@ jobs:
       #  - The URL is the secret. It carries a `key=` parameter; anyone holding
       #    it can deploy. It is passed through env, never interpolated into the
       #    command line, so it cannot land in a shell trace or a log.
+      #
+      # HELD until the Supabase cutover window. `main` holds the Supabase code
+      # before Render has its env vars, so a deploy now would break the live
+      # app. The window releases the hold by merging a change that deletes
+      # `false &&`; that merge is the deploy. See migration/supabase/README.md,
+      # "Releasing the deploy".
       - name: Deploy
-        if: github.ref == 'refs/heads/main'
+        if: false && github.ref == 'refs/heads/main'
         env:
           deploy_url: ${{ secrets.RENDER_WEBHOOK_URI }}
         run: curl -fsS "$deploy_url"
