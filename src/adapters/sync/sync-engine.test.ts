@@ -529,6 +529,52 @@ describe('createSyncEngine — offline, and catching up', () => {
   })
 })
 
+/**
+ * T073, end to end through two engines and one server. Before Phrase
+ * Tombstones, B still held the Phrase A deleted, read the server's absence as
+ * "never seen" (T070), and pushed it back — to the server, and from there to A.
+ */
+describe('createSyncEngine — a Phrase deleted on one device stays deleted on the other (T073)', () => {
+  const P1 = { id: 'p1', french: 'Bonjour', english: 'Hello' }
+  const P2 = { id: 'p2', french: 'la pomme de terre', english: 'the potato' }
+
+  it('deletes it on B, and neither B nor a later round-trip from A brings it back', async () => {
+    const shared = deck('d1', 'Marché', 1, [P1, P2])
+    const server = createFakeServer(library([shared]))
+    const a = createHarness({ local: library([shared]), server })
+    const b = createHarness({ local: library([shared]), server })
+
+    // Both phones agree with the server: each has a baseline holding both Phrases.
+    a.engine.start()
+    await settle()
+    b.engine.start()
+    await settle()
+
+    // A deletes P2: its Deck loses the Phrase, and the deck store writes the
+    // Phrase Tombstone with the same instant.
+    a.setLocal({
+      ...library([deck('d1', 'Marché', 50, [P1])]),
+      tombstones: [{ id: 'p2', kind: 'phrase', deckId: 'd1', deletedAt: 50 }],
+    })
+    a.engine.syncNow()
+    await settle()
+    b.engine.syncNow()
+    await settle()
+
+    expect(b.local.decks[0]!.phrases).toEqual([P1])
+    expect(server.library!.decks[0]!.phrases).toEqual([P1])
+
+    a.engine.syncNow()
+    await settle()
+    b.engine.syncNow()
+    await settle()
+
+    expect(a.local.decks[0]!.phrases).toEqual([P1])
+    expect(b.local.decks[0]!.phrases).toEqual([P1])
+    expect(server.library!.decks[0]!.phrases).toEqual([P1])
+  })
+})
+
 describe('createSyncEngine — the two failures a retry cannot fix', () => {
   it('asks them to sign in again on 401, and stops retrying', async () => {
     const h = createHarness()

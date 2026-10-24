@@ -16,6 +16,10 @@ function makeDeck(overrides: Partial<Deck> = {}): Deck {
   }
 }
 
+function makeDeckRecord() {
+  return { ...makeDeck(), createdAt: 1, updatedAt: 1 }
+}
+
 describe('createIndexedDbDeckStore', () => {
   beforeEach(() => {
     resetFakeIdb()
@@ -131,6 +135,79 @@ describe('createIndexedDbDeckStore', () => {
       await store.update('home', (stored) => ({ ...stored!, name: 'Renamed' }))
 
       expect(idbDestructiveOperations).toEqual([])
+    })
+  })
+
+  describe('a Phrase deleted through update leaves a Tombstone (T073)', () => {
+    it('records which Phrase of which Deck went, in the same write as the Deck', async () => {
+      const store = createIndexedDbDeckStore()
+      await store.save(
+        makeDeck({
+          id: 'home',
+          phrases: [
+            { id: 'p1', french: 'Bonjour', english: 'Hello' },
+            { id: 'p2', french: 'Merci', english: 'Thanks' },
+          ],
+        }),
+      )
+
+      await store.update('home', (stored) => ({ ...stored!, phrases: stored!.phrases.filter((p) => p.id !== 'p2') }))
+
+      const library = await store.exportAll()
+      expect(library.decks[0]!.phrases.map((p) => p.id)).toEqual(['p1'])
+      expect(library.tombstones).toEqual([
+        { id: 'p2', kind: 'phrase', deckId: 'home', deletedAt: library.decks[0]!.updatedAt },
+      ])
+    })
+
+    it('records nothing when no Phrase went — an edit, a reorder or a rename is not a deletion', async () => {
+      const store = createIndexedDbDeckStore()
+      await store.save(
+        makeDeck({
+          id: 'home',
+          phrases: [
+            { id: 'p1', french: 'Bonjour', english: 'Hello' },
+            { id: 'p2', french: 'Merci', english: 'Thanks' },
+          ],
+        }),
+      )
+
+      await store.update('home', (stored) => ({
+        ...stored!,
+        name: 'Renamed',
+        phrases: [{ ...stored!.phrases[1]!, french: 'Merci bien' }, stored!.phrases[0]!],
+      }))
+
+      expect((await store.exportAll()).tombstones).toEqual([])
+    })
+
+    it('keeps the Tombstone of a Deck and of a Phrase that share an id apart', async () => {
+      const store = createIndexedDbDeckStore()
+      await store.save(makeDeck({ id: 'home', phrases: [{ id: 'same', french: 'a', english: 'A' }] }))
+      await store.save(makeDeck({ id: 'same', phrases: [] }))
+
+      await store.update('home', (stored) => ({ ...stored!, phrases: [] }))
+      await store.remove('same')
+
+      expect((await store.exportAll()).tombstones).toEqual(
+        expect.arrayContaining([
+          { id: 'same', kind: 'phrase', deckId: 'home', deletedAt: expect.any(Number) },
+          { id: 'same', kind: 'deck', deletedAt: expect.any(Number) },
+        ]),
+      )
+    })
+
+    it('carries Phrase Tombstones of one Phrase id in two Decks through importAll, both of them', async () => {
+      const store = createIndexedDbDeckStore()
+      const tombstones = [
+        { id: 'p1', kind: 'phrase' as const, deckId: 'home', deletedAt: 5 },
+        { id: 'p1', kind: 'phrase' as const, deckId: 'home-2', deletedAt: 6 },
+      ]
+
+      await store.importAll({ ...(await store.exportAll()), decks: [makeDeckRecord()], tombstones })
+
+      expect((await store.exportAll()).tombstones).toEqual(expect.arrayContaining(tombstones))
+      expect((await store.exportAll()).tombstones).toHaveLength(2)
     })
   })
 

@@ -4,6 +4,7 @@ import {
   MIXES_STORE,
   TOMBSTONES_STORE,
   createDatabaseConnection,
+  putTombstone,
   runTransaction,
 } from './database'
 import { splitDuplicateIds } from './duplicate-ids'
@@ -17,7 +18,7 @@ import { requestPersistence } from './persistence'
 interface LibraryStores {
   readonly deckStore: { clear(): Promise<void>; put(value: DeckRecord): Promise<unknown> }
   readonly mixStore: { clear(): Promise<void>; put(value: MixRecord): Promise<unknown> }
-  readonly tombstoneStore: { clear(): Promise<void>; put(value: Tombstone): Promise<unknown> }
+  readonly tombstoneStore: { clear(): Promise<void>; put(value: Tombstone, key: IDBValidKey): Promise<unknown> }
 }
 
 /**
@@ -45,7 +46,7 @@ async function replaceAll(
   await tombstoneStore.clear()
   for (const record of decks) await deckStore.put(record)
   for (const record of mixes) await mixStore.put(record)
-  for (const record of tombstones) await tombstoneStore.put(record)
+  for (const record of tombstones) await putTombstone(tombstoneStore, record)
 }
 
 /**
@@ -134,11 +135,19 @@ export function createIndexedDbDeckStore(): DeckStore {
      *
      * `apply` refusing aborts the transaction rather than writing a guess —
      * as does a refused write, which is `runTransaction`'s other half (T077).
+     *
+     * **A Phrase the stored Deck held and `next` does not is a deletion**, and
+     * it gets a Tombstone in this same transaction (T073), dated with the same
+     * instant as the Deck — so the merge's clock test, where it has nothing
+     * better, always reads the Tombstone as at least as recent as the Deck
+     * that lost the Phrase. Judged by diff rather than by a separate "delete
+     * Phrase" call because every way a Phrase can leave a Deck comes through
+     * here, and a removal with no Tombstone is one the other device undoes.
      */
     async update(id: DeckId, apply: (stored: Deck | undefined) => Deck): Promise<Deck> {
       await ensurePersistenceRequested()
       const db = await getDatabase()
-      const tx = db.transaction(DECKS_STORE, 'readwrite')
+      const tx = db.transaction([DECKS_STORE, TOMBSTONES_STORE], 'readwrite')
       const store = tx.objectStore(DECKS_STORE)
 
       return runTransaction(tx, async () => {
@@ -146,6 +155,12 @@ export function createIndexedDbDeckStore(): DeckStore {
         const next = apply(existing ? fromRecord(existing) : undefined)
         const now = Date.now()
         await store.put(toRecord(next, { createdAt: existing?.createdAt ?? now, updatedAt: now }))
+        const kept = new Set(next.phrases.map((phrase) => phrase.id))
+        for (const phrase of existing?.phrases ?? []) {
+          if (kept.has(phrase.id)) continue
+          const tombstone: Tombstone = { id: phrase.id, kind: 'phrase', deckId: id, deletedAt: now }
+          await putTombstone(tx.objectStore(TOMBSTONES_STORE), tombstone)
+        }
         return next
       })
     },
@@ -162,9 +177,7 @@ export function createIndexedDbDeckStore(): DeckStore {
       const tx = db.transaction([DECKS_STORE, TOMBSTONES_STORE], 'readwrite')
       await runTransaction(tx, async () => {
         await tx.objectStore(DECKS_STORE).delete(id)
-        await tx
-          .objectStore(TOMBSTONES_STORE)
-          .put({ id, kind: 'deck', deletedAt: Date.now() } satisfies Tombstone)
+        await putTombstone(tx.objectStore(TOMBSTONES_STORE), { id, kind: 'deck', deletedAt: Date.now() } satisfies Tombstone)
       })
     },
 

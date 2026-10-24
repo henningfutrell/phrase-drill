@@ -1,5 +1,5 @@
 import type { Mix, MixId, MixStore } from '../../domain'
-import { MIXES_STORE, TOMBSTONES_STORE, createDatabaseConnection, runTransaction } from './database'
+import { MIXES_STORE, TOMBSTONES_STORE, createDatabaseConnection, putTombstone, runTransaction } from './database'
 import { fromMixRecord, toMixRecord } from './mapping'
 import type { MixRecord, Tombstone } from './migrations'
 
@@ -42,9 +42,7 @@ export function createIndexedDbMixStore(): MixStore {
       const tx = db.transaction([MIXES_STORE, TOMBSTONES_STORE], 'readwrite')
       await runTransaction(tx, async () => {
         await tx.objectStore(MIXES_STORE).delete(id)
-        await tx
-          .objectStore(TOMBSTONES_STORE)
-          .put({ id, kind: 'mix', deletedAt: Date.now() } satisfies Tombstone)
+        await putTombstone(tx.objectStore(TOMBSTONES_STORE), { id, kind: 'mix', deletedAt: Date.now() } satisfies Tombstone)
       })
     },
   }

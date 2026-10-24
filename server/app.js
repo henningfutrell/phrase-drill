@@ -51,7 +51,7 @@ const PROBE_TTL_MS = 5 * 60 * 1000
  * told to update an app for which no update exists, and their library has
  * already been overwritten by the push that did it.
  */
-export const LIBRARY_MAX_SCHEMA_VERSION = 6
+export const LIBRARY_MAX_SCHEMA_VERSION = 7
 
 /**
  * Whether a `schemaVersion` is one this server can store, serve and compare.

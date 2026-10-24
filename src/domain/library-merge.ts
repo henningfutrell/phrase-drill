@@ -1,4 +1,4 @@
-import type { DeckRecord, Library, MixRecord, PhraseRecord, Tombstone } from './ports'
+import { tombstoneKey, type DeckRecord, type Library, type MixRecord, type PhraseRecord, type Tombstone } from './ports'
 
 /**
  * Reconcile two whole-library snapshots — this device's and the server's —
@@ -56,9 +56,10 @@ import type { DeckRecord, Library, MixRecord, PhraseRecord, Tombstone } from './
  *   nowhere to put the loser: `Phrase` has one French and one English field,
  *   and inventing a second copy of a phrase would corrupt the drill.
  *
- * A Phrase is **removed** only where this device's own saved Deck records the
- * deletion — never because the other side is missing it (T070). See
- * `mergePhrases`, which is where the whole argument is written down.
+ * A Phrase is **removed** only where something records the deletion — this
+ * device's own saved Deck, or a Phrase Tombstone (T073) — never because the
+ * other side is missing it (T070). See `mergePhrases`, which is where the
+ * whole argument is written down, and `withoutDeletedPhrases`.
  *
  * The pinned voice (T067) is neither: it is one value with no id and no
  * `updatedAt`, and it takes plain last-writer-wins — this device's, unless
@@ -120,15 +121,16 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
   const baseDecks = byId(agreed?.decks)
   const baseMixes = byId(agreed?.mixes)
 
-  const survivingDecks = decks.filter(
-    (deck) => !isDeleted(deck, tombstones.get(key('deck', deck.id)), rewritten(deck, baseDecks, sameDeckContent)),
-  )
+  const survivingDecks = decks
+    .filter((deck) => !isDeleted(deck, tombstones.get(key('deck', deck.id)), rewritten(deck, baseDecks, sameDeckContent)))
+    .map((deck) => withoutDeletedPhrases(deck, tombstones, baseDecks))
   const survivingMixes = mixes.filter(
     (mix) => !isDeleted(mix, tombstones.get(key('mix', mix.id)), rewritten(mix, baseMixes, sameMixContent)),
   )
 
   const survivingIds = new Set([
     ...survivingDecks.map((deck) => key('deck', deck.id)),
+    ...survivingDecks.flatMap((deck) => deck.phrases.map((phrase) => key('phrase', deck.id, phrase.id))),
     ...survivingMixes.map((mix) => key('mix', mix.id)),
   ])
 
@@ -142,7 +144,7 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
     mixes: survivingMixes,
     // A Tombstone whose record survived was outlived by a rewrite of that
     // id; keeping it would delete the record again on the next merge.
-    tombstones: [...tombstones.values()].filter((tombstone) => !survivingIds.has(key(tombstone.kind, tombstone.id))),
+    tombstones: [...tombstones.values()].filter((tombstone) => !survivingIds.has(key(...tombstoneKey(tombstone)))),
     // The pinned voice (T067): last writer wins, and the writer is whichever
     // device is syncing. No `pinnedAt` was invented to arbitrate it, because
     // there is nothing left for a timestamp to protect — since T067 a Clip
@@ -155,9 +157,13 @@ export function mergeLibraries(local: Library, remote: Library, base?: Library):
   }
 }
 
-/** One namespace for both aggregates, so a Deck's Tombstone can never reach a Mix. */
-function key(kind: Tombstone['kind'], id: string): string {
-  return `${kind}:${id}`
+/**
+ * One namespace for every kind, so a Deck's Tombstone can never reach a Mix,
+ * and a Phrase's can reach only that Phrase of that Deck — the parts of
+ * `tombstoneKey`, encoded so that no id can run into the next part.
+ */
+function key(...parts: readonly string[]): string {
+  return JSON.stringify(parts)
 }
 
 /**
@@ -351,18 +357,18 @@ function samePhrase(a: PhraseRecord | undefined, b: PhraseRecord): boolean {
  * end where the user will see it.
  *
  * **A Phrase is only ever removed when something records that it was deleted**
- * (T070). Nothing writes a Phrase Tombstone, so the one record this build has
- * is this device's own saved Deck: it held the Phrase at the last state both
- * sides agreed on, and it does not now. The other side's absence is NOT such a
+ * (T070). Here that record is this device's own saved Deck: it held the
+ * Phrase at the last state both sides agreed on, and it does not now. The
+ * other record is a Phrase Tombstone, applied after this merge by
+ * `withoutDeletedPhrases` (T073). The other side's absence is NOT such a
  * record — the server is not guaranteed to be a descendant of the baseline
  * (restore the pg_dump, let an older device's push win, repair the row by
  * hand) and absence there means "rolled back" exactly as readily as "deleted".
  * Reading it as a deletion is what made the documented recovery procedure
  * destroy their phrases, on the phone and on the server, in one round-trip.
  *
- * The cost is that a Phrase deleted on the OTHER device comes back here until
- * this device deletes it too — one tap. The alternative cost is handwritten
- * phrases that exist nowhere else.
+ * A Phrase deleted on the OTHER device is therefore kept here, and its
+ * Tombstone removes it afterwards — not its absence.
  */
 function mergePhrases(
   base: readonly PhraseRecord[] | undefined,
@@ -418,6 +424,51 @@ function mergePhrases(
 }
 
 /**
+ * A Deck without the Phrases that a Phrase Tombstone deletes (T073).
+ *
+ * Until T073 nothing recorded that a Phrase was deleted, so a Phrase deleted on
+ * the other device came back from this one on the next sync: this device still
+ * held it, and absence over there is not a deletion (T070). The Tombstone is
+ * the record, and it obeys the rule a Deck's Tombstone obeys (`isDeleted`): **it
+ * deletes only a Phrase unchanged from the last state both sides agreed on.**
+ * The deleting side saw exactly that Phrase; anything else was written after
+ * the agreement, whatever a clock says, so the deleting side cannot have seen
+ * it. That keeps the T070 guarantees whole:
+ *
+ * - An edit outranks a delete. The edited Phrase survives, and so the
+ *   Tombstone is dropped in `mergeLibraries`.
+ * - A restore outranks a deletion (T072). A restore empties the baseline, so
+ *   every restored Phrase reads as written since, and survives.
+ * - A rolled-back server cannot delete anything it did not record as deleted.
+ *   Only a Tombstone deletes, and a Tombstone is only written when the user
+ *   deletes a Phrase.
+ *
+ * With **no baseline**, the clock is all there is, as for a Deck: the Phrase
+ * goes when the Tombstone is at least as recent as the Deck holding it. The
+ * deck store writes the Tombstone with the same instant as the Deck it saves,
+ * so the deletion itself always passes that test.
+ *
+ * Two Phrases sharing an id in one Deck are both kept: nothing says which of
+ * them was deleted. The same holds for a baseline that holds the id twice.
+ */
+function withoutDeletedPhrases(
+  deck: DeckRecord,
+  tombstones: Map<string, Tombstone>,
+  base: Map<string, DeckRecord> | undefined,
+): DeckRecord {
+  const held = groupById(deck.phrases)
+  const agreed = base === undefined ? undefined : groupById(base.get(deck.id)?.phrases)
+  const phrases = deck.phrases.filter((phrase) => {
+    const tombstone = tombstones.get(key('phrase', deck.id, phrase.id))
+    if (tombstone === undefined || held.get(phrase.id)!.length > 1) return true
+    if (agreed === undefined) return tombstone.deletedAt < deck.updatedAt
+    const before = agreed.get(phrase.id) ?? NONE
+    return before.length !== 1 || !samePhrase(before[0], phrase)
+  })
+  return { ...deck, phrases }
+}
+
+/**
  * No Phrases under this id — one shared empty list, so that "the user has none"
  * has exactly one representation everywhere the merge reasons about it.
  */
@@ -449,19 +500,20 @@ function unionByContent<T>(mine: readonly T[], theirs: readonly T[], same: (a: T
   return kept
 }
 
-/** Every Tombstone from both sides, keeping the later deletion of any id. */
+/** Every Tombstone from both sides, keeping the later deletion of any record. */
 function mergeTombstones(
   local: readonly Tombstone[],
   remote: readonly Tombstone[],
 ): Map<string, Tombstone> {
   const latest = new Map<string, Tombstone>()
   for (const tombstone of [...local, ...remote]) {
-    const held = latest.get(key(tombstone.kind, tombstone.id))
+    const id = key(...tombstoneKey(tombstone))
+    const held = latest.get(id)
     // Stryker disable next-line EqualityOperator: `>` vs `>=` is equivalent here. A
     // Tombstone is exactly {kind, id, deletedAt}, so two that compare equal on
     // deletedAt under the same key are structurally identical — whichever the tie
     // keeps, the map holds the same value, and no test can observe the difference.
-    if (!held || tombstone.deletedAt > held.deletedAt) latest.set(key(tombstone.kind, tombstone.id), tombstone)
+    if (!held || tombstone.deletedAt > held.deletedAt) latest.set(id, tombstone)
   }
   return latest
 }

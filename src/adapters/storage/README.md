@@ -34,7 +34,7 @@ in the single `openDatabase()` upgrade path (`database.ts`):
 | `clips` | content-addressed audio cache — derived, never exported | v2 |
 | `errors` | diagnostics ring buffer | v3 |
 | `mixes` | saved Mixes — Deck **ids**, never Phrases | v4 (T059) |
-| `tombstones` | what was deleted, and when — so sync can merge | v5 (T060) |
+| `tombstones` | what was deleted, and when — so sync can merge. Deck, Mix and Phrase rows, keyed out of line by `tombstoneKey` since v7 (T073) | v5 (T060) |
 | `clipMeta` | size index over `clips` — `{ hash, bytes, lastUsedAt }` | v6 (T036) |
 
 ## The clip cache is bounded, and eviction cannot reach a Phrase

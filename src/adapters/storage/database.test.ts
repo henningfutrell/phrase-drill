@@ -292,8 +292,73 @@ describe('openDatabase v5 -> v6 migration (T072: the upgrade may not load the cl
       updatedAt: 2,
     })
     expect(await db.get(MIXES_STORE, 'm1')).toMatchObject({ name: 'Mornings' })
-    expect(await db.get(TOMBSTONES_STORE, 'gone')).toEqual({ id: 'gone', kind: 'deck', deletedAt: 4 })
+    expect(await db.getAll(TOMBSTONES_STORE)).toEqual([{ id: 'gone', kind: 'deck', deletedAt: 4 }])
     expect((await db.getAll(CLIPS_STORE)).length).toBe(2)
+  })
+})
+
+describe('openDatabase v6 -> v7 migration (T073: Phrase Tombstones)', () => {
+  beforeEach(() => {
+    resetFakeIdb()
+  })
+
+  /**
+   * Fixture: a v6 database as it sits on their phone before this build. The
+   * `tombstones` store is keyed by `id` alone, and it already holds their
+   * deletions — a Deck and a Mix. Those rows are theirs: a Tombstone lost in
+   * the upgrade is a deleted Deck that their other phone pushes back.
+   */
+  async function seedV6Database(): Promise<void> {
+    const v6db = await idbModule.openDB(DB_NAME, 6, {
+      upgrade(db) {
+        db.createObjectStore(DECKS_STORE, { keyPath: 'id' })
+        db.createObjectStore(SETTINGS_STORE)
+        db.createObjectStore(CLIPS_STORE, { keyPath: 'hash' })
+        db.createObjectStore(ERRORS_STORE, { keyPath: 'id' })
+        db.createObjectStore(MIXES_STORE, { keyPath: 'id' })
+        db.createObjectStore(TOMBSTONES_STORE, { keyPath: 'id' })
+        db.createObjectStore(CLIP_META_STORE, { keyPath: 'hash' })
+      },
+    })
+    await v6db.put(DECKS_STORE, {
+      id: 'home',
+      name: 'Home',
+      phrases: [{ id: 'p1', french: 'Bonjour', english: 'Hello' }],
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    await v6db.put(MIXES_STORE, { id: 'm1', name: 'Mornings', deckIds: ['home'], createdAt: 3, updatedAt: 3 })
+    await v6db.put(TOMBSTONES_STORE, { id: 'gone', kind: 'deck', deletedAt: 4 })
+    await v6db.put(TOMBSTONES_STORE, { id: 'old-mix', kind: 'mix', deletedAt: 5 })
+    v6db.close()
+  }
+
+  it('keeps every Tombstone, Deck and Mix the v6 database held', async () => {
+    await seedV6Database()
+
+    const db = await openDatabase()
+
+    expect(db.version).toBe(7)
+    expect(await db.getAll(TOMBSTONES_STORE)).toEqual(
+      expect.arrayContaining([
+        { id: 'gone', kind: 'deck', deletedAt: 4 },
+        { id: 'old-mix', kind: 'mix', deletedAt: 5 },
+      ]),
+    )
+    expect(await db.count(TOMBSTONES_STORE)).toBe(2)
+    expect(await db.get(DECKS_STORE, 'home')).toMatchObject({ name: 'Home' })
+    expect(await db.get(MIXES_STORE, 'm1')).toMatchObject({ name: 'Mornings' })
+  })
+
+  it('keys each migrated Tombstone by what it deletes, so a Phrase Tombstone under the same id sits beside it', async () => {
+    await seedV6Database()
+
+    const db = await openDatabase()
+    await db.put(TOMBSTONES_STORE, { id: 'gone', kind: 'phrase', deckId: 'home', deletedAt: 6 }, ['phrase', 'home', 'gone'])
+
+    expect(await db.get(TOMBSTONES_STORE, ['deck', 'gone'])).toEqual({ id: 'gone', kind: 'deck', deletedAt: 4 })
+    expect(await db.get(TOMBSTONES_STORE, ['mix', 'old-mix'])).toEqual({ id: 'old-mix', kind: 'mix', deletedAt: 5 })
+    expect(await db.count(TOMBSTONES_STORE)).toBe(3)
   })
 })
 
