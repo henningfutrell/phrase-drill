@@ -1566,11 +1566,12 @@ describe('server app (integration, fake upstreams)', () => {
         mixes: [],
       }
 
-      hold = Promise.withResolvers()
+      let releaseOld
+      hold = { promise: new Promise((resolve) => (releaseOld = resolve)) }
       const oldPush = push(fromOldClient)
       await oldReachedPut
       expect((await push(fromNewClient)).status).toBe(204)
-      hold.resolve()
+      releaseOld()
       expect((await oldPush).status).toBe(409)
 
       const get = await fetch(`${baseUrl}/api/library`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } })
