@@ -553,6 +553,38 @@ describe('DrillScreen — running a Drill', () => {
     expect(testid('drill-beat-2')?.getAttribute('data-state')).toBe('live')
   })
 
+  it('advances the Rep counter when the Drill plays on into the next Rep, with no control tapped', async () => {
+    const speech = controllableSpeech()
+    render(
+      <DrillScreen
+        title="Home"
+        checkReadiness={() => Promise.resolve(ready([bonjour, merci]))}
+        speech={speech}
+        clock={fakeClock()}
+        unlock={() => Promise.resolve({ ok: true as const })}
+        onExit={() => {}}
+      />,
+    )
+    await settle()
+    await click(testid('drill-start'))
+    expect(textOf('drill-current-line')).toBe('Bonjour')
+    expect(textOf('drill-rep-counter')).toBe('Rep 1 of 2')
+
+    // The Cadence speaks four Utterances per Rep; the fifth is the next Rep's first.
+    for (let i = 0; i < 4; i += 1) {
+      await act(async () => {
+        speech.resolveCurrent()
+        await flushMicrotasks()
+      })
+      await act(async () => {
+        await vi.runAllTimersAsync()
+      })
+    }
+
+    expect(textOf('drill-current-line')).toBe('Merci')
+    expect(textOf('drill-rep-counter')).toBe('Rep 2 of 2')
+  })
+
   it('Pause cancels the in-flight utterance; the control relabels to Resume', async () => {
     const speech = controllableSpeech()
     render(

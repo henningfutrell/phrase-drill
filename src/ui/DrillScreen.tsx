@@ -95,7 +95,7 @@ function instrumentPorts(
   speech: SpeechPort,
   clock: ClockPort,
   getRepIndex: () => number,
-  onStep: (info: LiveStep) => void,
+  onStep: (info: LiveStep, repIndex: number) => void,
 ): { speech: SpeechPort; clock: ClockPort } {
   let lastRepIndex = -1
   let stepCounter = 0
@@ -119,10 +119,13 @@ function instrumentPorts(
       stepCounter += 1
       lastKind = step.kind
     }
-    onStep({
-      beatIndex: Math.floor(stepIndex / 2),
-      utterance: step.kind === 'utterance' ? { text: step.text, lang: step.lang } : undefined,
-    })
+    onStep(
+      {
+        beatIndex: Math.floor(stepIndex / 2),
+        utterance: step.kind === 'utterance' ? { text: step.text, lang: step.lang } : undefined,
+      },
+      repIndex,
+    )
   }
 
   return {
@@ -437,9 +440,11 @@ export function DrillScreen({
         speech,
         clock,
         () => playerRef.current?.position ?? 0,
-        (info) => {
+        (info, stepRepIndex) => {
           if (info.utterance) setCurrentUtterance(info.utterance)
           setLive(info)
+          // The player has no per-Rep event; a Step is the moment a new Rep shows.
+          setRepIndex(stepRepIndex)
         },
       )
       const player = createDrillPlayer(readyPhrases, ports, { random })
