@@ -19,8 +19,13 @@ hostname from `render.yaml`'s `name: phrase-drill`. Measured 2026-08-24:
 
 ## Topology, and the backup decision (D1)
 
-- **Render** runs the server (`phrase-drill`, `starter`, `oregon`) from
-  `render.yaml`. It serves the PWA and the API.
+- **Render** runs the server (`phrase-drill`, `free`, `oregon`) from
+  `render.yaml`. It serves the PWA and the API. **Free plan, owner decision
+  2026-10-05:** it spins down after 15 minutes idle, so the first request
+  after that waits about a minute for a cold start; Clip jobs queued in the
+  process wait while it sleeps; there is no Shell tab, so
+  `scripts/auth-password-set.mjs` and `scripts/clip-delete.mjs` run from a
+  machine with the Supabase credentials in its environment.
 - **Supabase** (Free tier) holds the database (Postgres), Auth and Storage
   (the Clip bytes). The server reaches Postgres through the **session
   pooler**, port 5432 (`aws-0-<region>.pooler.supabase.com`). **Enforce SSL**
@@ -63,7 +68,7 @@ service's Environment tab afterwards. A `VITE_*` change needs a rebuild
 1. **Connect the repo.** In the Render dashboard: New → Blueprint → pick
    this GitHub repo, this branch (`main`). Render reads `render.yaml` and
    shows you the plan: one web service (`phrase-drill`, `docker`, plan
-   `starter`, `oregon`) and, until its decommission, the old Postgres
+   `free`, `oregon`) and, until its decommission, the old Postgres
    database (`phrase-drill-db`).
 
 2. **Set the secrets.** `render.yaml` declares the `sync: false` variables

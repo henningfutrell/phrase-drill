@@ -27,7 +27,7 @@ a copy of their library. It does not.
 | **The device copy** | Their phone holds their library in IndexedDB and syncs it; after a total server loss the next push restores it. | Their phone, continuously | Their iPhone |
 | **`scripts/restore-drill.mjs`, monthly** | Proves a real backup restores. A backup nobody restored is a guess. | You, by hand, monthly | A scratch database on backup-host |
 
-Topology: the server runs on Render (`starter`); the database, Auth and
+Topology: the server runs on Render (`free`); the database, Auth and
 Storage are Supabase (Free). Session pooler, port 5432. **Enforce SSL** is on,
 sign-ups are off, the Data API is off (RLS on every table anyway).
 

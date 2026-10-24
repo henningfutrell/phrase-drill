@@ -3,9 +3,12 @@
 # service built from the Dockerfile; the database, Auth and Storage are
 # Supabase (Free tier, decision D1 in docs/backup.md). See docs/deploy.md.
 #
-# Web service `starter` ($7/mo, 512 MB RAM): the app is ~23 MiB RSS, so `free`
-# would fit the memory, but free web services spin down on idle (cold starts
-# on their phone) and have no Shell tab. `starter` stays always-on.
+# Web service `free` (owner decision 2026-10-05, at the Supabase cutover): the
+# app is ~23 MiB RSS, so it fits. The costs are accepted: the service spins
+# down after 15 min idle (the first request after that waits for a cold start,
+# about a minute), Clip jobs queued in-process stop while it sleeps and resume
+# on the next request, and there is no Shell tab — run the scripts from a
+# machine with the Supabase credentials instead (docs/deploy.md).
 #
 # DECOMMISSION: the `databases:` block below is the OLD Render Postgres. It
 # is kept until day +30 after cutover as a rollback copy and no service reads
@@ -24,7 +27,7 @@ services:
   - type: web
     name: phrase-drill
     runtime: docker
-    plan: starter
+    plan: free
     region: oregon
     dockerfilePath: ./Dockerfile
     dockerContext: .
