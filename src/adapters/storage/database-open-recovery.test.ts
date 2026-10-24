@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Deck, Library, Mix } from '../../domain'
 import { LIBRARY_FORMAT } from '../../domain'
 import { CURRENT_SCHEMA_VERSION } from './migrations'
-import { resetFakeIdb } from './idb.test-support'
+import { resetFakeIdb, terminateConnection } from './idb.test-support'
 
 /**
  * What every store that opens this database does when the open is refused
@@ -44,6 +44,9 @@ const control = vi.hoisted(() => ({
   failingOpens: 0,
   /** How many times `openDB` has been called at all. */
   opens: 0,
+  /** When set, the next `openDB` call waits for this test to reject it. */
+  holdNextOpen: false,
+  rejectHeldOpen: undefined as ((error: Error) => void) | undefined,
 }))
 
 vi.mock('idb', async () => {
@@ -52,6 +55,12 @@ vi.mock('idb', async () => {
     ...actual,
     openDB: (...args: Parameters<typeof actual.openDB>) => {
       control.opens += 1
+      if (control.holdNextOpen) {
+        control.holdNextOpen = false
+        return new Promise((_resolve, reject) => {
+          control.rejectHeldOpen = reject
+        })
+      }
       if (control.failingOpens > 0) {
         control.failingOpens--
         return Promise.reject(new Error('idb: the database could not be opened'))
@@ -66,6 +75,7 @@ const { createIndexedDbMixStore } = await import('./indexed-db-mix-store')
 const { createIndexedDbSettingsStore } = await import('./settings-store')
 const { createIndexedDbSyncBaselineStore } = await import('./sync-baseline-store')
 const { createIndexedDbErrorLog } = await import('../diagnostics/error-log')
+const { openDatabase } = await import('./database')
 
 function makeDeck(overrides: Partial<Deck> = {}): Deck {
   return {
@@ -96,6 +106,8 @@ describe('a store whose database refused to open once', () => {
     resetFakeIdb()
     control.failingOpens = 0
     control.opens = 0
+    control.holdNextOpen = false
+    control.rejectHeldOpen = undefined
     vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
   })
 
@@ -169,5 +181,39 @@ describe('a store whose database refused to open once', () => {
     await expect(store.loadAll()).rejects.toThrow()
 
     expect(control.opens).toBe(3)
+  })
+})
+
+describe('a refused open that settles after the store has opened again (T096)', () => {
+  beforeEach(() => {
+    resetFakeIdb()
+    control.failingOpens = 0
+    control.opens = 0
+    control.holdNextOpen = false
+    control.rejectHeldOpen = undefined
+    vi.stubGlobal('navigator', { storage: { persist: vi.fn().mockResolvedValue(true) } })
+  })
+
+  it('does not forget the newer handle when the older open rejects late', async () => {
+    const store = createIndexedDbDeckStore()
+
+    // An open that has not settled yet.
+    control.holdNextOpen = true
+    const first = store.loadAll()
+
+    // The browser closes a connection meanwhile: `terminated` makes every
+    // store forget its handle, so the next call opens again and succeeds.
+    terminateConnection(await openDatabase())
+    expect(await store.loadAll()).toEqual([])
+
+    // Only now does the first open reject. It must clear its OWN promise,
+    // not the newer one that is working.
+    control.rejectHeldOpen!(new Error('idb: the database could not be opened'))
+    await expect(first).rejects.toThrow()
+
+    control.opens = 0
+    await store.save(makeDeck())
+    expect(await store.loadAll()).toEqual([makeDeck()])
+    expect(control.opens).toBe(0)
   })
 })

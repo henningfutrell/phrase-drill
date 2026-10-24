@@ -243,11 +243,17 @@ export function createDatabaseConnection(): () => Promise<IDBPDatabase> {
   })
 
   return function getDatabase(): Promise<IDBPDatabase> {
-    dbPromise ??= openDatabase().catch((error: unknown) => {
-      dbPromise = undefined
+    if (dbPromise) return dbPromise
+    // Forget only THIS open on its rejection (T096). A `terminated` can clear
+    // the handle while this open is still pending, and the next call then
+    // opens again; a late rejection of this one must not forget that newer,
+    // working handle.
+    const opening: Promise<IDBPDatabase> = openDatabase().catch((error: unknown) => {
+      if (dbPromise === opening) dbPromise = undefined
       throw error
     })
-    return dbPromise
+    dbPromise = opening
+    return opening
   }
 }
 

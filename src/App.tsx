@@ -784,6 +784,12 @@ function App({
         // was stored a moment ago.
         setDecks(loadedDecks)
         setMixes(loadedMixes)
+        // The library was just written and read back, so it is readable (T096).
+        // A restore is the way out of the T083 screen; leaving its flag and
+        // its "could not open" notice up would tell them to relaunch an app
+        // that now works.
+        setLibraryUnreadable(false)
+        setWriteFailure((current) => (current === LIBRARY_UNREADABLE_NOTICE ? undefined : current))
         // The file may have carried a pinned voice (T067); if it did, it is
         // pinned now, and the drill screen must be told.
         setSettings(loadedSettings)

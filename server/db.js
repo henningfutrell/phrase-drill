@@ -211,6 +211,7 @@ export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, 
      */
     async put(key, data, updatedAt, { now = Date.now(), admit = () => true } = {}) {
       const client = await pool.connect()
+      let rollbackError
       try {
         await client.query('BEGIN')
 
@@ -241,10 +242,16 @@ export function createLibraryStore(pool, { snapshotIntervalMs, versionMaxCount, 
         // A rollback that itself fails must not replace the real error: the
         // caller needs to know the push did not land, and 500 is what makes
         // the device retry it.
-        await client.query('ROLLBACK').catch(() => {})
+        //
+        // The connection is then not clean (T096): `release(err)` makes `pg`
+        // destroy it rather than lend it, still inside the aborted
+        // transaction, to the next request.
+        await client.query('ROLLBACK').catch((error) => {
+          rollbackError = error
+        })
         throw err
       } finally {
-        client.release()
+        client.release(rollbackError)
       }
     },
 
