@@ -16,8 +16,11 @@ services:
   phrase-drill:
     build:
       context: .
+    # Loopback only: a dev stack answers this machine, not the LAN. The app
+    # authenticates exactly as production does, and a dev database can hold a
+    # restored copy of their library.
     ports:
-      - '8080:8080'
+      - '127.0.0.1:8080:8080'
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     environment:

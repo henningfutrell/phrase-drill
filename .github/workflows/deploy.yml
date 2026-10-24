@@ -66,11 +66,28 @@ jobs:
       # (`src/adapters/auth/supabase-env.ts`). This bundle is a gate and is
       # never shipped — Render builds its own from the Dockerfile with the
       # real ones — so the local stack's URL and a placeholder key stand in.
+      #
+      # The server-only variables carry canary values here, and the next step
+      # fails if any of them, a Supabase secret key or a service_role JWT is in
+      # the bundle (`scripts/check-bundle-secrets.mjs`). The device holds no
+      # credential but the publishable key.
       - name: Build
         run: npm run build
         env:
           VITE_SUPABASE_URL: http://127.0.0.1:54321
           VITE_SUPABASE_PUBLISHABLE_KEY: ci-build-only
+          SUPABASE_SECRET_KEY: ci-canary-supabase-secret-key
+          ELEVENLABS_API_KEY: ci-canary-elevenlabs-key
+          ANTHROPIC_API_KEY: ci-canary-anthropic-key
+          DATABASE_URL: postgresql://ci-canary:ci-canary@127.0.0.1:5432/ci-canary
+
+      - name: No server credential in the bundle
+        run: node scripts/check-bundle-secrets.mjs dist
+        env:
+          SUPABASE_SECRET_KEY: ci-canary-supabase-secret-key
+          ELEVENLABS_API_KEY: ci-canary-elevenlabs-key
+          ANTHROPIC_API_KEY: ci-canary-anthropic-key
+          DATABASE_URL: postgresql://ci-canary:ci-canary@127.0.0.1:5432/ci-canary
 
       # Last, and only on main. Three things here are load-bearing:
       #

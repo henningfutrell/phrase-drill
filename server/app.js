@@ -159,6 +159,8 @@ export function createApp({
   scanLimiter,
   libraryLimiter,
   translateLimiter,
+  elevenLabsSpendCap,
+  anthropicSpendCap,
   distDir,
   logger,
   verifyAccessToken,
@@ -314,7 +316,8 @@ export function createApp({
     // A miss is a job (S5). `request` joins one already queued or running
     // for this hash — a re-poll, or a second device — rather than starting a
     // second paid generation, and refuses once the hash has cost its two
-    // billed calls today.
+    // billed calls today. Joining one in flight spends nothing.
+    if (!(await isInFlight(hash)) && !spendOrRefuse(res, elevenLabsSpendCap, 'elevenlabs', key)) return
     const requested = await clipJobStore.request(fields, Date.now())
     if (requested.capped) return sendBillingCapped(res)
     return answerWhenGenerated(res, hash)
@@ -396,6 +399,7 @@ export function createApp({
     const job = await clipJobStore.get(hash)
     if (job?.state === 'queued' || job?.state === 'running') return answerWhenGenerated(res, hash)
     if (job && planRequest(job, now).capped) return sendBillingCapped(res)
+    if (!spendOrRefuse(res, elevenLabsSpendCap, 'elevenlabs', key)) return
 
     await clipStore.delete(hash)
     const requested = await clipJobStore.request(fields, now)
@@ -469,6 +473,27 @@ export function createApp({
     return sendJson(res, 422, { error: 'unreadable' })
   }
 
+  /**
+   * Spends one of today's billed calls for `key` at `provider`, or answers
+   * 429 and returns false. Asked only right before work that can bill, so a
+   * cache hit or a re-poll never spends. 429 with `Retry-After` because that
+   * is what the device already parks on: the work waits for tomorrow, it is
+   * not lost.
+   */
+  function spendOrRefuse(res, cap, provider, key) {
+    const spend = cap.allow(key)
+    if (spend.ok) return true
+    logger.error('daily spend cap reached', { kind: 'spend-capped', provider })
+    sendRateLimited(res, spend)
+    return false
+  }
+
+  /** Whether a generation for `hash` is already queued or running, which a new ask joins for free. */
+  async function isInFlight(hash) {
+    const job = await clipJobStore.get(hash)
+    return job?.state === 'queued' || job?.state === 'running'
+  }
+
   /** Waits up to `ttsWaitMs` on the job for `hash` and answers what is known by then. */
   async function answerWhenGenerated(res, hash) {
     const outcome = clipJobRunner.waitFor(hash, ttsWaitMs)
@@ -507,6 +532,7 @@ export function createApp({
     const contentType = req.headers['content-type']
     const mediaType = typeof contentType === 'string' && contentType.startsWith('image/') ? contentType : 'image/jpeg'
 
+    if (!spendOrRefuse(res, anthropicSpendCap, 'anthropic', key)) return
     try {
       const phrases = await anthropic.scan({ base64: body.toString('base64'), mediaType })
       sendJson(res, 200, { phrases })
@@ -545,6 +571,7 @@ export function createApp({
       return sendJson(res, 400, { error: 'invalid-request' })
     }
 
+    if (!spendOrRefuse(res, anthropicSpendCap, 'anthropic', key)) return
     try {
       const candidates = await anthropic.translate({ text, direction, deckName })
       sendJson(res, 200, { candidates })

@@ -5,6 +5,7 @@ import { createLibraryStore, createClipStore, createPool, waitForDatabase, extra
 import { createAccessTokenVerifier } from './access-token-verifier.js'
 import { createLogger } from './logger.js'
 import { createRateLimiter } from './rate-limiter.js'
+import { createDailySpendCap } from './daily-spend-cap.js'
 import { createBoundedQueue } from './bounded-queue.js'
 import { createClipJobStore } from './clip-job-store.js'
 import { createClipJobRunner } from './clip-job-runner.js'
@@ -94,6 +95,13 @@ export async function buildServer(env = process.env) {
   // at a time" but each call is far cheaper (one short string, not an
   // image), so it sits just under tts's ceiling rather than down at scan's.
   const translateLimiter = createRateLimiter({ capacity: 30, refillMs: 60_000 })
+  // Spend caps: billed provider calls one account may start per UTC day. The
+  // limiters above bound the rate; these bound the bill if a token leaks.
+  // ElevenLabs: a first sweep of a whole library is ~2,000 Clips, so 3,000
+  // leaves room for it in one day. Anthropic (scan + translate together):
+  // 300 is a long day of adding phrases by hand.
+  const elevenLabsSpendCap = createDailySpendCap({ limit: 3_000 })
+  const anthropicSpendCap = createDailySpendCap({ limit: 300 })
 
   const handleRequest = createApp({
     libraryStore,
@@ -106,6 +114,8 @@ export async function buildServer(env = process.env) {
     scanLimiter,
     libraryLimiter,
     translateLimiter,
+    elevenLabsSpendCap,
+    anthropicSpendCap,
     distDir,
     logger,
     verifyAccessToken,

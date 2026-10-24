@@ -298,6 +298,28 @@ between here and the device — a log, a proxy, `curl` — where a private JSON
 key would not be. 402 is used nowhere else in this API, so nothing else can
 produce it by accident.
 
+### The daily spend cap
+
+The limiter bounds how fast one account spends; the **daily spend cap**
+(`server/daily-spend-cap.js`) bounds how much. Each account may start at most
+**3,000** ElevenLabs generations and **300** Anthropic calls (scan and
+translate together) per UTC day (`server/index.js`). Only work that can bill
+spends: a new generation, a Regenerate, a scan, a translation. A Clip the store
+holds, and a re-poll of a generation already queued or running, spend nothing.
+
+Over the cap the answer is the limiter's: `429` + `Retry-After`, here the
+seconds until the next UTC midnight, and an `error` log line `daily spend cap
+reached` with the provider. The device already parks a 429 for `Retry-After`,
+so the work waits for the next day instead of failing.
+
+Why it exists: after the Supabase cutover any valid access token reaches these
+routes. At the limiter's 60 a minute one leaked token is ~86,000 generations a
+day. The ceilings are far above one person's day of drilling (a first sweep of
+a whole library is ~2,000 Clips), so the cap refuses only abuse or a runaway
+client. In-memory and per process, like the limiter: a restart resets it. The
+free plan sleeps only after 15 idle minutes, and a client that keeps spending
+keeps the process awake.
+
 **The device holds up its end** (`src/adapters/audio/generation-queue.ts`): at
 most 4 requests in flight, and a 429 pauses the *whole* queue until
 `Retry-After` elapses rather than only the request that hit it — the limiter
@@ -782,7 +804,8 @@ the secret key). Sign-ups are disabled; there is no signup endpoint here.
 
 **What someone holding a stolen access token can do, until it expires:** read
 and overwrite that user's library and spend that user's share of the
-rate-limited budget. They cannot read the provider keys or the Supabase secret
+rate-limited budget, up to the daily spend cap ("The daily spend cap").
+Sign-ups are off, so a token comes only from an account somebody made. They cannot read the provider keys or the Supabase secret
 key (the server never returns them).
 
 ## Provable: no key can leak
@@ -803,6 +826,14 @@ key (the server never returns them).
   connection-string password extraction directly: pulls the password out of
   a well-formed URL, returns `null` for a connection string with no password
   segment and for an unparsable string, never throws.
+- **The device bundle holds no server credential.** CI builds it with canary
+  values in `SUPABASE_SECRET_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`
+  and `DATABASE_URL`, then `scripts/check-bundle-secrets.mjs dist` fails the
+  run if any of them, a Supabase secret key (`sb_secret_…`) or a
+  `service_role` JWT is in any built file. Vite inlines only `VITE_*`
+  variables, and the only two are the public URL and publishable key
+  (`src/adapters/auth/supabase-env.ts`).
+
 ## Environment variables
 
 | Var                    | Default                                                     | Meaning                                           |
@@ -863,6 +894,21 @@ reachable in ordinary operation; all three are closed:
 `CREATE TABLE IF NOT EXISTS` on every boot (`server/db.js`) — idempotent, so
 a fresh database and one that already has the tables both end up in the same
 state with no separate migration step to remember to run.
+
+**`supabase/migrations/` holds what `init()` cannot: the security of the
+schema.** `…_app_tables.sql` creates the four tables in `init()`'s shape
+(`IF NOT EXISTS`), so a fresh Supabase database has them. 
+`…_security_hardening.sql` turns RLS on for every table, adds per-user policies
+on `libraries` and `library_versions` (every operation, own rows only), a
+policy on the shared `clips` and `clip_jobs` cache that admits no row to an
+API role, revokes every grant from `anon` and `authenticated` (also for objects
+made later), and refuses to finish when a public table has RLS off, RLS on and
+no policy, or an API grant, or a public function is `SECURITY DEFINER` or has
+no fixed `search_path`. A new table or function therefore needs its own RLS,
+a policy and `SET search_path` in the same change, or the next apply fails. `npx supabase start` applies both on a new local stack; at cutover
+`migration/supabase/cutover.sh` applies them to the project.
+`server/supabase-migrations.postgres.test.js` proves them against a real
+Postgres (opt-in, `MIGRATIONS_DATABASE_URL`).
 
 T071 added one table and one column this way, and both reach the
 already-deployed database on its next restart with no manual step:
@@ -927,6 +973,15 @@ normal redeploy.
 npx supabase start        # Postgres 54322, API (Auth + Storage) 54321, the `clips` bucket
 docker compose up --build # the app, on http://localhost:8080
 ```
+
+`docker-compose.yml` publishes the app on `127.0.0.1` only: the dev stack
+answers this machine, not the LAN. It authenticates as production does, and a
+dev database can hold a restored copy of their library. Delete any account made
+for a local test after the test. `npx supabase start` publishes its own
+containers (54321, 54322), and `supabase/config.toml` does not set their
+address. Check with `ss -ltn | grep -E ':5432[12]'`: when it shows `0.0.0.0`
+or `[::]`, set the container engine's default bind address to `127.0.0.1`
+(Docker: `"ip"` in `daemon.json`) before you use the stack on a shared network.
 
 Local dev uses the Supabase CLI stack: Postgres, Auth and Storage in Docker.
 `docker-compose.yml` runs only the app and points it at that stack
