@@ -126,9 +126,20 @@ clips --sweep
 
 step "RLS again, and the publishable key must be refused"
 dst_f 004_rls.sql
+# Refused: 401/403/404, or 503 PGRST002, which is what PostgREST answers for
+# every table once the Data API is off (no schema exposed). Any other 503 is
+# an outage, not a refusal, so the body is read too.
+rest_refused() {
+  case "$1" in
+    401|403|404) return 0 ;;
+    503) case "$2" in *'"code":"PGRST002"'*) return 0 ;; esac ;;
+  esac
+  return 1
+}
 for table in libraries library_versions clips clip_jobs; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "$SUPABASE_URL/rest/v1/$table?select=*&limit=1" -H "apikey: $SUPABASE_PUBLISHABLE_KEY")
-  case "$code" in 401|403|404) echo "REST $table: HTTP $code (refused)" ;; *) echo "REST $table: HTTP $code — readable with the publishable key" >&2; exit 1 ;; esac
+  body=$(curl -s -w '\n%{http_code}' "$SUPABASE_URL/rest/v1/$table?select=*&limit=1" -H "apikey: $SUPABASE_PUBLISHABLE_KEY")
+  code=${body##*$'\n'} body=${body%$'\n'*}
+  if rest_refused "$code" "$body"; then echo "REST $table: HTTP $code (refused)"; else echo "REST $table: HTTP $code — readable with the publishable key" >&2; exit 1; fi
 done
 
 step "Render unchanged during the run"
