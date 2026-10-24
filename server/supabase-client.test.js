@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { createClient } from '@supabase/supabase-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from './app.js'
+import { createDailySpendCap } from './daily-spend-cap.js'
 import { createAccessTokenVerifier } from './access-token-verifier.js'
 import { createClipJobRunner } from './clip-job-runner.js'
 import { createMemoryClipJobStore } from './clip-job-store.test-support.js'
@@ -165,6 +166,8 @@ async function boot(
     scanLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     libraryLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     translateLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
+    elevenLabsSpendCap: createDailySpendCap({ limit: 1_000 }),
+    anthropicSpendCap: createDailySpendCap({ limit: 1_000 }),
     distDir: import.meta.dirname,
     logger,
     verifyAccessToken: createAccessTokenVerifier(supabase),

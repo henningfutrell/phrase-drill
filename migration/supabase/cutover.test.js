@@ -141,6 +141,8 @@ function actions(calls) {
       const file = args.match(/-f \S*\/(\d{3}_\w+\.sql)/)
       if (file)
         return `${args.includes('render.invalid') ? 'render' : 'supabase'} ${file[1]}`
+      const migration = args.match(/-f \S*\/supabase\/(migrations\/\w+\.sql)/)
+      if (migration) return `supabase ${migration[1]}`
       if (args.includes('DROP TABLE')) return 'drop app tables'
       if (args.includes('FROM libraries) ||')) return 'render fingerprint'
       if (args.includes('LEFT JOIN auth.users')) return 'count orphans'
@@ -215,14 +217,14 @@ describe('cutover.sh — a full run', () => {
     expect(steps(output)).toEqual([
       'preflight',
       'drop the Supabase app tables (Storage objects and Auth users are kept)',
-      '001 schema, then 004 RLS before any data',
+      '001 schema, then supabase/migrations (RLS, policies, grants) before any data',
       '002 data',
       '003 fixup',
       '005 verify: Render and Supabase must be identical',
       'clips: manifest, copy, verify',
       'auth users',
       'finalize, verify, sweep',
-      'RLS again, and the publishable key must be refused',
+      'supabase/migrations again, and the publishable key must be refused',
       'Render unchanged during the run',
     ])
     const order = actions(calls).filter((a) => a !== 'psql query')
@@ -232,7 +234,8 @@ describe('cutover.sh — a full run', () => {
       'render fingerprint',
       'drop app tables',
       'supabase 001_schema.sql',
-      'supabase 004_rls.sql',
+      'supabase migrations/20261024000000_app_tables.sql',
+      'supabase migrations/20261024000100_security_hardening.sql',
       'pg_dump',
       'pg_restore',
       'supabase 003_fixup.sql',
@@ -246,7 +249,8 @@ describe('cutover.sh — a full run', () => {
       'node clips-to-storage.mjs --finalize',
       'node clips-to-storage.mjs --verify-only',
       'node clips-to-storage.mjs --sweep',
-      'supabase 004_rls.sql',
+      'supabase migrations/20261024000000_app_tables.sql',
+      'supabase migrations/20261024000100_security_hardening.sql',
       'REST probe',
       'REST probe',
       'REST probe',
