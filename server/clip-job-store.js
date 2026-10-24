@@ -114,6 +114,7 @@ export function createClipJobStore(pool) {
   async function request(fields, now) {
     const job = newClipJob(fields, now)
     const client = await pool.connect()
+    let rollbackError
     try {
       await client.query('BEGIN')
       const inserted = await client.query(
@@ -148,10 +149,14 @@ export function createClipJobStore(pool) {
       await client.query('COMMIT')
       return plan.capped ? { capped: true } : { capped: false, job: plan.next ?? toJob(rows[0]) }
     } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
+      // A failed rollback leaves the connection unclean (T096): `release(err)`
+      // makes `pg` destroy it rather than pool it.
+      await client.query('ROLLBACK').catch((error) => {
+        rollbackError = error
+      })
       throw err
     } finally {
-      client.release()
+      client.release(rollbackError)
     }
   }
 

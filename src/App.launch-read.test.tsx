@@ -360,3 +360,64 @@ describe('T083 — a database that cannot be read at launch', () => {
     expect(container.querySelector('[data-testid="library-unreadable"]')).toBeNull()
   })
 })
+
+/**
+ * A store that cannot be read until a restore writes it — the recovery the
+ * T083 screen exists for.
+ */
+function unreadableUntilRestoredDeckStore(): DeckStore {
+  let restored: Library | undefined
+  const refuse = () => Promise.reject(new Error('UnknownError: the database could not be opened'))
+  return {
+    loadAll: () =>
+      restored
+        ? Promise.resolve(restored.decks.map(({ id, name, phrases }) => ({ id, name, phrases })))
+        : (refuse() as Promise<Deck[]>),
+    get: refuse as DeckStore['get'],
+    save: refuse as DeckStore['save'],
+    update: refuse as DeckStore['update'],
+    remove: refuse as DeckStore['remove'],
+    exportAll: () => (restored ? Promise.resolve(restored) : (refuse() as Promise<Library>)),
+    importAll: async (library) => {
+      restored = library
+    },
+    updateAll: refuse as DeckStore['updateAll'],
+  }
+}
+
+describe('T096 — a restore from the unreadable-library screen that succeeds', () => {
+  it('takes away the "could not open" notice, because the library is readable now', async () => {
+    const deckStore = unreadableUntilRestoredDeckStore()
+    // The engine runs the write it is handed, as the real one does (T081).
+    const syncEngine = drivableSyncEngine()
+    syncEngine.libraryRestored = (write) => write()
+
+    await render(deckStore, settings(), syncEngine)
+    await settle()
+    expect(container.querySelector('[data-testid="library-unreadable"]')).not.toBeNull()
+    expect(container.textContent).toContain('could not open your saved phrases')
+
+    const backup: Library = {
+      ...emptyLibrary(),
+      decks: [{ id: 'd1', name: 'Café', phrases: [], createdAt: 1, updatedAt: 1 }],
+    }
+    const file = new File([JSON.stringify(backup)], 'backup.json', { type: 'application/json' })
+    const input = container.querySelector('[data-testid="restore-file-input"]') as HTMLInputElement
+    Object.defineProperty(input, 'files', {
+      value: { 0: file, length: 1, item: () => file } as unknown as FileList,
+      configurable: true,
+    })
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+    await settle()
+    await act(async () => {
+      ;(container.querySelector('[data-testid="restore-confirm"]') as HTMLButtonElement).click()
+    })
+    await settle()
+
+    expect(container.textContent).toContain('Café')
+    expect(container.querySelector('[data-testid="library-unreadable"]')).toBeNull()
+    // "Close the app and open it again" is wrong advice once the restore has
+    // landed: their library is on screen and readable.
+    expect(container.textContent).not.toContain('could not open your saved phrases')
+  })
+})

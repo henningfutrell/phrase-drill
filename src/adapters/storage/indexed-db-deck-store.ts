@@ -10,7 +10,7 @@ import { splitDuplicateIds } from './duplicate-ids'
 import { buildLibrary, migrateLibraryDecks, migrateLibraryMixes, migrateLibraryTombstones } from './library'
 import { sameLibraryContent } from './library-identity'
 import { fromRecord, toRecord } from './mapping'
-import type { DeckRecord, MixRecord, Tombstone } from './migrations'
+import { CURRENT_SCHEMA_VERSION, type DeckRecord, type MixRecord, type Tombstone } from './migrations'
 import { requestPersistence } from './persistence'
 
 /** The three object stores the whole `Library` envelope is written across. */
@@ -212,16 +212,28 @@ export function createIndexedDbDeckStore(): DeckStore {
         // server handing the duplicate back forever and the baseline
         // describing a device that does not exist.
         const next = splitDuplicateIds(update(stored))
+        // Migrate before comparing and before returning (T096), for the same
+        // reason as the split above: what is written is the migrated library,
+        // so the skip and the caller must see that library, not the one
+        // `update` handed in. Returning `next` was harmless only while every
+        // deck migration was the identity.
         const migratedDecks = migrateLibraryDecks(next)
         const migratedMixes = migrateLibraryMixes(next)
         const migratedTombstones = migrateLibraryTombstones(next)
+        const written: Library = {
+          ...next,
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          decks: migratedDecks,
+          mixes: migratedMixes,
+          tombstones: migratedTombstones,
+        }
 
-        if (sameLibraryContent(stored, next)) {
-          return { library: next, changed: false }
+        if (sameLibraryContent(stored, written)) {
+          return { library: written, changed: false }
         }
 
         await replaceAll({ deckStore, mixStore, tombstoneStore }, migratedDecks, migratedMixes, migratedTombstones)
-        return { library: next, changed: true }
+        return { library: written, changed: true }
       })
     },
 
