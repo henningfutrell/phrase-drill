@@ -8,6 +8,7 @@ import { createApp } from './app.js'
 import { createLibraryStore, createClipStore } from './db.js'
 import { fakeLibraryPool, fakeClipPool, fakeClipStorage } from './pool.test-support.js'
 import { createRateLimiter } from './rate-limiter.js'
+import { createDailySpendCap } from './daily-spend-cap.js'
 import { createBoundedQueue } from './bounded-queue.js'
 import { createElevenLabsProvider } from './providers/elevenlabs-client.js'
 import { createClipJobRunner } from './clip-job-runner.js'
@@ -234,6 +235,10 @@ describe('server app (integration, fake upstreams)', () => {
     // Wraps the real store, for a test that has to hold one request at a
     // chosen point to force an interleaving (T095).
     libraryStoreWith = (store) => store,
+    // Billed provider calls one account may start per UTC day. High by
+    // default so a test that is not about the cap never meets it.
+    elevenLabsSpendLimit = 1_000,
+    anthropicSpendLimit = 1_000,
   } = {}) {
     elevenLabsUpstream = elevenLabsFetch
     libraryStore = libraryStoreWith(await newLibraryStore())
@@ -266,6 +271,8 @@ describe('server app (integration, fake upstreams)', () => {
       scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
       translateLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+      elevenLabsSpendCap: createDailySpendCap({ limit: elevenLabsSpendLimit }),
+      anthropicSpendCap: createDailySpendCap({ limit: anthropicSpendLimit }),
       distDir,
       logger,
       verifyAccessToken: fakeVerifyAccessToken(),
@@ -648,6 +655,8 @@ describe('server app (integration, fake upstreams)', () => {
         scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         translateLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+        elevenLabsSpendCap: createDailySpendCap({ limit: 1_000 }),
+        anthropicSpendCap: createDailySpendCap({ limit: 1_000 }),
         distDir,
         logger,
         verifyAccessToken: fakeVerifyAccessToken(),
@@ -1402,6 +1411,8 @@ describe('server app (integration, fake upstreams)', () => {
         scanLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         libraryLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
         translateLimiter: createRateLimiter({ capacity: 3, refillMs: 60_000 }),
+        elevenLabsSpendCap: createDailySpendCap({ limit: 1_000 }),
+        anthropicSpendCap: createDailySpendCap({ limit: 1_000 }),
         distDir,
         logger,
         verifyAccessToken: fakeVerifyAccessToken(),
@@ -1834,6 +1845,57 @@ describe('server app (integration, fake upstreams)', () => {
       // The poisoned bytes are kept, not dropped — they are the only record
       // of what went wrong.
       expect((await libraryStore.versions(SUB))[0].data).toBe('{"schemaVersion":null}')
+    })
+  })
+
+  /**
+   * The daily spend cap (hardening for the Supabase cutover). After cutover
+   * any valid Supabase access token reaches these routes, so the rate limits
+   * alone would let one leaked token spend all day. The cap counts only what
+   * can bill: a new generation, a regeneration, a scan, a translation. A
+   * cache hit, or a re-poll of a generation already running, spends nothing.
+   */
+  describe('daily spend cap', () => {
+    const post = (path, body, contentType = 'application/json') =>
+      fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': contentType },
+        body,
+      })
+
+    it('refuses a new generation over the cap with 429 and never calls ElevenLabs', async () => {
+      await boot({ elevenLabsSpendLimit: 1 })
+      expect((await post('/api/tts', ttsBody({ text: 'un' }))).status).toBe(200)
+      const refused = await post('/api/tts', ttsBody({ text: 'deux' }))
+      expect(refused.status).toBe(429)
+      expect(await refused.json()).toEqual({ error: 'rate-limited' })
+      expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(0)
+      expect(elevenLabsUpstream.calls).toBe(1)
+      expect(logger.lines.map((l) => JSON.parse(l))).toContainEqual(expect.objectContaining({ level: 'error', msg: 'daily spend cap reached', provider: 'elevenlabs' }))
+    })
+
+    it('still serves a stored Clip after the cap is reached', async () => {
+      await boot({ elevenLabsSpendLimit: 1 })
+      expect((await post('/api/tts', ttsBody({ text: 'un' }))).status).toBe(200)
+      expect((await post('/api/tts', ttsBody({ text: 'un' }))).status).toBe(200)
+      expect(elevenLabsUpstream.calls).toBe(1)
+    })
+
+    it('counts a regeneration as a billed call', async () => {
+      await boot({ elevenLabsSpendLimit: 1 })
+      expect((await post('/api/tts', ttsBody({ text: 'un' }))).status).toBe(200)
+      expect((await post('/api/tts/regenerate', ttsBody({ text: 'un' }))).status).toBe(429)
+      expect(elevenLabsUpstream.calls).toBe(1)
+    })
+
+    it('shares one Anthropic cap between scan and translate', async () => {
+      const anthropicFetch = fetchAnthropicOk([])
+      let calls = 0
+      await boot({ anthropicSpendLimit: 1, anthropicFetch: (...args) => ((calls += 1), anthropicFetch(...args)) })
+      expect((await post('/api/scan', Buffer.from([0xff, 0xd8, 0xff, 0xdb]), 'image/jpeg')).status).toBe(200)
+      const refused = await post('/api/translate', JSON.stringify({ text: 'Can you come?', direction: 'en-to-fr', deckName: 'friends' }))
+      expect(refused.status).toBe(429)
+      expect(calls).toBe(1)
     })
   })
 

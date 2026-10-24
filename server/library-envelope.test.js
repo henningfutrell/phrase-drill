@@ -9,6 +9,7 @@ import { createApp, LIBRARY_MAX_SCHEMA_VERSION } from './app.js'
 import { createLibraryStore, createClipStore } from './db.js'
 import { fakeLibraryPool, fakeClipPool, fakeClipStorage } from './pool.test-support.js'
 import { createRateLimiter } from './rate-limiter.js'
+import { createDailySpendCap } from './daily-spend-cap.js'
 
 /**
  * T082, from the T079 audit's findings 2 and 5.
@@ -96,6 +97,8 @@ describe('/api/library — the server never stores an envelope it will later ref
       scanLimiter: createRateLimiter({ capacity: 50, refillMs: 60_000 }),
       libraryLimiter: createRateLimiter({ capacity: 50, refillMs: 60_000 }),
       translateLimiter: createRateLimiter({ capacity: 50, refillMs: 60_000 }),
+      elevenLabsSpendCap: createDailySpendCap({ limit: 50 }),
+      anthropicSpendCap: createDailySpendCap({ limit: 50 }),
       distDir,
       logger: silentLogger,
       verifyAccessToken: fakeVerifyAccessToken,
