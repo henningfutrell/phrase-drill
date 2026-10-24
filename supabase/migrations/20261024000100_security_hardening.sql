@@ -8,9 +8,9 @@
 -- here, and the Data API is switched off in the dashboard as well.
 --
 -- The policies are a second wall, not the first: with no grant they admit
--- nobody. If a grant is ever added by mistake, a signed-in user still sees
--- only the rows of their own library (`library_key` is their Supabase user
--- id), and the shared Clip cache stays closed to every API role.
+-- nobody. If a grant is ever added by mistake, a signed-in user still reads
+-- and writes only the rows of their own library (`library_key` is their
+-- Supabase user id), and the shared Clip cache stays closed to every API role.
 --
 -- Idempotent: cutover.sh applies it before the data and again after
 -- `--finalize`. Apply: psql -X -v ON_ERROR_STOP=1 --single-transaction -f <this file>
@@ -21,10 +21,13 @@ ALTER TABLE library_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE clips            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE clip_jobs        ENABLE ROW LEVEL SECURITY;
 
--- 2. Per-user policies. A library and its archived versions belong to one
--- user. Versions are written only by the server (on every PUT), so the policy
--- reads them and nothing more. `(select auth.uid())` is evaluated once per
--- statement, not once per row.
+-- 2. Policies on every table, so none has RLS on with no policy.
+--
+-- A library and its archived versions belong to one user: every operation is
+-- scoped to the rows whose `library_key` is that user. `(select auth.uid())`
+-- is evaluated once per statement, not once per row. `library_key` leads an
+-- index on both tables (the primary key of `libraries`,
+-- `library_versions_key_idx`), so the policy filter is an index lookup.
 DROP POLICY IF EXISTS libraries_own_rows ON libraries;
 CREATE POLICY libraries_own_rows ON libraries
   FOR ALL TO authenticated
@@ -33,12 +36,25 @@ CREATE POLICY libraries_own_rows ON libraries
 
 DROP POLICY IF EXISTS library_versions_own_rows ON library_versions;
 CREATE POLICY library_versions_own_rows ON library_versions
-  FOR SELECT TO authenticated
-  USING (library_key = (select auth.uid())::text);
+  FOR ALL TO authenticated
+  USING (library_key = (select auth.uid())::text)
+  WITH CHECK (library_key = (select auth.uid())::text);
 
 -- `clips` and `clip_jobs` are one cache shared by every user, keyed by the
--- content hash of a Clip, not by user. No row in them belongs to a user, so
--- there is no per-user policy to write: no policy is a refusal of every row.
+-- content hash of a Clip. No row in them belongs to a user or to one library
+-- (two libraries with the same phrase share its Clip), so there is no owner
+-- to scope to. The policy says so explicitly: no row, for any API role.
+DROP POLICY IF EXISTS clips_server_only ON clips;
+CREATE POLICY clips_server_only ON clips
+  FOR ALL TO anon, authenticated
+  USING (false)
+  WITH CHECK (false);
+
+DROP POLICY IF EXISTS clip_jobs_server_only ON clip_jobs;
+CREATE POLICY clip_jobs_server_only ON clip_jobs
+  FOR ALL TO anon, authenticated
+  USING (false)
+  WITH CHECK (false);
 
 -- 3. Minimal grants: nothing for the API roles, now or for objects made later.
 REVOKE ALL ON ALL TABLES    IN SCHEMA public FROM anon, authenticated;
@@ -50,7 +66,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON FUNCTI
 
 -- 4. Refuse to finish on a hole. The app has no functions today; this is what
 -- keeps a later one SECURITY INVOKER with a fixed search_path, and every
--- later table under RLS with no API grant.
+-- later table under RLS, with a policy, and with no API grant.
 DO $$
 DECLARE
   problems text;
@@ -59,6 +75,11 @@ BEGIN
     SELECT format('table %I has RLS off', c.relname) AS problem
     FROM pg_class c
     WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND NOT c.relrowsecurity
+    UNION ALL
+    SELECT format('table %I has RLS on and no policy', c.relname)
+    FROM pg_class c
+    WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND c.relrowsecurity
+      AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid)
     UNION ALL
     SELECT format('table %I is granted %s to %s', c.relname, p.privilege, r.rolname)
     FROM pg_class c

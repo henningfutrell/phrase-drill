@@ -29,7 +29,12 @@ const sql = (name) => readFileSync(join(migrationsDir, name), 'utf8')
 
 const USER_A = '00000000-0000-4000-8000-00000000000a'
 const USER_B = '00000000-0000-4000-8000-00000000000b'
+const USER_C = '00000000-0000-4000-8000-00000000000c'
 const TABLES = ['libraries', 'library_versions', 'clips', 'clip_jobs']
+const CACHE_ROWS = {
+  clips: (hash) => `INSERT INTO clips VALUES ('${hash}', 'p', 'audio/mpeg', 1, 1, 1, 1)`,
+  clip_jobs: (hash) => `INSERT INTO clip_jobs VALUES ('${hash}', 'p', 'm', 'v', 'en', 't', 'done', 1, 1, 1, 1, NULL, 1, 1)`,
+}
 
 describe.skipIf(!url)('supabase/migrations against a real Postgres', () => {
   const database = `migrations_${randomBytes(4).toString('hex')}`
@@ -75,6 +80,8 @@ describe.skipIf(!url)('supabase/migrations against a real Postgres', () => {
     for (const name of migrations) await db.query(sql(name))
     await db.query(`INSERT INTO libraries VALUES ($1, '{}', 1), ($2, '{}', 1)`, [USER_A, USER_B])
     await db.query(`INSERT INTO library_versions (library_key, data, updated_at, archived_at) VALUES ($1, '{}', 1, 1), ($2, '{}', 1, 1)`, [USER_A, USER_B])
+    await db.query(CACHE_ROWS.clips('h1'))
+    await db.query(CACHE_ROWS.clip_jobs('h1'))
   })
 
   afterAll(async () => {
@@ -106,6 +113,76 @@ describe.skipIf(!url)('supabase/migrations against a real Postgres', () => {
       return [...libraries.rows, ...versions.rows].map((r) => r.library_key)
     })
     expect(own).toEqual([USER_A, USER_A])
+  })
+
+  /** Runs `fn` as `authenticated` with `sub` as the user, after granting the API roles every table privilege. */
+  const asGrantedUser = (sub, fn) =>
+    as('postgres', null, async (c) => {
+      await c.query(`GRANT ALL ON ${TABLES.join(', ')} TO authenticated`)
+      await c.query('GRANT ALL ON SEQUENCE library_versions_id_seq TO authenticated')
+      await c.query(`SELECT set_config('request.jwt.claim.sub', $1, true)`, [sub])
+      await c.query('SET LOCAL ROLE authenticated')
+      return fn(c)
+    })
+
+  it('lets a granted user write their own library rows', async () => {
+    const counts = await asGrantedUser(USER_A, async (c) => [
+      (await c.query(`UPDATE libraries SET data = 'mine' WHERE library_key = $1`, [USER_A])).rowCount,
+      (await c.query(`INSERT INTO library_versions (library_key, data, updated_at, archived_at) VALUES ($1, '{}', 2, 2)`, [USER_A])).rowCount,
+      (await c.query(`UPDATE library_versions SET data = 'mine' WHERE library_key = $1`, [USER_A])).rowCount,
+      (await c.query(`DELETE FROM library_versions WHERE library_key = $1`, [USER_A])).rowCount,
+      (await c.query(`DELETE FROM libraries WHERE library_key = $1`, [USER_A])).rowCount,
+    ])
+    expect(counts).toEqual([1, 1, 2, 2, 1])
+  })
+
+  it('hides another user’s library rows from a granted user', async () => {
+    const counts = await asGrantedUser(USER_B, async (c) => [
+      (await c.query(`SELECT 1 FROM libraries WHERE library_key = $1`, [USER_A])).rowCount,
+      (await c.query(`SELECT 1 FROM library_versions WHERE library_key = $1`, [USER_A])).rowCount,
+      (await c.query(`UPDATE libraries SET data = 'theirs' WHERE library_key = $1`, [USER_A])).rowCount,
+      (await c.query(`UPDATE library_versions SET data = 'theirs' WHERE library_key = $1`, [USER_A])).rowCount,
+      (await c.query(`DELETE FROM libraries WHERE library_key = $1`, [USER_A])).rowCount,
+      (await c.query(`DELETE FROM library_versions WHERE library_key = $1`, [USER_A])).rowCount,
+    ])
+    expect(counts).toEqual([0, 0, 0, 0, 0, 0])
+  })
+
+  it('refuses a granted user a row in another user’s name', async () => {
+    await expect(
+      asGrantedUser(USER_B, (c) => c.query(`INSERT INTO libraries VALUES ($1, '{}', 1)`, [USER_C])),
+    ).rejects.toMatchObject({ code: '42501' })
+    await expect(
+      asGrantedUser(USER_B, (c) =>
+        c.query(`INSERT INTO library_versions (library_key, data, updated_at, archived_at) VALUES ($1, '{}', 1, 1)`, [USER_A]),
+      ),
+    ).rejects.toMatchObject({ code: '42501' })
+    await expect(
+      asGrantedUser(USER_B, (c) => c.query(`UPDATE libraries SET library_key = $1 WHERE library_key = $2`, [USER_C, USER_B])),
+    ).rejects.toMatchObject({ code: '42501' })
+  })
+
+  for (const table of ['clips', 'clip_jobs']) {
+    it(`keeps the shared ${table} cache closed to a granted user`, async () => {
+      const counts = await asGrantedUser(USER_A, async (c) => [
+        (await c.query(`SELECT 1 FROM ${table}`)).rowCount,
+        (await c.query(`UPDATE ${table} SET created_at = 2`)).rowCount,
+        (await c.query(`DELETE FROM ${table}`)).rowCount,
+      ])
+      expect(counts).toEqual([0, 0, 0])
+      await expect(
+        asGrantedUser(USER_A, (c) => c.query(CACHE_ROWS[table]('h2'))),
+      ).rejects.toMatchObject({ code: '42501' })
+    })
+  }
+
+  it('refuses to finish when a public table has RLS on and no policy', async () => {
+    await db.query('CREATE TABLE public.policyless (id int); ALTER TABLE public.policyless ENABLE ROW LEVEL SECURITY')
+    try {
+      await expect(reapplyHardening()).rejects.toThrow(/table policyless has RLS on and no policy/)
+    } finally {
+      await db.query('DROP TABLE public.policyless')
+    }
   })
 
   it('is idempotent', async () => {
