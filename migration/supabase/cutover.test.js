@@ -49,7 +49,7 @@ case "$tool" in
   curl)
     case "$args" in
       */storage/v1/bucket/*) printf '%s' "$STUB_BUCKET_CODE" ;;
-      */rest/v1/*) printf '%s' "$STUB_REST_CODE" ;;
+      */rest/v1/*) printf '%s\\n%s' "$STUB_REST_BODY" "$STUB_REST_CODE" ;;
       *) echo "unexpected curl: $args" >&2; exit 99 ;;
     esac ;;
   psql)
@@ -101,6 +101,7 @@ function run(args, { env = ENV, stub = {} } = {}) {
       STUB_PG_MAJOR: '18',
       STUB_BUCKET_CODE: '200',
       STUB_REST_CODE: '401',
+      STUB_REST_BODY: '{}',
       STUB_FINGERPRINT_BEFORE: '1/100/2/3',
       STUB_FINGERPRINT_AFTER: '1/100/2/3',
       STUB_RENDER_USER: '1',
@@ -337,6 +338,29 @@ describe('cutover.sh — refusals after the data phase', () => {
     expect(status).toBe(1)
     expect(output).toContain(
       'REST libraries: HTTP 200 — readable with the publishable key',
+    )
+  })
+
+  it('counts 503 PGRST002 as refused: the Data API is off', () => {
+    const { status, output } = run(['--workdir', workdir, '--yes'], {
+      stub: {
+        STUB_REST_CODE: '503',
+        STUB_REST_BODY:
+          '{"code":"PGRST002","details":null,"hint":null,"message":"Could not query the database for the schema cache. Retrying."}',
+      },
+    })
+    expect(status).toBe(0)
+    expect(output).toContain('REST libraries: HTTP 503 (refused)')
+    expect(output).toContain('CUTOVER DATA PHASE DONE')
+  })
+
+  it('fails on a 503 that is not PGRST002: an outage is not a refusal', () => {
+    const { status, output } = run(['--workdir', workdir, '--yes'], {
+      stub: { STUB_REST_CODE: '503', STUB_REST_BODY: 'Service Unavailable' },
+    })
+    expect(status).toBe(1)
+    expect(output).toContain(
+      'REST libraries: HTTP 503 — readable with the publishable key',
     )
   })
 
