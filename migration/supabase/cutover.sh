@@ -58,6 +58,9 @@ exec > >(tee -a "$log") 2>&1
 src_q() { psql -X -At -v ON_ERROR_STOP=1 "$RENDER_EXTERNAL_URL" -c "$1"; }
 dst_q() { psql -X -At -v ON_ERROR_STOP=1 "$SUPABASE_DB_URL" -c "$1"; }
 dst_f() { psql -X -q -v ON_ERROR_STOP=1 "$SUPABASE_DB_URL" -f "$here/$1"; }
+# supabase/migrations, in order, each in one transaction. The app-tables one is
+# a no-op after 001_schema.sql; the hardening one is idempotent.
+dst_migrations() { for f in "$repo"/supabase/migrations/*.sql; do psql -X -q -v ON_ERROR_STOP=1 --single-transaction "$SUPABASE_DB_URL" -f "$f"; done; }
 clips() { (cd "$workdir" && node "$repo/scripts/clips-to-storage.mjs" "$@"); }
 step() { printf '\n== %s\n' "$*"; }
 render_fingerprint() {
@@ -81,9 +84,9 @@ if [ "$yes" != 1 ]; then
 fi
 dst_q 'DROP TABLE IF EXISTS clip_jobs, clips, library_versions, libraries CASCADE'
 
-step "001 schema, then 004 RLS before any data"
+step "001 schema, then supabase/migrations (RLS, policies, grants) before any data"
 dst_f 001_schema.sql
-dst_f 004_rls.sql
+dst_migrations
 
 step "002 data"
 "$here/002_data.sh"
@@ -124,11 +127,22 @@ clips --finalize
 clips --verify-only
 clips --sweep
 
-step "RLS again, and the publishable key must be refused"
-dst_f 004_rls.sql
+step "supabase/migrations again, and the publishable key must be refused"
+dst_migrations
+# Refused: 401/403/404, or 503 PGRST002, which is what PostgREST answers for
+# every table once the Data API is off (no schema exposed). Any other 503 is
+# an outage, not a refusal, so the body is read too.
+rest_refused() {
+  case "$1" in
+    401|403|404) return 0 ;;
+    503) case "$2" in *'"code":"PGRST002"'*) return 0 ;; esac ;;
+  esac
+  return 1
+}
 for table in libraries library_versions clips clip_jobs; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "$SUPABASE_URL/rest/v1/$table?select=*&limit=1" -H "apikey: $SUPABASE_PUBLISHABLE_KEY")
-  case "$code" in 401|403|404) echo "REST $table: HTTP $code (refused)" ;; *) echo "REST $table: HTTP $code — readable with the publishable key" >&2; exit 1 ;; esac
+  body=$(curl -s -w '\n%{http_code}' "$SUPABASE_URL/rest/v1/$table?select=*&limit=1" -H "apikey: $SUPABASE_PUBLISHABLE_KEY")
+  code=${body##*$'\n'} body=${body%$'\n'*}
+  if rest_refused "$code" "$body"; then echo "REST $table: HTTP $code (refused)"; else echo "REST $table: HTTP $code — readable with the publishable key" >&2; exit 1; fi
 done
 
 step "Render unchanged during the run"
