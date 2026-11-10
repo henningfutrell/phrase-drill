@@ -1,0 +1,13 @@
+{
+  // The integration tests: excluded from tsconfig.app.json because they import
+  // Node built-ins and the server's plain-JS modules, which the browser project
+  // must not see. Without this project no typecheck compiled them at all.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.integration.tsbuildinfo",
+    "types": ["vite/client", "node"],
+    "allowJs": true
+  },
+  "include": ["src/**/*.integration.test.ts", "src/vite-env.d.ts"],
+  "exclude": []
+}

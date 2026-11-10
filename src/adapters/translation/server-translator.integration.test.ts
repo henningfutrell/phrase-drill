@@ -43,6 +43,9 @@ async function boot(anthropicFetch: typeof fetch) {
     libraryStore: { get: async () => undefined, put: async () => {} },
     clipStore: { get: async () => null, put: async () => {} },
     elevenLabs: { synthesize: async () => ({ bytes: new ArrayBuffer(0), durationMs: 0 }) },
+    // `/api/translate` never reaches the clip job queue.
+    clipJobStore: {},
+    clipJobRunner: {},
     anthropic,
     ttsLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     scanLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),

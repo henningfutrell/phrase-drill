@@ -20,6 +20,7 @@ export function createRateLimiter({ capacity, refillMs, now = Date.now }) {
     /**
      * Consumes one token for `bucketKey` if there is one to spend.
      * `{ ok: true }`, or `{ ok: false, retryAfterMs }`.
+     * @returns {{ ok: true } | { ok: false, retryAfterMs: number }}
      */
     allow(bucketKey) {
       const t = now()
