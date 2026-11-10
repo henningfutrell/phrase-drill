@@ -8,6 +8,9 @@
 //   (the password is read from stdin, never from argv)
 //
 // Exits non-zero unless every library has an auth user afterwards.
+// The password passes server/password-policy.js first (12+ characters, a
+// letter, a digit, not in HaveIBeenPwned); a refusal exits non-zero and
+// creates nothing. Needs egress to api.pwnedpasswords.com.
 
 import { createInterface } from 'node:readline'
 import { Writable } from 'node:stream'
@@ -15,6 +18,7 @@ import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { createSupabase } from '../server/supabase.js'
+import { createPasswordPolicy, describeRefusal } from '../server/password-policy.js'
 import { connectionConfig } from './clips-to-storage.mjs'
 
 export const ORPHAN_LIBRARIES_SQL =
@@ -70,11 +74,13 @@ export function idRewriteSql(oldId, newId) {
 }
 
 /**
- * Creates the user. If the API refuses the requested `id`, creates the user
+ * Creates the user, once `checkPassword` accepts the password. If the API refuses the requested `id`, creates the user
  * with a generated one and returns the SQL that moves their library onto it — it
  * is printed for the operator, never run.
  */
-export async function createUser({ supabase, id, email, password }) {
+export async function createUser({ supabase, id, email, password, checkPassword }) {
+  const verdict = await checkPassword(password)
+  if (!verdict.ok) throw new Error(describeRefusal(verdict.reason))
   const attrs = { email, password, email_confirm: true }
   const first = await supabase.auth.admin.createUser(id ? { id, ...attrs } : attrs)
   if (!first.error) return { ok: true, id: first.data.user.id }
@@ -109,10 +115,9 @@ async function main() {
   const missing = ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'SUPABASE_DB_URL'].filter((n) => !env[n])
   if (missing.length > 0) throw new Error(`unset: ${missing.join(', ')}`)
   const password = await readSecretFrom({ input: process.stdin, output: process.stderr })
-  if (password.length === 0) throw new Error('empty password refused')
 
   const supabase = createSupabase({ url: env.SUPABASE_URL, secretKey: env.SUPABASE_SECRET_KEY })
-  const result = await createUser({ supabase, id: args.id, email: args.email, password })
+  const result = await createUser({ supabase, id: args.id, email: args.email, password, checkPassword: createPasswordPolicy() })
   if (result.ok) console.error(`created ${args.email} as ${result.id}`)
   else {
     console.error(`the API refused id ${args.id} (${result.reason}); created ${args.email} as ${result.id} instead.`)
