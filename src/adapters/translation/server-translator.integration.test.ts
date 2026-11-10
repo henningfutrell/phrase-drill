@@ -57,6 +57,9 @@ async function boot(anthropicFetch: typeof fetch) {
     distDir: import.meta.dirname,
     logger: { info() {}, warn() {}, error() {} },
     verifyAccessToken: fakeVerifyAccessToken,
+    // `/api/translate` never sets a password.
+    checkPassword: async () => ({ ok: true }),
+    setUserPassword: async () => ({ ok: true }),
   })
   server = createServer(handleRequest)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
