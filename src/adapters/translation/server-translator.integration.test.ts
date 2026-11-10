@@ -9,6 +9,7 @@ import { createServer, type Server } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createApp } from '../../../server/app.js'
 import { createRateLimiter } from '../../../server/rate-limiter.js'
+import { createDailySpendCap } from '../../../server/daily-spend-cap.js'
 import { createBoundedQueue } from '../../../server/bounded-queue.js'
 import { createAnthropicProvider } from '../../../server/providers/anthropic-client.js'
 import { createServerTranslator } from './server-translator'
@@ -51,9 +52,14 @@ async function boot(anthropicFetch: typeof fetch) {
     scanLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     libraryLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
     translateLimiter: createRateLimiter({ capacity: 100, refillMs: 60_000 }),
+    elevenLabsSpendCap: createDailySpendCap({ limit: 100 }),
+    anthropicSpendCap: createDailySpendCap({ limit: 100 }),
     distDir: import.meta.dirname,
     logger: { info() {}, warn() {}, error() {} },
     verifyAccessToken: fakeVerifyAccessToken,
+    // `/api/translate` never sets a password.
+    checkPassword: async () => ({ ok: true }),
+    setUserPassword: async () => ({ ok: true }),
   })
   server = createServer(handleRequest)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
