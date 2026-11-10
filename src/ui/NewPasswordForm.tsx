@@ -5,7 +5,12 @@ import './LoginScreen.css'
 
 const ERROR_COPY: Record<Exclude<PasswordChangeResult, { ok: true }>['reason'] | 'mismatch', string> = {
   mismatch: "The two passwords don't match — type them again.",
-  'weak-password': 'That password is too short or too simple — try a longer one.',
+  'too-short': 'That password is too short — use at least 12 characters.',
+  'no-letter': 'That password needs at least one letter.',
+  'no-digit': 'That password needs at least one number.',
+  breached: 'That password is in a known data breach, so others may try it — choose a different one.',
+  unverified: "Couldn't verify password safety, try again.",
+  'weak-password': 'That password is too simple — use at least 12 characters, with letters and numbers.',
   'same-password': "That's the password you already have — choose a different one.",
   'signed-out': 'You were signed out — sign in again, then change it.',
   network: "That didn't work — check the connection and try again.",

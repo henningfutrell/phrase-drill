@@ -19,7 +19,8 @@ user's phone, not for hypothetical others.
   behavior), not Chrome's.
 - **The server holds the keys, the user never touches one (T041).** `server/`
   is a plain-Node HTTP server — no framework. Its one vendor SDK is
-  `@supabase/supabase-js`, for Supabase Auth (token verification) and
+  `@supabase/supabase-js`, for Supabase Auth (token verification, and
+  setting a password `POST /api/password` has checked) and
   Storage (the Clip bytes); the database is Supabase Postgres over `pg`.
   The provider APIs (ElevenLabs, Anthropic) stay plain `fetch`. It owns both
   provider credentials (`ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, env only)
