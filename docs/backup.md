@@ -34,7 +34,7 @@ a copy of their library. It does not.
 | **The device copy** | Their phone holds their library in IndexedDB and syncs it; after a total server loss the next push restores it. | Their phone, continuously | Their iPhone |
 | **The daily restore drill** | Proves the newest real backup restores: it is downloaded, decrypted and restored into a throwaway Postgres, and every `public` table must have the source's row count. A backup nobody restored is a guess. | The same box step, after each backup | Nowhere: the scratch cluster is deleted |
 
-Topology: the server runs on Render (`starter`); the database, Auth and
+Topology: the server runs on Render (`free`); the database, Auth and
 Storage are Supabase (Free). Session pooler, port 5432. **Enforce SSL** is on,
 sign-ups are off, the Data API is off (RLS on every table anyway).
 
